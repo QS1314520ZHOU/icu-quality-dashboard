@@ -1,12 +1,49 @@
 # main.py
-from fastapi import FastAPI
-from datetime import date, datetime
+from fastapi import FastAPI, BackgroundTasks
+from datetime import date, datetime, timedelta
 from ai_analyzer import analyze
 from db import get_open_bed_count, get_occupied_bed_days, get_staff_count, get_icu04_apache_data, get_bundle_data, get_icu08_data, get_icu06_data, get_dvt_prevention_patients, get_client, BED_DB_NAMES, PROFESSION_CN
 import random
-import time
+import time as time_module
+import threading
+import summary as summary_module
 
 app = FastAPI(title="ICU质控指标API")
+
+# ---- 定时调度（后台线程，每天凌晨跑一次） ----
+_scheduler_started = False
+
+
+def _start_scheduler():
+    global _scheduler_started
+    if _scheduler_started:
+        return
+    _scheduler_started = True
+
+    def _run_daily():
+        while True:
+            now = datetime.now()
+            # 每天凌晨 2:00 执行
+            next_run = now.replace(hour=2, minute=0, second=0, microsecond=0)
+            if now >= next_run:
+                next_run += timedelta(days=1)
+            wait_sec = (next_run - now).total_seconds()
+            time_module.sleep(wait_sec)
+            try:
+                print(f"[scheduler] Starting daily rebuild at {datetime.now()}")
+                summary_module.rebuild_recent(months=13)
+            except Exception as e:
+                print(f"[scheduler] Error: {e}")
+
+    t = threading.Thread(target=_run_daily, daemon=True)
+    t.start()
+    print("[scheduler] Daily rebuild scheduler started")
+
+
+@app.on_event("startup")
+def on_startup():
+    summary_module.ensure_summary_collection()
+    _start_scheduler()
 
 # 简易缓存（TTL 60秒）
 _cache = {}
@@ -19,13 +56,13 @@ def _cache_key(prefix, *args):
 
 def _cache_get(key):
     entry = _cache.get(key)
-    if entry and time.time() - entry["ts"] < _CACHE_TTL:
+    if entry and time_module.time() - entry["ts"] < _CACHE_TTL:
         return entry["val"]
     return None
 
 
 def _cache_set(key, val):
-    _cache[key] = {"val": val, "ts": time.time()}
+    _cache[key] = {"val": val, "ts": time_module.time()}
 
 # deptCode → 科室名称映射（从 department 表读取，带缓存兜底）
 DEPT_MAP = {
@@ -505,16 +542,36 @@ def query_detail(code: str, period: str, part: str, icu_unit: str = "all"):
     if code == "ICU-06":
         data = get_icu06_data(dept_codes, start_date, end_date)
         if part == "numerator":
-            items = [{"patient_id": p.get("mrn", ""), "name": p.get("name", ""),
-                      "gender": "", "age": "", "bed_no": "送检在抗生素前", "dept": "",
-                      "admit_time": "", "discharge_time": "", "admission_source": "", "value": 1}
-                     for p in data.get("num_patients", [])]
+            items = []
+            for p in data.get("num_patients", []):
+                tt = p.get("test_time")
+                items.append({
+                    "patient_id": p.get("patient_id", p.get("mrn", "")),
+                    "name": p.get("name", ""),
+                    "gender": "", "age": "",
+                    "bed_no": p.get("test_source", ""),
+                    "dept": p.get("test_name", "")[:60],
+                    "admit_time": tt.strftime("%Y-%m-%d %H:%M") if hasattr(tt, 'strftime') else str(tt)[:16] if tt else "",
+                    "discharge_time": "",
+                    "admission_source": "",
+                    "value": 1,
+                })
             return items
         else:
-            items = [{"patient_id": p.get("mrn", ""), "name": p.get("name", ""),
-                      "gender": "", "age": "", "bed_no": "有抗生素医嘱", "dept": "",
-                      "admit_time": "", "discharge_time": "", "admission_source": "", "value": 1}
-                     for p in data.get("den_patients", [])]
+            items = []
+            for p in data.get("den_patients", []):
+                at = p.get("abx_time")
+                items.append({
+                    "patient_id": p.get("patient_id", p.get("mrn", "")),
+                    "name": p.get("name", ""),
+                    "gender": "", "age": "",
+                    "bed_no": "抗菌药",
+                    "dept": p.get("abx_drug", "")[:60],
+                    "admit_time": at.strftime("%Y-%m-%d %H:%M") if hasattr(at, 'strftime') else str(at)[:16] if at else "",
+                    "discharge_time": "",
+                    "admission_source": "",
+                    "value": 1,
+                })
             return items
 
     # ---- ICU-07：DVT预防率明细 ----
@@ -958,3 +1015,86 @@ def get_departments():
         ]
 
     return departments
+
+
+# ---- 预聚合汇总表接口 ----
+
+@app.get("/api/summary/list")
+def summary_list(dept: str = "all", start_period: str = "", end_period: str = ""):
+    """
+    从 icu_monthly_summary 汇总表读取指标数据（毫秒级）。
+    """
+    dept_codes = _resolve_dept_codes(dept)
+    periods = []
+    if start_period and end_period:
+        sy, sm = start_period.split("-")
+        ey, em = end_period.split("-")
+        y, m = int(sy), int(sm)
+        while (y < int(ey)) or (y == int(ey) and m <= int(em)):
+            periods.append(f"{y}-{m:02d}")
+            m += 1
+            if m > 12: m, y = 1, y + 1
+    elif start_period:
+        periods = [start_period]
+    else:
+        periods = [f"{datetime.now().year}-{datetime.now().month:02d}"]
+
+    rows = summary_module.read_summary(dept_codes, periods)
+    return rows
+
+
+@app.post("/api/admin/rebuild-summary")
+def admin_rebuild(dept: str = "all", start_period: str = "", end_period: str = "",
+                  indicators: str = ""):
+    """
+    手动触发预聚合。可指定范围。
+    POST /api/admin/rebuild-summary?dept=all&start_period=2024-01&end_period=2025-12
+    """
+    dept_codes = _resolve_dept_codes(dept)
+    periods = []
+    if start_period and end_period:
+        sy, sm = start_period.split("-")
+        ey, em = end_period.split("-")
+        y, m = int(sy), int(sm)
+        while (y < int(ey)) or (y == int(ey) and m <= int(em)):
+            periods.append(f"{y}-{m:02d}")
+            m += 1
+            if m > 12: m, y = 1, y + 1
+    else:
+        # 默认最近 13 个月
+        now = datetime.now()
+        for i in range(13):
+            d = now - timedelta(days=30 * i)
+            periods.append(f"{d.year}-{d.month:02d}")
+        periods = list(set(periods))
+        periods.sort()
+
+    ind_list = [i.strip() for i in indicators.split(",") if i.strip()] if indicators else None
+
+    stats = summary_module.rebuild_summary(dept_codes, periods, ind_list)
+    stats["dept_codes"] = dept_codes
+    stats["periods"] = periods
+    return stats
+
+
+@app.get("/api/admin/rebuild-status")
+def admin_rebuild_status():
+    """查看最近一次预聚合状态"""
+    for db_name in BED_DB_NAMES:
+        try:
+            db = get_client()[db_name]
+            coll = db["icu_monthly_summary"]
+            total = coll.count_documents({})
+            latest = list(coll.find({}, {"period": 1, "updated_at": 1, "_id": 0}).sort("updated_at", -1).limit(1))
+            periods = coll.distinct("period")
+            depts = coll.distinct("dept_code")
+            indicators = coll.distinct("indicator")
+            return {
+                "total_docs": total,
+                "periods": sorted(periods),
+                "depts": depts,
+                "indicators": sorted(indicators),
+                "latest_update": latest[0] if latest else None,
+            }
+        except Exception: continue
+    return {"error": "Database not available"}

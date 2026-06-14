@@ -1236,22 +1236,31 @@ def get_icu06_data(dept_codes: list, start_date: str, end_date: str) -> dict:
                 {"pid": {"$in": list(pid_set)}, "status": "finished",
                  "drugList.code": {"$in": abx_codes},
                  "startTime": {"$gte": start_dt, "$lte": end_dt_wide}},
-                {"pid": 1, "startTime": 1},
+                {"pid": 1, "startTime": 1, "drugList.code": 1, "drugList.name": 1},
             ).sort("startTime", 1))
 
-            abx_time = {}  # pid -> first antibiotic administration time
+            abx_time = {}   # pid -> first antibiotic administration time
+            abx_detail = {}  # pid -> {time, drug_name}
             for d in abx_docs:
                 pid = d.get("pid", "")
                 t = d.get("startTime")
                 if pid and t and pid not in abx_time:
                     abx_time[pid] = t
+                    # 取抗菌药名称
+                    drug_name = ""
+                    for dl in d.get("drugList", []):
+                        if dl.get("code") in abx_codes:
+                            drug_name = dl.get("name", "")[:60]
+                            break
+                    abx_detail[pid] = {"time": t, "drug": drug_name}
 
             result["den_count"] = len(abx_time)
             if not abx_time:
                 continue
 
             # ---- 4. 分子：送检时间 < 首剂抗生素时间 ----
-            test_time = {}  # pid -> earliest test time
+            test_time = {}   # pid -> earliest test time
+            test_detail = {} # pid -> {time, source, name}
 
             # hisPid 映射（跨库对齐键）
             smart_pid_by_hispid = {}
@@ -1273,21 +1282,22 @@ def get_icu06_data(dept_codes: list, start_date: str, end_date: str) -> dict:
                      "yaoType": "检验",
                      "orderName": {"$regex": CULTURE_KEYWORDS, "$options": "i"},
                      "orderTime": {"$gte": start_dt, "$lte": end_dt_wide}},
-                    {"pid": 1, "orderTime": 1},
+                    {"pid": 1, "orderTime": 1, "orderName": 1},
                 ).sort("orderTime", 1))
                 for o in culture_orders:
-                    hp = o.get("pid", "")  # pid 即 hisPid
+                    hp = o.get("pid", "")
                     t = o.get("orderTime")
                     spid = smart_pid_by_hispid.get(hp)
                     if spid and t and (spid not in test_time or t < test_time[spid]):
                         test_time[spid] = t
+                        test_detail[spid] = {"time": t, "source": "检验医嘱", "name": o.get("orderName", "")[:80]}
 
                 # 源B: VI_ICU_EXAM_ITEM (排除降钙素原) + VI_ICU_EXAM.collectTime
                 exam_items = list(dc["VI_ICU_EXAM_ITEM"].find(
                     {"hisPid": {"$in": hispids},
                      "itemName": {"$not": {"$regex": EXCLUDE_ITEM}},
                      "authTime": {"$gte": start_dt, "$lte": end_dt_wide}},
-                    {"hisPid": 1, "examID": 1, "authTime": 1},
+                    {"hisPid": 1, "examID": 1, "authTime": 1, "itemName": 1},
                 ).sort("authTime", 1))
                 if exam_items:
                     eids = list(set(i["examID"] for i in exam_items if i.get("examID")))
@@ -1304,6 +1314,7 @@ def get_icu06_data(dept_codes: list, start_date: str, end_date: str) -> dict:
                         spid = smart_pid_by_hispid.get(hp)
                         if spid and ct and (spid not in test_time or ct < test_time[spid]):
                             test_time[spid] = ct
+                            test_detail[spid] = {"time": ct, "source": "检验报告", "name": item.get("itemName", "")[:60]}
 
             except Exception:
                 pass
@@ -1318,12 +1329,19 @@ def get_icu06_data(dept_codes: list, start_date: str, end_date: str) -> dict:
 
             result["den_patients"] = [
                 {"pid": pid, "mrn": pat_by_pid[pid].get("mrn", "") or pat_by_pid[pid].get("hisPid", ""),
-                 "name": pat_by_pid[pid].get("name", "")}
+                 "name": pat_by_pid[pid].get("name", ""),
+                 "abx_time": abx_detail.get(pid, {}).get("time"),
+                 "abx_drug": abx_detail.get(pid, {}).get("drug", ""),
+                 "patient_id": pat_by_pid[pid].get("hisPid", "")}
                 for pid in abx_time
             ]
             result["num_patients"] = [
                 {"pid": pid, "mrn": pat_by_pid[pid].get("mrn", "") or pat_by_pid[pid].get("hisPid", ""),
-                 "name": pat_by_pid[pid].get("name", "")}
+                 "name": pat_by_pid[pid].get("name", ""),
+                 "test_time": test_detail.get(pid, {}).get("time"),
+                 "test_source": test_detail.get(pid, {}).get("source", ""),
+                 "test_name": test_detail.get(pid, {}).get("name", ""),
+                 "patient_id": pat_by_pid[pid].get("hisPid", "")}
                 for pid in num_pids
             ]
             break
