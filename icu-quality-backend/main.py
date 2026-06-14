@@ -259,8 +259,8 @@ def query_summary(period: str, icu_unit: str = "all"):
     icu06_num = icu06_data["num_count"]
     icu06_den = icu06_data["den_count"]
     if icu06_den == 0:
-        icu06_num = _jitter(131, 0.1)
         icu06_den = icu04_den
+        icu06_num = 0  # 无抗生素数据时送检为0, 不用mock
 
     # ----- ICU-07：DVT预防率（DataCenter.VI_ICU_ZYYZ 医嘱包含匹配）-----
     dvt_data = get_dvt_prevention_patients(dept_codes, start_date, end_date)

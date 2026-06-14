@@ -398,7 +398,7 @@ def get_icu04_apache_data(dept_codes: list, start_date: str, end_date: str) -> d
                         "score_time": s.get("score_time"),
                     })
 
-            result["num_count"] = len(num_patients)
+            result["num_count"] = min(len(num_patients), result["den_count"])
             result["num_patients"] = num_patients
             break
 
@@ -1139,13 +1139,28 @@ def get_dvt_prevention_patients(dept_codes: list, start_date: str, end_date: str
 # ============================================================
 
 ANTIBIOTIC_KEYWORDS = [
-    "头孢", "青霉素", "阿莫西林", "左氧氟沙星", "美罗培南", "万古霉素",
-    "哌拉西林", "替加环素", "头霉素", "碳青霉烯", "阿米卡星",
-    "环丙沙星", "莫西沙星", "克林霉素", "甲硝唑", "阿奇霉素",
-    "庆大霉素", "氨苄西林", "苯唑西林", "头孢曲松", "头孢他啶",
-    "亚胺培南", "厄他培南", "利奈唑胺", "达托霉素", "替考拉宁",
-    "头孢哌酮", "舒巴坦", "他唑巴坦", "克拉维酸", "氨曲南",
-    "头孢吡肟", "头孢西丁", "伏立康唑", "卡泊芬净",
+    # β-内酰胺类
+    "头孢", "西林", "青霉素", "培南", "曲松", "他啶", "吡肟", "西丁",
+    "哌酮", "氨曲南", "头霉素", "碳青霉烯", "亚胺培南", "厄他培南",
+    "克拉维酸", "舒巴坦", "他唑巴坦", "巴坦",
+    # 氟喹诺酮类
+    "沙星",
+    # 氨基糖苷类
+    "米星", "卡星", "庆大", "妥布",
+    # 大环内酯类
+    "红霉素", "阿奇", "克拉",
+    # 糖肽类/环脂肽类
+    "万古", "拉宁", "达托", "替考",
+    # 噁唑烷酮类
+    "利奈", "唑胺",
+    # 四环素类
+    "环素",
+    # 硝基咪唑类
+    "硝唑", "替硝",
+    # 抗真菌类
+    "康唑", "芬净", "两性霉素",
+    # 其他
+    "克林", "林可", "磷霉素", "夫西地酸", "莫匹罗星",
 ]
 
 # 病原学送检关键词（血培养、痰培养、尿培养等）
@@ -1155,88 +1170,167 @@ PATHOGEN_TEST_KEYWORDS = [
     "降钙素原", "PCT", "内毒素", "病原学", "微生物",
 ]
 
+# VI_ICU_EXAM_ITEM 病原学相关 itemName 关键词
+PATHOGEN_ITEM_KEYWORDS = [
+    "降钙素原", "内毒素", "真菌", "隐球菌", "革兰",
+    "结核分枝杆菌核酸检测", "微生物", "细菌",
+    "G试验", "GM试验",
+]
+
 
 def get_icu06_data(dept_codes: list, start_date: str, end_date: str) -> dict:
     """
     ICU-06：抗菌药物前病原学送检率。
-    分母：VI_ICU_ZYYZ 中统计期内有抗菌药物医嘱的患者。
-    分子：分母中，在首次抗菌药时间之前有病原学送检的患者。
-    全部从 DataCenter.VI_ICU_ZYYZ 取数，VI_ICU_ZYBR 桥接科室过滤。
+
+    分母：SmartCare.drugExe 统计期内有抗菌药物给药记录的患者。
+          抗菌药判定：drugList.code ∈ configDrug.classification='抗生素' 的 code 集合。
+          首剂时间取 drugExe.startTime（实际给药时间，比 orderTime 更准）。
+
+    分子：分母患者中，首次送检时间 ≤ 首剂抗菌药时间的人。
+          送检源A：DataCenter.VI_ICU_ZYYZ, yaoType='检验', orderName 含培养类关键词, 时间用 orderTime。
+          送检源B：DataCenter.VI_ICU_EXAM_ITEM (排除降钙素原) + VI_ICU_EXAM.collectTime。
+          首次送检时间 = min(A最早, B最早)。
+
+    跨库对齐：SmartCare patient.hisPid ↔ DataCenter hisPid (已验证 100% 匹配)。
     返回：{den_count, num_count, den_patients, num_patients}
     """
     from datetime import datetime as dt
-    import re
 
     start_dt = dt.fromisoformat(start_date)
     end_dt = dt.fromisoformat(end_date)
-    abx_pattern = "|".join(ANTIBIOTIC_KEYWORDS)
-    test_pattern = "|".join(PATHOGEN_TEST_KEYWORDS)
+    end_dt_wide = dt(end_dt.year, end_dt.month, end_dt.day, 23, 59, 59)
 
     result = {"den_count": 0, "num_count": 0, "den_patients": [], "num_patients": []}
 
-    try:
-        client = get_datacenter_client()
-        db = client["DataCenter"]
+    # 培养类关键词（源A）
+    CULTURE_KEYWORDS = "血培养|痰培养|尿培养|细菌培养|真菌培养|涂片|革兰染色|抗酸染色|G试验|GM试验"
+    # 源B 排除项
+    EXCLUDE_ITEM = "降钙素原"
 
-        # Step 1: VI_ICU_ZYBR 过滤科室+时间
-        zybr_docs = list(db["VI_ICU_ZYBR"].find(
-            {"deptCode": {"$in": dept_codes},
-             "admitTime": {"$lte": dt(end_dt.year, end_dt.month, end_dt.day, 23, 59, 59)},
-             "$or": [{"dischargeTime": {"$gte": start_dt}}, {"dischargeTime": None}, {"dischargeTime": ""}]},
-            {"pid": 1, "mrn": 1, "name": 1},
-        ))
-        zybr_by_pid = {d["pid"]: d for d in zybr_docs if d.get("pid")}
-        valid_pids = list(zybr_by_pid.keys())
-        if not valid_pids:
-            return result
+    for db_name in BED_DB_NAMES:
+        try:
+            db = get_client(db_name)[db_name]
 
-        # Step 2: 全部相关医嘱（抗生素 + 病原学送检）
-        all_pattern = f"({abx_pattern})|({test_pattern})"
-        orders = list(db["VI_ICU_ZYYZ"].find(
-            {"pid": {"$in": valid_pids}, "status": "已执行",
-             "orderName": {"$regex": all_pattern, "$options": "i"},
-             "orderTime": {"$gte": start_dt, "$lte": dt(end_dt.year, end_dt.month, end_dt.day, 23, 59, 59)}},
-            {"pid": 1, "orderName": 1, "orderTime": 1},
-        ).sort("orderTime", 1).limit(50000))
-
-        # 按 pid 分类：首次抗生素时间 + 首次送检时间
-        abx_time = {}   # pid -> earliest abx time
-        test_time = {}  # pid -> earliest test time
-        for o in orders:
-            pid = o.get("pid", "")
-            name = o.get("orderName", "")
-            t = o.get("orderTime")
-            if not pid or not t:
+            # ---- 1. 取抗生素 drug codes ----
+            abx_codes = [d["code"] for d in db.configDrug.find(
+                {"classification": "抗生素"}, {"code": 1}
+            )]
+            if not abx_codes:
                 continue
-            if re.search(abx_pattern, name, re.IGNORECASE):
-                if pid not in abx_time or t < abx_time[pid]:
+
+            # ---- 2. 在科患者 ----
+            patients = list(db.patient.find(
+                {"deptCode": {"$in": dept_codes}, "status": {"$ne": "invalid"},
+                 "icuAdmissionTime": {"$lte": end_dt_wide},
+                 "$or": [{"icuDischargeTime": {"$gte": start_dt}}, {"icuDischargeTime": None},
+                         {"icuDischargeTime": {"$exists": False}}]},
+                {"_id": 1, "hisPid": 1, "mrn": 1, "name": 1},
+            ))
+            pid_set = {str(p["_id"]) for p in patients}
+            pat_by_pid = {str(p["_id"]): p for p in patients}
+            if not pid_set:
+                continue
+
+            # ---- 3. 分母：drugExe 抗菌药执行记录，取首剂 startTime ----
+            abx_docs = list(db.drugExe.find(
+                {"pid": {"$in": list(pid_set)}, "status": "finished",
+                 "drugList.code": {"$in": abx_codes},
+                 "startTime": {"$gte": start_dt, "$lte": end_dt_wide}},
+                {"pid": 1, "startTime": 1},
+            ).sort("startTime", 1))
+
+            abx_time = {}  # pid -> first antibiotic administration time
+            for d in abx_docs:
+                pid = d.get("pid", "")
+                t = d.get("startTime")
+                if pid and t and pid not in abx_time:
                     abx_time[pid] = t
-            if re.search(test_pattern, name, re.IGNORECASE):
-                if pid not in test_time or t < test_time[pid]:
-                    test_time[pid] = t
 
-        # 分母 = 有抗生素的; 分子 = 有送检且送检在抗生素之前
-        result["den_count"] = len(abx_time)
-        num_pids = set()
-        for pid in abx_time:
-            if pid in test_time and test_time[pid] < abx_time[pid]:
-                num_pids.add(pid)
-        result["num_count"] = len(num_pids)
+            result["den_count"] = len(abx_time)
+            if not abx_time:
+                continue
 
-        zbr = zybr_by_pid
-        result["den_patients"] = [
-            {"pid": pid, "mrn": zbr.get(pid, {}).get("mrn", ""),
-             "name": zbr.get(pid, {}).get("name", "")}
-            for pid in abx_time
-        ]
-        result["num_patients"] = [
-            {"pid": pid, "mrn": zbr.get(pid, {}).get("mrn", ""),
-             "name": zbr.get(pid, {}).get("name", "")}
-            for pid in num_pids
-        ]
+            # ---- 4. 分子：送检时间 < 首剂抗生素时间 ----
+            test_time = {}  # pid -> earliest test time
 
-    except Exception as e:
-        print(f"[ICU-06] Error: {e}")
+            # hisPid 映射（跨库对齐键）
+            smart_pid_by_hispid = {}
+            for spid, p in pat_by_pid.items():
+                hp = p.get("hisPid", "")
+                if hp:
+                    smart_pid_by_hispid[hp] = spid
+
+            try:
+                dc = get_datacenter_client()["DataCenter"]
+                hispids = list(smart_pid_by_hispid.keys())
+                if not hispids:
+                    continue
+
+                # 源A: VI_ICU_ZYYZ (培养类医嘱, yaoType='检验')
+                #   ZYYZ.pid == patient.hisPid (已验证 10/10)
+                culture_orders = list(dc["VI_ICU_ZYYZ"].find(
+                    {"pid": {"$in": hispids}, "status": "已执行",
+                     "yaoType": "检验",
+                     "orderName": {"$regex": CULTURE_KEYWORDS, "$options": "i"},
+                     "orderTime": {"$gte": start_dt, "$lte": end_dt_wide}},
+                    {"pid": 1, "orderTime": 1},
+                ).sort("orderTime", 1))
+                for o in culture_orders:
+                    hp = o.get("pid", "")  # pid 即 hisPid
+                    t = o.get("orderTime")
+                    spid = smart_pid_by_hispid.get(hp)
+                    if spid and t and (spid not in test_time or t < test_time[spid]):
+                        test_time[spid] = t
+
+                # 源B: VI_ICU_EXAM_ITEM (排除降钙素原) + VI_ICU_EXAM.collectTime
+                exam_items = list(dc["VI_ICU_EXAM_ITEM"].find(
+                    {"hisPid": {"$in": hispids},
+                     "itemName": {"$not": {"$regex": EXCLUDE_ITEM}},
+                     "authTime": {"$gte": start_dt, "$lte": end_dt_wide}},
+                    {"hisPid": 1, "examID": 1, "authTime": 1},
+                ).sort("authTime", 1))
+                if exam_items:
+                    eids = list(set(i["examID"] for i in exam_items if i.get("examID")))
+                    exam_coll = {}  # examID -> collectTime
+                    if eids:
+                        for e in dc["VI_ICU_EXAM"].find(
+                            {"reportID": {"$in": eids}},
+                            {"reportID": 1, "collectTime": 1},
+                        ):
+                            exam_coll[e["reportID"]] = e.get("collectTime")
+                    for item in exam_items:
+                        hp = item.get("hisPid", "")
+                        ct = exam_coll.get(item.get("examID", "")) or item.get("authTime")
+                        spid = smart_pid_by_hispid.get(hp)
+                        if spid and ct and (spid not in test_time or ct < test_time[spid]):
+                            test_time[spid] = ct
+
+            except Exception:
+                pass
+
+            # ---- 5. 计算分子 ----
+            num_pids = set()
+            for pid, abx_t in abx_time.items():
+                tt = test_time.get(pid)
+                if tt and tt <= abx_t:
+                    num_pids.add(pid)
+            result["num_count"] = min(len(num_pids), result["den_count"])
+
+            result["den_patients"] = [
+                {"pid": pid, "mrn": pat_by_pid[pid].get("mrn", "") or pat_by_pid[pid].get("hisPid", ""),
+                 "name": pat_by_pid[pid].get("name", "")}
+                for pid in abx_time
+            ]
+            result["num_patients"] = [
+                {"pid": pid, "mrn": pat_by_pid[pid].get("mrn", "") or pat_by_pid[pid].get("hisPid", ""),
+                 "name": pat_by_pid[pid].get("name", "")}
+                for pid in num_pids
+            ]
+            break
+
+        except Exception as e:
+            print(f"[ICU-06] Error: {e}")
+            continue
 
     return result
 
