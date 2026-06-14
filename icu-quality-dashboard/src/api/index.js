@@ -25,18 +25,18 @@ export async function fetchIndicatorList(period, icuUnit = 'all', endPeriod = ''
 }
 
 // ---- 单指标趋势 ----
-export async function fetchTrend(code, year, icuUnit = 'all') {
-  const res = await fetch(
-    `${BASE}/indicators/${code}/trend?year=${year}&icu_unit=${encodeURIComponent(icuUnit)}`
-  );
+export async function fetchTrend(code, year, icuUnit = 'all', sMonth = 1, eMonth = 12) {
+  let url = `${BASE}/indicators/${code}/trend?year=${year}&icu_unit=${encodeURIComponent(icuUnit)}`;
+  if (sMonth > 1 || eMonth < 12) url += `&start_month=${sMonth}&end_month=${eMonth}`;
+  const res = await fetch(url);
   return res.json();
 }
 
 // ---- 分子/分母下钻明细 ----
-export async function fetchDetail(code, period, part, icuUnit = 'all') {
-  const res = await fetch(
-    `${BASE}/indicators/${code}/detail?period=${period}&part=${part}&icu_unit=${encodeURIComponent(icuUnit)}`
-  );
+export async function fetchDetail(code, period, part, icuUnit = 'all', endPeriod = '') {
+  let url = `${BASE}/indicators/${code}/detail?period=${period}&part=${part}&icu_unit=${encodeURIComponent(icuUnit)}`;
+  if (endPeriod) url += `&end_period=${endPeriod}`;
+  const res = await fetch(url);
   return res.json();
 }
 

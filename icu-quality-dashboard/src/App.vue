@@ -35,7 +35,7 @@ import { ref } from 'vue';
 import Dashboard from './views/Dashboard.vue';
 import IndicatorTable from './IndicatorTable.vue';
 
-const currentView = ref('dashboard'); // 默认显示大屏看板
+const currentView = ref('table'); // 默认显示指标明细表
 
 const views = {
   dashboard: Dashboard,

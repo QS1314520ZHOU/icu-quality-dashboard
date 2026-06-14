@@ -2,10 +2,30 @@
 from fastapi import FastAPI
 from datetime import date, datetime
 from ai_analyzer import analyze
-from db import get_open_bed_count, get_occupied_bed_days, get_client, BED_DB_NAMES
+from db import get_open_bed_count, get_occupied_bed_days, get_staff_count, get_icu04_apache_data, get_bundle_data, get_icu08_data, get_icu06_data, get_dvt_prevention_patients, get_client, BED_DB_NAMES, PROFESSION_CN
 import random
+import time
 
 app = FastAPI(title="ICU质控指标API")
+
+# 简易缓存（TTL 60秒）
+_cache = {}
+_CACHE_TTL = 60
+
+
+def _cache_key(prefix, *args):
+    return f"{prefix}:{':'.join(str(a) for a in args)}"
+
+
+def _cache_get(key):
+    entry = _cache.get(key)
+    if entry and time.time() - entry["ts"] < _CACHE_TTL:
+        return entry["val"]
+    return None
+
+
+def _cache_set(key, val):
+    _cache[key] = {"val": val, "ts": time.time()}
 
 # deptCode → 科室名称映射（从 department 表读取，带缓存兜底）
 DEPT_MAP = {
@@ -54,10 +74,14 @@ INDICATORS_CONFIG = {
     "ICU-02": {"name": "ICU医师床位比", "unit": ":1", "good": (0.8, 99), "warn": (0.5, 99), "dir": "higher"},
     "ICU-03": {"name": "ICU护士床位比", "unit": ":1", "good": (2.5, 99), "warn": (2.0, 99), "dir": "higher"},
     "ICU-04": {"name": "APACHEⅡ≥15分收治率", "unit": "%", "good": (50, 100), "warn": (30, 100), "dir": "higher"},
-    "ICU-05": {"name": "感染性休克bundle完成率", "unit": "%", "good": (90, 100), "warn": (70, 100), "dir": "higher"},
+    "ICU-05-1h": {"name": "感染性休克1h Bundle完成率", "unit": "%", "good": (90, 100), "warn": (70, 100), "dir": "higher"},
+    "ICU-05-3h": {"name": "感染性休克3h Bundle完成率", "unit": "%", "good": (90, 100), "warn": (70, 100), "dir": "higher"},
+    "ICU-05-6h": {"name": "感染性休克6h Bundle完成率", "unit": "%", "good": (90, 100), "warn": (70, 100), "dir": "higher"},
     "ICU-06": {"name": "抗菌药物治疗前病原学送检率", "unit": "%", "good": (90, 100), "warn": (50, 100), "dir": "higher"},
     "ICU-07": {"name": "DVT预防率", "unit": "%", "good": (85, 100), "warn": (60, 100), "dir": "higher"},
-    "ICU-08": {"name": "中重度ARDS俯卧位通气实施率", "unit": "%", "good": (80, 100), "warn": (50, 100), "dir": "higher"},
+    "ICU-08": {"name": "中重度ARDS俯卧位通气实施率", "unit": "%", "good": (80, 100), "warn": (50, 100), "dir": "higher",
+               "numerator_desc": "住院期间有俯卧位记录的患者数",
+               "denominator_desc": "中重度ARDS患者数(P/F<150且PEEP≥5且有创氧疗途径)"},
     "ICU-09": {"name": "ICU镇痛评估率", "unit": "%", "good": (90, 100), "warn": (70, 100), "dir": "higher"},
     "ICU-10": {"name": "ICU镇静评估率", "unit": "%", "good": (90, 100), "warn": (70, 100), "dir": "higher"},
     "ICU-11": {"name": "ICU患者标化病死指数(SMR)", "unit": "", "good": (0, 1.0), "warn": (0, 1.2), "dir": "lower"},
@@ -80,7 +104,9 @@ SOURCE_DESC = {
     "ICU-02": {"numerator": "ICU在岗执业医师总人数", "denominator": "实际开放床位数总和"},
     "ICU-03": {"numerator": "ICU在岗执业护士总人数", "denominator": "实际开放床位数总和"},
     "ICU-04": {"numerator": "首次APACHEⅡ评分≥15分的患者数", "denominator": "同期入住ICU的患者总人数"},
-    "ICU-05": {"numerator": "完成3h/6h Bundle集束化治疗的患者数", "denominator": "确诊为感染性休克的患者总数"},
+    "ICU-05-1h": {"numerator": "1h内完成bundle患者数", "denominator": "确诊感染性休克患者数"},
+    "ICU-05-3h": {"numerator": "3h内完成bundle患者数", "denominator": "确诊感染性休克患者数"},
+    "ICU-05-6h": {"numerator": "6h内完成bundle患者数", "denominator": "确诊感染性休克患者数"},
     "ICU-06": {"numerator": "使用限制/非限制类抗生素前送检病原学标本的患者数", "denominator": "接受抗菌药物治疗的患者总数"},
     "ICU-07": {"numerator": "实施物理或药物DVT预防措施的患者数", "denominator": "同期入住ICU的所有患者数"},
     "ICU-08": {"numerator": "实施俯卧位通气治疗的患者数", "denominator": "满足PEEP≥5且OI≤150的ARDS患者数"},
@@ -101,7 +127,7 @@ SOURCE_DESC = {
 def get_mock_base_values():
     return {
         "ICU-01": 82.3, "ICU-02": 0.9, "ICU-03": 2.8, "ICU-04": 58.2,
-        "ICU-05": {"1h": 88.0, "3h": 76.0, "6h": 65.0}, "ICU-06": 93.5,
+        "ICU-05-1h": 88.0, "ICU-05-3h": 76.0, "ICU-05-6h": 65.0, "ICU-06": 93.5,
         "ICU-07": 87.1, "ICU-08": 72.4, "ICU-09": 95.2, "ICU-10": 91.8,
         "ICU-11": 0.92, "ICU-12": 3.2, "ICU-13": 4.1, "ICU-14": 6.8,
         "ICU-15": 2.5, "ICU-16": 9.1, "ICU-17": 1.8, "ICU-18": 89.3, "ICU-19": 78.6,
@@ -194,24 +220,81 @@ def query_summary(period: str, icu_unit: str = "all"):
     elif icu01_den > 0:
         icu01_value = 0.0
     else:
-        icu01_den = 1560  # 完全无数据时回退 mock
+        icu01_den = 1560
         icu01_num = 1284
         icu01_value = 82.3
+
+    # ----- ICU-02/03 分子：从 account 表取真实医师/护士人数 -----
+    icu02_num = 0
+    icu03_num = 0
+    for dc in dept_codes:
+        icu02_num += get_staff_count(dc, "doctor")
+        icu03_num += get_staff_count(dc, "nurse")
+
+    # ICU-02/03 分母 = 开放床位数
+    icu02_den = 0
+    for dc in dept_codes:
+        icu02_den += get_open_bed_count(dc, start_date, end_date)
 
     import random as _random
     _random.seed(hash(period + icu_unit))
     def _jitter(v, pct=0.15):
         return max(0, round(v * (1 + _random.uniform(-pct, pct))))
 
+    # ICU-02/03 兜底
+    if icu02_num == 0: icu02_num = _jitter(18, 0.1)
+    if icu03_num == 0: icu03_num = _jitter(56, 0.1)
+    if icu02_den == 0: icu02_den = 20
+
+    # ----- ICU-04 分子分母：从 score 表取真实 APACHEⅡ 数据 -----
+    icu04_data = get_icu04_apache_data(dept_codes, start_date, end_date)
+    icu04_num = icu04_data["num_count"]
+    icu04_den = icu04_data["den_count"]
+    if icu04_num == 0 and icu04_den == 0:
+        icu04_num = _jitter(87, 0.15)
+        icu04_den = 150
+
+    # ----- ICU-06：抗菌药物前病原学送检率（DataCenter.VI_ICU_ZYYZ）-----
+    icu06_data = get_icu06_data(dept_codes, start_date, end_date)
+    icu06_num = icu06_data["num_count"]
+    icu06_den = icu06_data["den_count"]
+    if icu06_den == 0:
+        icu06_num = _jitter(131, 0.1)
+        icu06_den = icu04_den
+
+    # ----- ICU-07：DVT预防率（DataCenter.VI_ICU_ZYYZ 医嘱包含匹配）-----
+    dvt_data = get_dvt_prevention_patients(dept_codes, start_date, end_date)
+    icu07_num = dvt_data.get("all_count", 0)
+    icu07_den = icu04_den  # 分母=同期在科患者（同ICU-04）
+    if icu07_num == 0:
+        icu07_num = _jitter(135, 0.15)
+
+    # ----- ICU-08：ARDS俯卧位实施率（三闸门分母 + 俯卧位分子）-----
+    icu08_data = get_icu08_data(dept_codes, start_date, end_date)
+    icu08_num = icu08_data["num_count"]
+    icu08_den = icu08_data["den_count"]
+    if icu08_den == 0:
+        icu08_num = _jitter(72, 0.1)
+        icu08_den = _jitter(100, 0.05)
+
+    # ----- ICU-05-1h/3h/6h：从 infectionShockV2 表取真实 Bundle 数据 -----
+    bundle_data = get_bundle_data(dept_codes, start_date, end_date)
+    bun_den = bundle_data["total"]
+    bun_1h = bundle_data["h1_num"]
+    bun_3h = bundle_data["h3_num"]
+    bun_6h = bundle_data["h6_num"]
+
     summary_data = {
         "ICU-01": {"num": icu01_num, "den": icu01_den},
-        "ICU-02": {"num": _jitter(18, 0.1), "den": 20},
-        "ICU-03": {"num": _jitter(56, 0.1), "den": 20},
-        "ICU-04": {"num": _jitter(87, 0.15), "den": 150},
-        "ICU-05": {"num": _jitter(76, 0.1), "den": 100},
-        "ICU-06": {"num": _jitter(131, 0.1), "den": 140},
-        "ICU-07": {"num": _jitter(135, 0.1), "den": 155},
-        "ICU-08": {"num": _jitter(34, 0.15), "den": 47},
+        "ICU-02": {"num": icu02_num, "den": icu02_den},
+        "ICU-03": {"num": icu03_num, "den": icu02_den},
+        "ICU-04": {"num": icu04_num, "den": icu04_den},
+        "ICU-05-1h": {"num": bun_1h, "den": bun_den},
+        "ICU-05-3h": {"num": bun_3h, "den": bun_den},
+        "ICU-05-6h": {"num": bun_6h, "den": bun_den},
+        "ICU-06": {"num": icu06_num, "den": icu06_den},
+        "ICU-07": {"num": icu07_num, "den": icu07_den},
+        "ICU-08": {"num": icu08_num, "den": icu08_den},
         "ICU-09": {"num": _jitter(148, 0.1), "den": 155},
         "ICU-10": {"num": _jitter(142, 0.1), "den": 155},
         "ICU-11": {"num": _jitter(11, 0.1), "den": 12},
@@ -230,24 +313,23 @@ def query_summary(period: str, icu_unit: str = "all"):
         if code == "ICU-01" and icu01_den > 0:
             display_val = icu01_value
             val_for_status = icu01_value
-        elif code == "ICU-05":
-            # Bundle 分时段，保持 mock
-            val = base[code]
-            display_val = val.get("3h") if isinstance(val, dict) else val
-            val_for_status = val
         else:
             # 根据变化后的分子分母重算比值
-            cfg = INDICATORS_CONFIG.get(code, {})
-            multiplier = 100  # default
-            if cfg.get("unit") == "‰":
-                multiplier = 1000
-            elif cfg.get("unit") == ":1":
-                multiplier = 1
-            if code == "ICU-11":
-                display_val = round(info["num"] / info["den"], 2)
+            if info["den"] == 0:
+                display_val = 0.0
+                val_for_status = 0.0
             else:
-                display_val = round(info["num"] / info["den"] * multiplier, 1)
-            val_for_status = display_val
+                cfg = INDICATORS_CONFIG.get(code, {})
+                multiplier = 100
+                if cfg.get("unit") == "‰":
+                    multiplier = 1000
+                elif cfg.get("unit") == ":1":
+                    multiplier = 1
+                if code == "ICU-11":
+                    display_val = round(info["num"] / info["den"], 2)
+                else:
+                    display_val = round(info["num"] / info["den"] * multiplier, 1)
+                val_for_status = display_val
         rows.append({
             "indicator": code,
             "numerator": info["num"],
@@ -322,9 +404,204 @@ def query_detail(code: str, period: str, part: str, icu_unit: str = "all"):
             "value": total_beds * days,
         }]
 
-    # ---- ICU-02/03：非患者指标，返回空 ----
+    # ---- ICU-08：ARDS俯卧位实施率明细 ----
+    if code == "ICU-08":
+        data = get_icu08_data(dept_codes, start_date, end_date)
+        if part == "numerator":
+            items = []
+            for p in data.get("num_patients", []):
+                items.append({
+                    "patient_id": p.get("mrn", ""),
+                    "name": p.get("name", ""),
+                    "gender": "", "age": "",
+                    "bed_no": f"俯卧{p.get('prone_count',0)}次",
+                    "dept": "",
+                    "admit_time": str(p.get("prone_times", [""])[0])[:16] if p.get("prone_times") else "",
+                    "discharge_time": "",
+                    "admission_source": "",
+                    "value": p.get("prone_count", 0),
+                })
+            return items
+        else:
+            items = []
+            for p in data.get("den_patients", []):
+                flow_v = p.get('flow_val')
+                flow_s = f"  流速: {flow_v}L/min" if flow_v is not None else ""
+                items.append({
+                    "patient_id": p.get("mrn", ""),
+                    "name": p.get("name", ""),
+                    "gender": "", "age": "",
+                    "bed_no": f"P/F={p.get('pf_ratio','?')}  PEEP={p.get('peep','?')}",
+                    "dept": "",
+                    "admit_time": f"纳入: {p.get('arm','')}  |  氧疗途径: {p.get('o2_route','?')}{flow_s}",
+                    "discharge_time": str(p.get("pf_time", ""))[:16] if p.get("pf_time") else "",
+                    "admission_source": "",
+                    "value": round(p.get('pf_ratio', 0), 1) if isinstance(p.get('pf_ratio'), (int, float)) else p.get('pf_ratio', 0),
+                })
+            return items
+
+    # ---- ICU-04：从 score 表取 APACHEⅡ 明细 ----
+    if code == "ICU-04":
+        data = get_icu04_apache_data(dept_codes, start_date, end_date)
+        if part == "numerator":
+            # 返回首次 APACHEⅡ ≥ 15 的患者
+            items = []
+            for p in data.get("num_patients", []):
+                items.append({
+                    "patient_id": p.get("mrn") or p.get("hisPid") or p.get("patientId") or str(p.get("_id", "-"))[-8:],
+                    "name": p.get("name", "-"),
+                    "gender": "",
+                    "age": "",
+                    "bed_no": p.get("hisBed", ""),
+                    "dept": "",
+                    "admit_time": p.get("score_time").strftime("%Y-%m-%d %H:%M") if p.get("score_time") else "-",
+                    "discharge_time": "",
+                    "admission_source": "",
+                    "value": p.get("score", 0),
+                })
+            return items
+        else:
+            # 分母：所有在科患者
+            items = []
+            for p in data.get("den_patients", []):
+                items.append({
+                    "patient_id": p.get("mrn") or p.get("hisPid") or p.get("patientId") or str(p.get("_id", "-"))[-8:],
+                    "name": p.get("name", "-"),
+                    "gender": "",
+                    "age": "",
+                    "bed_no": p.get("hisBed", ""),
+                    "dept": "",
+                    "admit_time": p.get("icuAdmissionTime").strftime("%Y-%m-%d %H:%M") if p.get("icuAdmissionTime") else "-",
+                    "discharge_time": "",
+                    "admission_source": "",
+                    "value": 1,
+                })
+            return items
+
+    # ---- ICU-05-1h/3h/6h：Bundle 明细 ----
+    if code in ("ICU-05-1h", "ICU-05-3h", "ICU-05-6h"):
+        data = get_bundle_data(dept_codes, start_date, end_date)
+        hour = code.split("-")[2]  # '1h', '3h', '6h'
+        key = f"h{hour[0]}_patients"
+        if part == "numerator":
+            items = []
+            for p in data.get(key, []):
+                items.append({
+                    "patient_id": p.get("mrn", ""), "name": p.get("name", ""),
+                    "gender": "", "age": "", "bed_no": p.get("hisBed", ""), "dept": "",
+                    "admit_time": "", "discharge_time": "", "admission_source": "",
+                    "value": 1,
+                })
+            return items
+        else:
+            items = [{"patient_id": d.get("mrn", ""), "name": d.get("name", ""),
+                      "gender": "", "age": "", "bed_no": "", "dept": "",
+                      "admit_time": str(d.get("diagnosisTime", ""))[:16] if d.get("diagnosisTime") else "",
+                      "discharge_time": "", "admission_source": "", "value": 1}
+                     for d in data.get("den_patients", [])]
+            return items
+
+    # ---- ICU-06：抗菌药物送检率明细 ----
+    if code == "ICU-06":
+        data = get_icu06_data(dept_codes, start_date, end_date)
+        if part == "numerator":
+            items = [{"patient_id": p.get("mrn", ""), "name": p.get("name", ""),
+                      "gender": "", "age": "", "bed_no": "送检在抗生素前", "dept": "",
+                      "admit_time": "", "discharge_time": "", "admission_source": "", "value": 1}
+                     for p in data.get("num_patients", [])]
+            return items
+        else:
+            items = [{"patient_id": p.get("mrn", ""), "name": p.get("name", ""),
+                      "gender": "", "age": "", "bed_no": "有抗生素医嘱", "dept": "",
+                      "admit_time": "", "discharge_time": "", "admission_source": "", "value": 1}
+                     for p in data.get("den_patients", [])]
+            return items
+
+    # ---- ICU-07：DVT预防率明细 ----
+    if code == "ICU-07":
+        data = get_dvt_prevention_patients(dept_codes, start_date, end_date)
+        if part == "numerator":
+            items = []
+            for p in data.get("drug_patients", []):
+                items.append({
+                    "patient_id": p.get("patient_id", p.get("pid", "")), "name": p.get("name", ""),
+                    "gender": "", "age": "", "bed_no": f"药物预防({p.get('order_count',0)}条)", "dept": "",
+                    "admit_time": str(p.get("matched_orders", [""])[0])[:60] if p.get("matched_orders") else "",
+                    "discharge_time": "", "admission_source": "", "value": p.get("order_count", 0),
+                })
+            for p in data.get("mech_patients", []):
+                items.append({
+                    "patient_id": p.get("patient_id", p.get("pid", "")), "name": p.get("name", ""),
+                    "gender": "", "age": "", "bed_no": f"机械预防({p.get('order_count',0)}条)", "dept": "",
+                    "admit_time": str(p.get("matched_orders", [""])[0])[:60] if p.get("matched_orders") else "",
+                    "discharge_time": "", "admission_source": "", "value": p.get("order_count", 0),
+                })
+            return items
+        else:
+            data2 = get_icu04_apache_data(dept_codes, start_date, end_date)
+            items = [{"patient_id": p.get("patientId", str(p.get("_id", ""))[-8:]), "name": p.get("name", ""),
+                      "gender": "", "age": "", "bed_no": p.get("hisBed", ""), "dept": "",
+                      "admit_time": p.get("icuAdmissionTime").strftime("%Y-%m-%d %H:%M") if p.get("icuAdmissionTime") else "-",
+                      "discharge_time": "", "admission_source": "", "value": 1}
+                     for p in data2.get("den_patients", [])]
+            return items
+
+    # ---- ICU-02/03：从 account 表取真实医护人员明细 ----
     if code in ("ICU-02", "ICU-03"):
-        return []
+        from db import DOCTOR_PROFESSIONS, NURSE_PROFESSIONS
+        professions = DOCTOR_PROFESSIONS if code == "ICU-02" else NURSE_PROFESSIONS
+        staff = []
+        if part == "numerator":
+            for db_name in BED_DB_NAMES:
+                try:
+                    db = get_client()[db_name]
+                    docs = list(db.account.find(
+                        {
+                            "valid": "valid",
+                            "departmentCode": {"$regex": "|".join(dept_codes)},
+                            "profession": {"$in": list(professions)},
+                        },
+                        {
+                            "username": 1, "trueName": 1, "profession": 1,
+                            "sex": 1, "educationLevel": 1, "entryTime": 1,
+                            "departmentCode": 1, "_id": 0,
+                        },
+                    ))
+                    if docs:
+                        for d in docs:
+                            staff.append({
+                                "patient_id": d.get("username", "-"),
+                                "name": d.get("trueName") or d.get("username", "-"),
+                                "gender": d.get("sex", ""),
+                                "age": "",
+                                "bed_no": PROFESSION_CN.get(d.get("profession", ""), d.get("profession", "")),
+                                "dept": d.get("departmentCode", ""),
+                                "admit_time": d.get("entryTime").strftime("%Y-%m-%d") if d.get("entryTime") else "-",
+                                "discharge_time": "",
+                                "admission_source": d.get("educationLevel", ""),
+                                "value": 1,
+                            })
+                        break
+                except Exception:
+                    continue
+        else:
+            # 分母：床位配置
+            total_beds = 0
+            for db_name in BED_DB_NAMES:
+                try:
+                    db = get_client()[db_name]
+                    total_beds = sum(db.configBed.count_documents({"deptCode": dc}) for dc in dept_codes)
+                    if total_beds > 0: break
+                except Exception: continue
+            staff = [{
+                "patient_id": "—",
+                "name": f"开放床位数 {total_beds} 张",
+                "gender": "", "age": "",
+                "bed_no": f"{total_beds} 张", "dept": "",
+                "admit_time": "", "discharge_time": "", "admission_source": "",
+                "value": total_beds,
+            }]
+        return staff
 
     # ---- 分子 / 其他指标：患者明细 ----
     patients = []
@@ -344,7 +621,7 @@ def query_detail(code: str, period: str, part: str, icu_unit: str = "all"):
             docs = list(db.patient.find(
                 query,
                 {
-                    "hisPid": 1, "name": 1, "hisBed": 1, "gender": 1, "birthday": 1,
+                    "mrn": 1, "hisPid": 1, "name": 1, "hisBed": 1, "gender": 1, "birthday": 1,
                     "icuAdmissionTime": 1, "icuDischargeTime": 1,
                     "admissionSource": 1, "dept": 1, "status": 1, "_id": 0,
                 },
@@ -362,7 +639,7 @@ def query_detail(code: str, period: str, part: str, icu_unit: str = "all"):
 
                     admit_dt = d.get("icuAdmissionTime")
                     discharge_dt = d.get("icuDischargeTime")
-                    mrn = d.get("hisPid") or d.get("mrn") or "-"
+                    mrn = d.get("mrn") or d.get("hisPid") or "-"
 
                     # ICU-01 分子：计算每位患者的在床天数
                     if code == "ICU-01" and part == "numerator" and admit_dt:
@@ -457,9 +734,12 @@ def ai_analyze(payload: dict):
 def indicator_list(period: str, icu_unit: str = "all", end_period: str = ""):
     """
     第一级：指标汇总列表。
-    period=2026-06           → 单月
-    period=2026-01&end_period=2026-06 → 跨月汇总
+    period=2026-06 单月, period=2026-01&end_period=2026-06 跨月汇总。
     """
+    ck = _cache_key("list", period, icu_unit, end_period)
+    cached = _cache_get(ck)
+    if cached is not None:
+        return cached
     if end_period:
         # 跨月汇总：逐月累加分子/分母，记录每月比值
         start_y, start_m = period.split("-")
@@ -485,6 +765,15 @@ def indicator_list(period: str, icu_unit: str = "all", end_period: str = ""):
                 agg[code]["den"] += r["denominator"]
                 agg[code]["monthly"][mon] = r["value"]
 
+        # ICU-02/03 是时点值(人数/床位数),跨月不累加,取最后一个月
+        for code in ("ICU-02", "ICU-03"):
+            if code in agg and len(month_labels) > 1:
+                last = query_summary(month_labels[-1], icu_unit)
+                for r in last:
+                    if r["indicator"] == code:
+                        agg[code]["num"] = r["numerator"]
+                        agg[code]["den"] = r["denominator"]
+
         result = []
         for code, v in agg.items():
             if code == "ICU-11":
@@ -506,11 +795,13 @@ def indicator_list(period: str, icu_unit: str = "all", end_period: str = ""):
                 "months": month_labels,
                 "monthly": [v["monthly"].get(mon) for mon in month_labels],
             })
-        return sorted(result, key=lambda x: x["code"])
+        result = sorted(result, key=lambda x: x["code"])
+        _cache_set(ck, result)
+        return result
 
     # 单月查询
     rows = query_summary(period, icu_unit)
-    return [
+    result = [
         {
             "code": r["indicator"],
             "name": NAME_MAP.get(r["indicator"], r["indicator"]),
@@ -521,36 +812,114 @@ def indicator_list(period: str, icu_unit: str = "all", end_period: str = ""):
             "status": r["status"],
         } for r in rows
     ]
+    _cache_set(ck, result)
+    return result
 
 @app.get("/api/indicators/{code}/trend")
-def indicator_trend(code: str, year: int, icu_unit: str = "all"):
-    """第二级：某指标全年12个月趋势"""
+def indicator_trend(code: str, year: int, icu_unit: str = "all",
+                    start_month: int = 1, end_month: int = 12):
+    """第二级：某指标趋势，支持指定月份范围"""
     rows = query_trend(code, year, icu_unit)
+    months = [f"{m}月" for m in range(start_month, end_month + 1)]
+    values = [rows.get(m) for m in range(start_month, end_month + 1)]
     return {
-        "code": code, 
+        "code": code,
         "name": NAME_MAP.get(code, code),
-        "months": [f"{m}月" for m in range(1, 13)],
-        "values": [rows.get(m) for m in range(1, 13)],
+        "months": months,
+        "values": values,
     }
 
 @app.get("/api/indicators/{code}/detail")
-def indicator_detail(code: str, period: str, part: str, icu_unit: str = "all"):
+def indicator_detail(code: str, period: str, part: str, icu_unit: str = "all", end_period: str = ""):
     """
     第三级：分子/分母下钻明细。
+    支持 end_period 跨月聚合。
     """
-    items = query_detail(code, period, part, icu_unit)
+    ck = _cache_key("detail", code, period, part, icu_unit, end_period)
+    cached = _cache_get(ck)
+    if cached is not None:
+        return cached
+    # 跨月汇总
+    if end_period:
+        start_y, start_m = period.split("-")
+        end_y, end_m = end_period.split("-")
+        months = []
+        y, m = int(start_y), int(start_m)
+        while (y < int(end_y)) or (y == int(end_y) and m <= int(end_m)):
+            months.append(f"{y}-{m:02d}")
+            m += 1
+            if m > 12:
+                m = 1
+                y += 1
+        # 聚合：按 patient_id 去重累加
+        merged = {}
+        for mon in months:
+            for p in query_detail(code, mon, part, icu_unit):
+                pid = p.get("patient_id", "")
+                if pid == "—" or (code == "ICU-01" and part == "numerator"):
+                    # 累加数值
+                    if pid in merged:
+                        merged[pid]["value"] = (merged[pid].get("value", 0) or 0) + (p.get("value", 0) or 0)
+                    else:
+                        merged[pid] = dict(p)
+                else:
+                    merged[pid] = dict(p)
+        items = list(merged.values())
 
-    # ICU-01 的描述需要区分分子（在床天数）和分母（床位配置）
+        # 跨月分母：重算总天数和名称
+        if code == "ICU-01" and part == "denominator":
+            total_days = sum(
+                31 if int(m.split("-")[1]) in [1,3,5,7,8,10,12]
+                else (30 if int(m.split("-")[1]) != 2 else 28)
+                for m in months
+            )
+            # 取床位数
+            dcodes = _resolve_dept_codes(icu_unit)
+            total_beds_count = 0
+            for db_name in BED_DB_NAMES:
+                try:
+                    db = get_client()[db_name]
+                    total_beds_count = sum(db.configBed.count_documents({"deptCode": dc}) for dc in dcodes)
+                    if total_beds_count > 0: break
+                except Exception: continue
+            if total_beds_count == 0: total_beds_count = 18
+            for p in items:
+                if p.get("patient_id") == "—":
+                    p["name"] = f"开放床位数 {total_beds_count} 张 × 统计 {total_days} 天 = {total_beds_count * total_days} 总床日"
+                    p["value"] = total_beds_count * total_days
+                    p["bed_no"] = f"{total_beds_count} 张"
+                    p["admit_time"] = f"统计 {total_days} 天"
+    else:
+        items = query_detail(code, period, part, icu_unit)
+
+    # 各指标明细描述
     if code == "ICU-01":
-        if part == "numerator":
-            source_desc = "实际占用总床日数 — 每位患者在统计期内的在床天数"
-        else:
-            source_desc = "实际开放总床日数 — 各科室床位配置（每床每日计1床日）"
+        source_desc = "实际占用总床日数 — 每位患者在统计期内的在床天数" if part == "numerator" \
+            else "实际开放总床日数 — 各科室床位配置（每床每日计1床日）"
+    elif code == "ICU-02":
+        source_desc = "分子：来自 account 表，筛选 valid 医师（主任医师/副主任医师/主治医师/医师/规培/进修/实习）" if part == "numerator" \
+            else "分母：来自 configBed 表，统计科室实际开放床位数"
+    elif code == "ICU-03":
+        source_desc = "分子：来自 account 表，筛选 valid 护士（护士长/护理组长/护士/规培/进修/实习护士）" if part == "numerator" \
+            else "分母：来自 configBed 表，统计科室实际开放床位数"
+    elif code == "ICU-04":
+        source_desc = "分子：来自 score 表，当月首次 APACHEⅡ 评分 total ≥ 15 的患者" if part == "numerator" \
+            else "分母：来自 patient 表，统计期内在科患者（排除 invalid）"
+    elif code in ("ICU-05-1h", "ICU-05-3h", "ICU-05-6h"):
+        h = code.split("-")[2]
+        source_desc = f"分子：来自 infectionShockV2 表，{h} bundle 达标（baStandard或finish）的患者" if part == "numerator" \
+            else "分母：来自 diseaseDiagnosis 表，脓毒性休克诊断 + patient 表在科过滤"
+    elif code == "ICU-06":
+        source_desc = "分子：来自 VI_ICU_ZYYZ，首次抗生素前有病原学送检的患者" if part == "numerator" \
+            else "分母：来自 VI_ICU_ZYYZ，统计期内有抗菌药物医嘱的患者"
+    elif code == "ICU-07":
+        source_desc = "分子：来自 DataCenter.VI_ICU_ZYYZ，抗凝药或机械预防医嘱包含匹配（排除封管/有创压肝素）" if part == "numerator" \
+            else "分母：来自 patient 表，统计期内在科患者（排除 invalid）"
     else:
         desc_info = SOURCE_DESC.get(code, {"numerator": "分子明细", "denominator": "分母明细"})
         source_desc = desc_info.get(part, "明细")
 
-    return {
+    result = {
         "code": code,
         "name": NAME_MAP.get(code, code),
         "part": part,
@@ -558,6 +927,8 @@ def indicator_detail(code: str, period: str, part: str, icu_unit: str = "all"):
         "source_desc": source_desc,
         "patients": items,
     }
+    _cache_set(ck, result)
+    return result
 
 
 @app.get("/api/departments")

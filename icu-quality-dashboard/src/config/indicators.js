@@ -32,16 +32,28 @@ export const INDICATORS = [
     meaning: '反映收治患者病情危重程度', chart: 'gauge',
   },
   {
-    code: 'ICU-05', name: '感染性休克bundle完成率', type: 'ratio', unit: '%',
-    numerator: '完成bundle患者数', denominator: '确诊感染性休克患者数',
+    code: 'ICU-05-1h', name: '感染性休克1h Bundle完成率', type: 'ratio', unit: '%',
+    numerator: '1h内完成bundle患者数', denominator: '确诊感染性休克患者数',
     multiplier: 100, direction: 'higher_better',
-    subMetrics: ['1h', '3h', '6h'], // ★需分时段计算
     thresholds: { good: [90, 100], warn: [70, 100] },
-    meaning: '反映成人感染性休克治疗规范性', chart: 'trend',
-    formulaDetail: {
-      type: 'note',
-      note: '分子=完成bundle患者数，分母=确诊感染性休克患者数，可分别计算1h/3h/6h完成率',
-    },
+    meaning: '反映感染性休克1小时集束化治疗规范性', chart: 'gauge',
+    bundleHour: '1h',
+  },
+  {
+    code: 'ICU-05-3h', name: '感染性休克3h Bundle完成率', type: 'ratio', unit: '%',
+    numerator: '3h内完成bundle患者数', denominator: '确诊感染性休克患者数',
+    multiplier: 100, direction: 'higher_better',
+    thresholds: { good: [90, 100], warn: [70, 100] },
+    meaning: '反映感染性休克3小时集束化治疗规范性', chart: 'gauge',
+    bundleHour: '3h',
+  },
+  {
+    code: 'ICU-05-6h', name: '感染性休克6h Bundle完成率', type: 'ratio', unit: '%',
+    numerator: '6h内完成bundle患者数', denominator: '确诊感染性休克患者数',
+    multiplier: 100, direction: 'higher_better',
+    thresholds: { good: [90, 100], warn: [70, 100] },
+    meaning: '反映感染性休克6小时集束化治疗规范性', chart: 'gauge',
+    bundleHour: '6h',
   },
   {
     code: 'ICU-06', name: '抗菌药物治疗前病原学送检率', type: 'ratio', unit: '%',

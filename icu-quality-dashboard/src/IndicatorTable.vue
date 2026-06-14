@@ -111,7 +111,9 @@ function fmtMonth(row, m) {
 }
 function cellLevel(row, m) {
   const v = row.monthly?.[m]; if (v == null) return '';
-  return v < (row.value ?? v) ? 'down' : 'up';
+  const base = row.value;
+  if (base && Math.abs(v - base) / base > 0.15) return 'alert';
+  return '';
 }
 
 // 公式悬浮
@@ -146,11 +148,12 @@ async function reload() {
 }
 
 async function drillTrend(row) {
-  try { trendData.value = await apiFetchTrend(row.code, year.value, unit.value); } catch { /* */ }
+  try { trendData.value = await apiFetchTrend(row.code, year.value, unit.value, startMonth.value, endMonth.value); } catch { /* */ }
 }
 async function drillDetail(row, part) {
   if (row[part] == null) return;
-  try { detailData.value = await apiFetchDetail(row.code, period.value, part, unit.value); } catch { /* */ }
+  const endP = isMultiMonth.value ? periodEnd.value : '';
+  try { detailData.value = await apiFetchDetail(row.code, period.value, part, unit.value, endP); } catch { /* */ }
 }
 
 const detailTitle = computed(()=> detailData.value
@@ -190,7 +193,7 @@ onMounted(async () => { await loadDepartments(); await reload(); });
 <style scoped>
 .table-page { padding: 20px 28px; }
 .filter-bar { display:flex; justify-content:space-between; align-items:center; margin-bottom:16px; }
-.page-title { font-size:16px; font-weight:600; color:var(--text-main); }
+.page-title { font-size:15px; font-weight:600; color:var(--text-main); }
 .filters { display:flex; gap:8px; align-items:center; }
 .filters select { background:#fff; color:var(--text-main); border:1px solid var(--border);
   border-radius:7px; padding:6px 10px; font-size:13px; cursor:pointer; }
@@ -199,7 +202,7 @@ onMounted(async () => { await loadDepartments(); await reload(); });
   padding:7px 16px; cursor:pointer; font-size:13px; font-weight:500; }
 
 .table-wrap { max-width:680px; margin:0 auto; background:var(--bg-card);
-  border:1px solid var(--border); border-radius:10px; overflow:hidden; box-shadow:var(--shadow-md); }
+  border:1px solid var(--border); border-radius:var(--radius); overflow:hidden; box-shadow:var(--shadow-md); }
 .table-wrap.multi-month { max-width:100%; margin:0; overflow-x:auto; }
 
 .indi-table { width:100%; table-layout:fixed; border-collapse:separate; border-spacing:0; }
@@ -209,36 +212,54 @@ onMounted(async () => { await loadDepartments(); await reload(); });
 .c-month{width:72px} .c-status{width:64px} .c-trend{width:52px}
 
 .indi-table th, .indi-table td {
-  padding:9px 12px; font-size:13px;
+  padding:13px 14px; font-size:13px;
   white-space:nowrap; overflow:hidden; text-overflow:ellipsis;
 }
-.indi-table th { background:var(--bg-header); color:var(--text-sub);
-  font-size:12px; font-weight:600; border-bottom:1px solid var(--border); }
+.indi-table th {
+  background:var(--bg-header); color:var(--text-faint);
+  font-size:11px; font-weight:600; letter-spacing:0.04em;
+  border-bottom:1px solid var(--border);
+}
 .indi-table td { color:var(--text-main); border-bottom:1px solid var(--border-light); }
 .indi-table tbody tr:last-child td { border-bottom:none; }
 .indi-table tbody tr:hover td { background:var(--bg-hover); }
 
 .t-left{text-align:left} .t-right{text-align:right} .t-center{text-align:center}
-.num, .month-cell, .t-right { font-variant-numeric:tabular-nums; }
+
+/* 数字专用等宽字体 — Windows 优先 Consolas/Cascadia */
+.num, .month-cell, .t-right, .code, .val {
+  font-family: 'Cascadia Code', 'Consolas', 'SF Mono', 'JetBrains Mono', ui-monospace, monospace;
+  font-variant-numeric:tabular-nums;
+}
 .sep { border-right:1px solid var(--border); }
 
-.code { color:var(--text-faint); font-family:monospace; font-size:12px; }
+.code { color:var(--text-faint); font-size:12px; }
 .name-txt { vertical-align:middle; }
-.val { color:var(--brand); font-weight:600; }
+/* 分子分母:中性深灰；比值:品牌蓝突出 */
+.num { color: var(--text-main); }
+.val { color: var(--brand); font-weight:600; }
 .link { cursor:pointer; }
 .link:hover { color:var(--brand); }
-.month-cell { color:var(--text-sub); font-size:12px; }
-.month-cell.down { color:var(--warn); }
+
+/* 月份列:默认安静灰色,仅异常点亮 */
+.month-cell { color: var(--text-sub); font-weight:400; font-size:12px; }
+.month-cell.alert { color: var(--warn); font-weight:500; }
 
 .formula-icon { margin-left:5px; font-style:italic; font-size:11px; color:var(--brand);
-  background:rgba(44,123,229,0.1); border-radius:3px; padding:0 4px; opacity:.5; }
+  background:rgba(59,111,222,0.08); border-radius:3px; padding:0 4px; opacity:.5; }
 .name:hover .formula-icon { opacity:1; }
 
-.badge { padding:2px 9px; border-radius:5px; font-size:11px; font-weight:500; }
-.badge.good { background:rgba(26,161,121,0.1); color:var(--good); }
-.badge.warn { background:rgba(224,138,0,0.1); color:var(--warn); }
-.badge.danger { background:rgba(214,69,69,0.1); color:var(--danger); }
-.mini { cursor:pointer; opacity:.55; } .mini:hover { opacity:1; }
+/* 状态徽章:圆点+文字 */
+.badge { padding:3px 10px; border-radius:20px; font-size:11px; font-weight:500;
+  display:inline-flex; align-items:center; gap:4px; }
+.badge::before { content:''; width:5px; height:5px; border-radius:50%; flex-shrink:0; }
+.badge.good { background:rgba(21,150,107,0.08); color:var(--good); }
+.badge.good::before { background:var(--good); }
+.badge.warn { background:rgba(201,122,22,0.08); color:var(--warn); }
+.badge.warn::before { background:var(--warn); }
+.badge.danger { background:rgba(207,64,64,0.08); color:var(--danger); }
+.badge.danger::before { background:var(--danger); }
+.mini { cursor:pointer; opacity:.35; } .mini:hover { opacity:.6; }
 
 .formula-tip { position:fixed; z-index:200; pointer-events:none; background:#fff;
   border:1px solid var(--border); border-radius:9px; box-shadow:var(--shadow-md);
