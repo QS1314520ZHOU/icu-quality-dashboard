@@ -1,0 +1,36 @@
+/* src/theme.css —— 高级医疗浅色主题 */
+:root {
+  /* 背景：不用纯白，用极浅的冷灰，更高级、不刺眼 */
+  --bg-body: #f4f6fa;          /* 页面底 */
+  --bg-card: #ffffff;          /* 卡片白 */
+  --bg-hover: #f0f4fa;         /* hover浅蓝灰 */
+  --bg-header: #f7f9fc;        /* 表头 */
+
+  /* 文字：用深蓝灰而非纯黑，柔和有质感 */
+  --text-main: #1a2b3c;        /* 主文字 */
+  --text-sub: #6b7c93;         /* 次要文字 */
+  --text-faint: #9aa7b8;       /* 弱化 */
+
+  /* 边框：极淡，靠它分层不靠粗线 */
+  --border: #e6ebf2;
+  --border-light: #eef2f7;
+
+  /* 强调色：低饱和医疗蓝绿，别用荧光色 */
+  --brand: #2c7be5;            /* 主蓝(沉稳) */
+  --good: #1aa179;             /* 达标绿(降饱和) */
+  --warn: #e08a00;             /* 预警橙 */
+  --danger: #d64545;           /* 异常红 */
+
+  /* 阴影：高级感的关键,极淡多层 */
+  --shadow-sm: 0 1px 2px rgba(16,30,54,0.04), 0 1px 3px rgba(16,30,54,0.06);
+  --shadow-md: 0 2px 8px rgba(16,30,54,0.06), 0 4px 16px rgba(16,30,54,0.04);
+  --radius: 10px;
+}
+
+* { margin:0; padding:0; box-sizing:border-box; }
+body {
+  font-family: -apple-system, 'PingFang SC', 'Microsoft YaHei', sans-serif;
+  background: var(--bg-body);
+  color: var(--text-main);
+  -webkit-font-smoothing: antialiased;  /* 字体更细腻 */
+}

@@ -1,0 +1,15 @@
+:root {
+  --bg-card: #ffffff;
+  --border: #dfe6ef;
+  --radius: 8px;
+  --shadow-sm: 0 4px 12px rgba(0, 0, 0, 0.03);
+  --brand: #0052d9;
+}
+
+* { margin: 0; padding: 0; box-sizing: border-box; }
+body {
+  font-family: 'Microsoft YaHei', 'PingFang SC', sans-serif;
+  background: #f4f7fb;
+  color: #1e293b;
+}
+#app { width: 100vw; min-height: 100vh; }
