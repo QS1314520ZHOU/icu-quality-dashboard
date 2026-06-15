@@ -17,9 +17,10 @@ export async function fetchIndicators(start, end, dept = 'all') {
 }
 
 // ---- 指标明细列表（含分子/分母） ----
-export async function fetchIndicatorList(period, icuUnit = 'all', endPeriod = '') {
+export async function fetchIndicatorList(period, icuUnit = 'all', endPeriod = '', nocache = false) {
   let url = `${BASE}/indicators/list?period=${period}&icu_unit=${encodeURIComponent(icuUnit)}`;
   if (endPeriod) url += `&end_period=${endPeriod}`;
+  if (nocache) url += `&nocache=true`;
   const res = await fetch(url);
   return res.json();
 }
@@ -68,5 +69,24 @@ export async function overrideAiDecision(hisPid, purpose, reason, overriddenBy =
     headers: { 'Content-Type': 'application/json' },
     body: JSON.stringify({ hisPid, purpose, reason, overridden_by: overriddenBy }),
   });
+  return res.json();
+}
+
+// ---- 手动刷新预聚合 ----
+export async function triggerRefresh(deptCode, year, month) {
+  const params = new URLSearchParams();
+  if (deptCode) params.set('dept_code', deptCode);
+  if (year) params.set('year', year);
+  if (month) params.set('month', month);
+  const res = await fetch(`${BASE}/refresh?${params.toString()}`, { method: 'POST' });
+  if (!res.ok) {
+    const err = await res.json().catch(() => ({}));
+    throw new Error(err.detail || `刷新请求失败 (${res.status})`);
+  }
+  return res.json();
+}
+
+export async function getRefreshStatus(taskId) {
+  const res = await fetch(`${BASE}/refresh/${encodeURIComponent(taskId)}`);
   return res.json();
 }

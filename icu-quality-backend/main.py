@@ -6,6 +6,7 @@ from db import get_open_bed_count, get_occupied_bed_days, get_staff_count, get_i
 import random
 import time as time_module
 import threading
+import uuid
 import summary as summary_module
 
 app = FastAPI(title="ICU质控指标API")
@@ -1237,6 +1238,101 @@ def admin_rebuild_status():
             }
         except Exception: continue
     return {"error": "Database not available"}
+
+
+# ---- 手动刷新端点（异步） ----
+
+_refresh_tasks = {}       # task_id → {status, dept_codes, period, stats?, error?}
+_refresh_lock = threading.Lock()
+_REFRESH_TASK_TTL = 600   # 任务状态保留 10 分钟后自动清理
+
+
+@app.post("/api/refresh")
+def trigger_refresh(dept_code: str = "all", year: int = None, month: int = None):
+    """
+    手动触发当前科室+当前月份的预聚合重建（异步）。
+
+    POST /api/refresh?dept_code=JJL000282&year=2026&month=6
+
+    内部使用 _resolve_dept_codes 解析（与 indicator_list 同源），
+    保证 summary 写入的 dept_code key 与前端查询完全一致。
+
+    返回 task_id，前端轮询 GET /api/refresh/{task_id} 获取状态。
+    """
+    # 参数校验与默认值
+    now = datetime.now()
+    if year is None:
+        year = now.year
+    if month is None:
+        month = now.month
+
+    dept_codes = _resolve_dept_codes(dept_code)
+    period = f"{year}-{month:02d}"
+    indicators = list(INDICATORS_CONFIG.keys())  # 全部 19 项指标
+
+    task_id = uuid.uuid4().hex[:12]
+    with _refresh_lock:
+        _refresh_tasks[task_id] = {
+            "status": "running",
+            "dept_codes": dept_codes,
+            "period": period,
+            "dept_code_param": dept_code,
+            "started_at": datetime.utcnow().isoformat(),
+        }
+
+    def _run_rebuild():
+        try:
+            stats = summary_module.rebuild_summary(dept_codes, [period], indicators)
+            with _refresh_lock:
+                _refresh_tasks[task_id].update({
+                    "status": "completed",
+                    "stats": {"total": stats["total"], "success": stats["success"],
+                              "failed": stats["failed"]},
+                    "completed_at": datetime.utcnow().isoformat(),
+                })
+        except Exception as e:
+            with _refresh_lock:
+                _refresh_tasks[task_id].update({
+                    "status": "error",
+                    "error": str(e)[:500],
+                    "completed_at": datetime.utcnow().isoformat(),
+                })
+
+    t = threading.Thread(target=_run_rebuild, daemon=True)
+    t.start()
+
+    # 清理过期任务（超过 TTL 的已完成/错误任务）
+    with _refresh_lock:
+        expired = [
+            tid for tid, tinfo in _refresh_tasks.items()
+            if tinfo["status"] in ("completed", "error")
+            and (datetime.utcnow() - datetime.fromisoformat(tinfo.get("completed_at", tinfo["started_at"]))).total_seconds() > _REFRESH_TASK_TTL
+        ]
+        for tid in expired:
+            del _refresh_tasks[tid]
+
+    return {
+        "task_id": task_id,
+        "status": "running",
+        "dept_codes": dept_codes,
+        "period": period,
+        "indicator_count": len(indicators),
+    }
+
+
+@app.get("/api/refresh/{task_id}")
+def get_refresh_status(task_id: str):
+    """
+    查询刷新任务状态。
+
+    GET /api/refresh/abc123def456
+    → {task_id, status: "running"|"completed"|"error", stats?, error?}
+    """
+    with _refresh_lock:
+        task = _refresh_tasks.get(task_id)
+    if not task:
+        return {"task_id": task_id, "status": "not_found"}
+    return {"task_id": task_id, **task}
 
 
 # ============================================================

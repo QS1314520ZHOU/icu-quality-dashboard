@@ -12,6 +12,10 @@
           <option value="all">全部ICU</option>
           <option v-for="d in departments" :key="d.code" :value="d.code">{{ d.name }}</option>
         </select>
+        <button class="refresh-btn" :disabled="refreshing" @click="triggerRefresh">
+          <span v-if="refreshing" class="spinner"></span>
+          {{ refreshing ? '刷新中…' : '刷新数据' }}
+        </button>
         <button class="export-btn" @click="exportCsv">导出CSV</button>
       </div>
     </div>
@@ -80,6 +84,11 @@
 
     <Modal v-if="trendData" :title="`${trendData.name} · ${year}年趋势`" @close="trendData=null"><TrendModal :data="trendData" /></Modal>
     <Modal v-if="detailData" :title="detailTitle" @close="detailData=null"><DetailModal :data="detailData" /></Modal>
+
+    <!-- Toast 通知 -->
+    <Transition name="toast-fade">
+      <div v-if="toast.show" class="toast" :class="toast.type">{{ toast.message }}</div>
+    </Transition>
   </div>
 </template>
 
@@ -89,12 +98,15 @@ import { INDICATORS } from './config/indicators.js';
 import Modal from './components/Modal.vue';
 import TrendModal from './components/TrendModal.vue';
 import DetailModal from './components/DetailModal.vue';
-import { fetchDepartments, fetchIndicatorList, fetchTrend as apiFetchTrend, fetchDetail as apiFetchDetail } from './api/index.js';
+import { fetchDepartments, fetchIndicatorList, fetchTrend as apiFetchTrend, fetchDetail as apiFetchDetail, triggerRefresh as apiTriggerRefresh, getRefreshStatus } from './api/index.js';
 
 const year = ref(2026), startMonth = ref(6), endMonth = ref(6), unit = ref('all');
 const years = [2024, 2025, 2026];
 const rows = ref([]); const trendData = ref(null); const detailData = ref(null);
 const departments = ref([]); const deptName = ref('全部ICU');
+const refreshing = ref(false);
+const toast = ref({ show: false, message: '', type: 'success' });
+let _refreshTimer = null;
 
 const monthCols = computed(() => {
   if (startMonth.value === endMonth.value) return [];
@@ -131,10 +143,10 @@ function moveTip(e){ if(tip.value.show){ tip.value.x=e.clientX+16; tip.value.y=e
 function hideTip(){ tip.value.show=false; }
 
 // ===== 真实 API 数据加载 =====
-async function reload() {
+async function reload(nocache = false) {
   try {
     const data = await fetchIndicatorList(period.value, unit.value,
-      isMultiMonth.value ? periodEnd.value : '');
+      isMultiMonth.value ? periodEnd.value : '', nocache);
     // 后端返回 monthly 是数组，转换为 {月份: 值} 对象
     rows.value = data.sort((a, b) => a.code.localeCompare(b.code)).map(r => {
       if (r.months && r.monthly) {
@@ -158,6 +170,51 @@ async function drillDetail(row, part) {
 
 const detailTitle = computed(()=> detailData.value
   ? `${detailData.value.name} · ${detailData.value.part==='numerator'?'分子':'分母'}明细` : '');
+function showToast(message, type = 'success', duration = 4000) {
+  toast.value = { show: true, message, type };
+  clearTimeout(_refreshTimer);
+  _refreshTimer = setTimeout(() => { toast.value.show = false; }, duration);
+}
+
+async function triggerRefresh() {
+  if (refreshing.value) return;  // 防重复点击
+  refreshing.value = true;
+
+  try {
+    // 1. 发起异步刷新
+    const { task_id } = await apiTriggerRefresh(unit.value, year.value, startMonth.value);
+    showToast('正在重算预聚合数据…', 'info');
+
+    // 2. 轮询直到完成（最多等 60 秒）
+    const POLL_INTERVAL = 1500;
+    const MAX_WAIT = 60000;
+    const startTime = Date.now();
+    let task;
+
+    while (Date.now() - startTime < MAX_WAIT) {
+      await new Promise(r => setTimeout(r, POLL_INTERVAL));
+      task = await getRefreshStatus(task_id);
+      if (task.status === 'completed') break;
+      if (task.status === 'error') throw new Error(task.error || '刷新失败');
+    }
+
+    if (!task || task.status !== 'completed') {
+      throw new Error('刷新超时，请稍后重试');
+    }
+
+    // 3. 刷新完成后，带 nocache=true 重新加载数据（穿透 60s 内存缓存）
+    await reload(true);
+    refreshing.value = false;
+    showToast(
+      `预聚合刷新完成 · ${task.stats?.success ?? '?'}/${task.stats?.total ?? '?'} 项成功`,
+      'success'
+    );
+  } catch (e) {
+    refreshing.value = false;
+    showToast(e.message || '刷新失败', 'error', 6000);
+  }
+}
+
 function statusText(s){ return {good:'达标',warn:'预警',danger:'异常',unknown:'—'}[s]||s; }
 
 function exportCsv() {
@@ -198,8 +255,28 @@ onMounted(async () => { await loadDepartments(); await reload(); });
 .filters select { background:#fff; color:var(--text-main); border:1px solid var(--border);
   border-radius:7px; padding:6px 10px; font-size:13px; cursor:pointer; }
 .dash { color:var(--text-faint); }
+.refresh-btn { background:#fff; color:var(--brand); border:1px solid var(--brand);
+  border-radius:7px; padding:7px 16px; cursor:pointer; font-size:13px; font-weight:500;
+  display:inline-flex; align-items:center; gap:6px; transition:all .2s; }
+.refresh-btn:hover:not(:disabled) { background:rgba(44,123,229,0.06); }
+.refresh-btn:disabled { opacity:.65; cursor:not-allowed; }
+.spinner { display:inline-block; width:14px; height:14px; border:2px solid var(--brand);
+  border-top-color:transparent; border-radius:50%; animation:spin .7s linear infinite; }
+@keyframes spin { to { transform:rotate(360deg); } }
 .export-btn { background:var(--brand); color:#fff; border:none; border-radius:7px;
   padding:7px 16px; cursor:pointer; font-size:13px; font-weight:500; }
+
+/* Toast 通知 */
+.toast { position:fixed; bottom:32px; right:32px; z-index:999;
+  padding:12px 22px; border-radius:9px; font-size:14px; font-weight:500;
+  box-shadow:0 4px 20px rgba(16,30,54,0.15);
+  max-width:420px; line-height:1.5; }
+.toast.success { background:#ecfdf5; color:#065f46; border:1px solid #a7f3d0; }
+.toast.error { background:#fef2f2; color:#991b1b; border:1px solid #fecaca; }
+.toast.info { background:#eff6ff; color:#1e3a5f; border:1px solid #bfdbfe; }
+.toast-fade-enter-active { transition:all .3s ease-out; }
+.toast-fade-leave-active { transition:all .25s ease-in; }
+.toast-fade-enter-from, .toast-fade-leave-to { opacity:0; transform: translateY(12px); }
 
 .table-wrap { max-width:680px; margin:0 auto; background:var(--bg-card);
   border:1px solid var(--border); border-radius:var(--radius); overflow:hidden; box-shadow:var(--shadow-md); }
