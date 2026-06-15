@@ -14,8 +14,9 @@
         </select>
         <button class="refresh-btn" :disabled="refreshing" @click="triggerRefresh">
           <span v-if="refreshing" class="spinner"></span>
-          {{ refreshing ? '刷新中…' : '刷新数据' }}
+          {{ refreshing ? '后台刷新中' : '刷新数据' }}
         </button>
+        <button class="guide-btn" @click="guideVisible=true">指标说明</button>
         <button class="export-btn" @click="exportCsv">导出CSV</button>
       </div>
     </div>
@@ -46,18 +47,23 @@
         </thead>
         <tbody>
           <tr v-for="row in rows" :key="row.code">
-            <td class="code t-left">{{ row.code }}</td>
+            <td class="code t-left">{{ displayCode(row.code) }}</td>
             <td class="name t-left" @mouseenter="showTip($event, row.code)" @mouseleave="hideTip">
               <span class="name-txt">{{ row.name }}</span>
               <span class="formula-icon">ƒ</span>
             </td>
-            <td class="num t-right link" @click="drillDetail(row,'numerator')">{{ row.numerator ?? '—' }}</td>
-            <td class="num t-right link" @click="drillDetail(row,'denominator')">{{ row.denominator ?? '—' }}</td>
-            <td class="t-right sep link" @click="drillTrend(row)"><b class="val">{{ row.value ?? '—' }}{{ row.unit }}</b></td>
+            <td class="num t-right link" @click="drillDetail(row,'numerator')">{{ fmtCell(row.numerator) }}</td>
+            <td class="num t-right link" @click="drillDetail(row,'denominator')">{{ fmtCell(row.denominator) }}</td>
+            <td class="t-right sep link" @click="drillTrend(row)"><b class="val">{{ fmtValue(row) }}</b></td>
             <td v-for="m in monthCols" :key="row.code+m" class="t-right month-cell" :class="cellLevel(row, m)">
               {{ fmtMonth(row, m) }}
             </td>
-            <td class="t-center sep"><span class="badge" :class="row.status">{{ statusText(row.status) }}</span></td>
+            <td class="t-center sep">
+              <span class="badge" :class="row.status" :style="statusStyle(row.status)">
+                <i class="badge-dot" :style="{ background: statusConfig.meta?.[row.status]?.color }"></i>
+                {{ statusText(row.status) }}
+              </span>
+            </td>
             <td class="t-center"><span class="mini" @click="drillTrend(row)">📈</span></td>
           </tr>
         </tbody>
@@ -84,6 +90,7 @@
 
     <Modal v-if="trendData" :title="`${trendData.name} · ${year}年趋势`" @close="trendData=null"><TrendModal :data="trendData" /></Modal>
     <Modal v-if="detailData" :title="detailTitle" @close="detailData=null"><DetailModal :data="detailData" /></Modal>
+    <Modal v-if="guideVisible" title="指标口径说明" @close="guideVisible=false"><IndicatorGuideModal /></Modal>
 
     <!-- Toast 通知 -->
     <Transition name="toast-fade">
@@ -94,19 +101,24 @@
 
 <script setup>
 import { ref, computed, onMounted, watch } from 'vue';
-import { INDICATORS } from './config/indicators.js';
+import { INDICATORS, evalStatus, getStatusConfig, statusText as getStatusText } from './config/indicators.js';
 import Modal from './components/Modal.vue';
 import TrendModal from './components/TrendModal.vue';
 import DetailModal from './components/DetailModal.vue';
+import IndicatorGuideModal from './components/IndicatorGuideModal.vue';
 import { fetchDepartments, fetchIndicatorList, fetchTrend as apiFetchTrend, fetchDetail as apiFetchDetail, triggerRefresh as apiTriggerRefresh, getRefreshStatus } from './api/index.js';
 
 const year = ref(2026), startMonth = ref(6), endMonth = ref(6), unit = ref('all');
 const years = [2024, 2025, 2026];
 const rows = ref([]); const trendData = ref(null); const detailData = ref(null);
+const guideVisible = ref(false);
 const departments = ref([]); const deptName = ref('全部ICU');
 const refreshing = ref(false);
 const toast = ref({ show: false, message: '', type: 'success' });
+const statusConfig = ref(getStatusConfig());
 let _refreshTimer = null;
+let _refreshPollTimer = null;
+const activeRefreshTask = ref(null);
 
 const monthCols = computed(() => {
   if (startMonth.value === endMonth.value) return [];
@@ -119,13 +131,29 @@ const periodEnd = computed(() => `${year.value}-${String(endMonth.value).padStar
 
 function fmtMonth(row, m) {
   const v = row.monthly?.[m];
-  return v == null ? '—' : `${v}${row.unit}`;
+  return v == null ? '/' : `${v}${row.unit}`;
+}
+function fmtCell(v) { return v == null ? '/' : v; }
+function fmtValue(row) { return row.value == null ? '/' : `${row.value}${row.unit}`; }
+function displayCode(code) {
+  return INDICATORS.find(i => i.code === code)?.displayCode || code;
+}
+function codeOrder(code) {
+  const shown = displayCode(code);
+  const match = shown.match(/^ICU-(\d+)(?:-(\d+)h)?$/);
+  if (!match) return Number.MAX_SAFE_INTEGER;
+  return Number(match[1]) * 100 + Number(match[2] || 0);
 }
 function cellLevel(row, m) {
   const v = row.monthly?.[m]; if (v == null) return '';
   const base = row.value;
   if (base && Math.abs(v - base) / base > 0.15) return 'alert';
   return '';
+}
+function statusStyle(status) {
+  const meta = statusConfig.value.meta?.[status];
+  if (!meta) return {};
+  return { color: meta.color, background: meta.background };
 }
 
 // 公式悬浮
@@ -144,11 +172,14 @@ function hideTip(){ tip.value.show=false; }
 
 // ===== 真实 API 数据加载 =====
 async function reload(nocache = false) {
+  return reloadRange(period.value, isMultiMonth.value ? periodEnd.value : '', nocache);
+}
+
+async function reloadRange(startPeriod, endPeriod = '', nocache = false) {
   try {
-    const data = await fetchIndicatorList(period.value, unit.value,
-      isMultiMonth.value ? periodEnd.value : '', nocache);
+    const data = await fetchIndicatorList(startPeriod, unit.value, endPeriod, nocache);
     // 后端返回 monthly 是数组，转换为 {月份: 值} 对象
-    rows.value = data.sort((a, b) => a.code.localeCompare(b.code)).map(r => {
+    rows.value = data.sort((a, b) => codeOrder(a.code) - codeOrder(b.code)).map(r => {
       if (r.months && r.monthly) {
         const map = {};
         r.months.forEach((mon, i) => { map[parseInt(mon.split('-')[1])] = r.monthly[i]; });
@@ -156,16 +187,27 @@ async function reload(nocache = false) {
       }
       return r;
     });
+    rows.value = rows.value.map(r => {
+      const ind = INDICATORS.find(i => i.code === r.code);
+      return ind && r.value != null ? { ...r, status: evalStatus(ind, r.value, statusConfig.value) } : r;
+    });
   } catch { rows.value = []; }
 }
 
 async function drillTrend(row) {
+  if (row.value == null) return;
   try { trendData.value = await apiFetchTrend(row.code, year.value, unit.value, startMonth.value, endMonth.value); } catch { /* */ }
 }
 async function drillDetail(row, part) {
   if (row[part] == null) return;
   const endP = isMultiMonth.value ? periodEnd.value : '';
-  try { detailData.value = await apiFetchDetail(row.code, period.value, part, unit.value, endP); } catch { /* */ }
+  const base = { code: row.code, name: row.name, part, count: 0, source_desc: '明细加载中...', patients: [], loading: true };
+  detailData.value = base;
+  try {
+    detailData.value = await apiFetchDetail(row.code, period.value, part, unit.value, endP, { limit: 200, offset: 0 });
+  } catch (e) {
+    detailData.value = { ...base, loading: false, error: e.message || '明细加载失败', source_desc: '明细加载失败' };
+  }
 }
 
 const detailTitle = computed(()=> detailData.value
@@ -177,50 +219,121 @@ function showToast(message, type = 'success', duration = 4000) {
 }
 
 async function triggerRefresh() {
-  if (refreshing.value) return;  // 防重复点击
+  if (refreshing.value) {
+    if (activeRefreshTask.value) pollRefreshTask(activeRefreshTask.value, true);
+    return;
+  }  // 防重复点击
   refreshing.value = true;
+  const refreshYear = year.value;
+  const refreshStartMonth = startMonth.value;
+  const refreshEndMonth = endMonth.value;
+  const refreshStartPeriod = `${refreshYear}-${String(refreshStartMonth).padStart(2, '0')}`;
+  const refreshEndPeriod = `${refreshYear}-${String(refreshEndMonth).padStart(2, '0')}`;
 
   try {
-    // 1. 发起异步刷新
-    const { task_id } = await apiTriggerRefresh(unit.value, year.value, startMonth.value);
-    showToast('正在重算预聚合数据…', 'info');
+    const refreshTask = await apiTriggerRefresh(unit.value, refreshYear, refreshStartMonth, refreshEndMonth);
+    const task = {
+      ...refreshTask,
+      refreshYear,
+      refreshUnit: unit.value,
+      refreshStartPeriod,
+      refreshEndPeriod,
+      refreshStartMonth,
+      refreshEndMonth,
+    };
 
-    // 2. 轮询直到完成（最多等 60 秒）
-    const POLL_INTERVAL = 1500;
-    const MAX_WAIT = 60000;
-    const startTime = Date.now();
-    let task;
-
-    while (Date.now() - startTime < MAX_WAIT) {
-      await new Promise(r => setTimeout(r, POLL_INTERVAL));
-      task = await getRefreshStatus(task_id);
-      if (task.status === 'completed') break;
-      if (task.status === 'error') throw new Error(task.error || '刷新失败');
+    if (refreshTask.immediate || refreshTask.status === 'completed') {
+      activeRefreshTask.value = task;
+      await finishRefreshTask(task);
+      return;
     }
 
-    if (!task || task.status !== 'completed') {
-      throw new Error('刷新超时，请稍后重试');
-    }
-
-    // 3. 刷新完成后，带 nocache=true 重新加载数据（穿透 60s 内存缓存）
-    await reload(true);
-    refreshing.value = false;
-    showToast(
-      `预聚合刷新完成 · ${task.stats?.success ?? '?'}/${task.stats?.total ?? '?'} 项成功`,
-      'success'
-    );
+    activeRefreshTask.value = task;
+    const reused = refreshTask.reused ? '已有同范围任务在后台执行' : '已开始后台重算';
+    showToast(`${reused} · 已完成 ${refreshTask.done ?? 0}/${refreshTask.total ?? '?'}`, 'info', 5000);
+    pollRefreshTask(task, true);
   } catch (e) {
     refreshing.value = false;
     showToast(e.message || '刷新失败', 'error', 6000);
   }
 }
 
-function statusText(s){ return {good:'达标',warn:'预警',danger:'异常',unknown:'—'}[s]||s; }
+async function pollRefreshTask(task, immediate = false) {
+  clearTimeout(_refreshPollTimer);
+  if (!task?.task_id) {
+    refreshing.value = false;
+    return;
+  }
+
+  const run = async () => {
+    try {
+      const latest = await getRefreshStatus(task.task_id);
+      if (latest.status === 'completed') {
+        await finishRefreshTask({ ...task, ...latest });
+        return;
+      }
+      if (latest.status === 'error') {
+        refreshing.value = false;
+        activeRefreshTask.value = null;
+        showToast(latest.error || '刷新失败', 'error', 6000);
+        return;
+      }
+      if (latest.status === 'not_found') {
+        refreshing.value = false;
+        activeRefreshTask.value = null;
+        showToast('后台刷新任务已过期，请重新刷新', 'error', 6000);
+        return;
+      }
+
+      activeRefreshTask.value = { ...task, ...latest };
+      const done = latest.done ?? 0;
+      const total = latest.total ?? task.total ?? '?';
+      const started = latest.started ? `，已启动 ${latest.started}` : '';
+      const current = latest.current_period && latest.current_indicator
+        ? `，当前 ${latest.current_period} ${latest.current_indicator}`
+        : '';
+      showToast(`后台重算中 · ${done}/${total}${started}${current}`, 'info', 5000);
+      _refreshPollTimer = setTimeout(() => pollRefreshTask(activeRefreshTask.value), 3000);
+    } catch (e) {
+      showToast(e.message || '刷新进度获取失败，后台任务仍可能在执行', 'error', 6000);
+      _refreshPollTimer = setTimeout(() => pollRefreshTask(activeRefreshTask.value || task), 8000);
+    }
+  };
+
+  if (immediate) run();
+  else _refreshPollTimer = setTimeout(run, 3000);
+}
+
+async function finishRefreshTask(task) {
+  clearTimeout(_refreshPollTimer);
+  const stillOnRefreshRange =
+    year.value === task.refreshYear &&
+    unit.value === task.refreshUnit &&
+    startMonth.value === task.refreshStartMonth &&
+    endMonth.value === task.refreshEndMonth;
+  if (stillOnRefreshRange) {
+    await reloadRange(
+      task.refreshStartPeriod ?? period.value,
+      (task.refreshStartMonth ?? startMonth.value) === (task.refreshEndMonth ?? endMonth.value)
+        ? ''
+        : (task.refreshEndPeriod ?? periodEnd.value),
+      true,
+    );
+  }
+  refreshing.value = false;
+  activeRefreshTask.value = null;
+  showToast(
+    `预聚合刷新完成 · ${task.stats?.success ?? task.success ?? '?'}/${task.stats?.total ?? task.total ?? '?'} 项成功`,
+    'success',
+  );
+}
+
+function statusText(s){ return getStatusText(s, statusConfig.value); }
 
 function exportCsv() {
   const header = '编码,指标名称,分子,分母,比值,状态\n';
   const body = rows.value.map(r =>
-    `${r.code},${r.name},${r.numerator??''},${r.denominator??''},${r.value??''}${r.unit},${statusText(r.status)}`).join('\n');
+    `${displayCode(r.code)},${r.name},${r.numerator??'/'},${r.denominator??'/'},${r.value == null ? '/' : `${r.value}${r.unit}`},${statusText(r.status)}`).join('\n');
   const blob = new Blob(['﻿'+header+body], { type:'text/csv;charset=utf-8' });
   const a = document.createElement('a'); a.href = URL.createObjectURL(blob);
   a.download = `ICU质控_${period.value}.csv`; a.click();
@@ -244,7 +357,14 @@ watch(unit, (val) => {
   window.history.replaceState({}, '', url);
 });
 
-onMounted(async () => { await loadDepartments(); await reload(); });
+onMounted(async () => { await loadDepartments(); await reload(true); });
+window.addEventListener('status-config-updated', () => {
+  statusConfig.value = getStatusConfig();
+  rows.value = rows.value.map(r => {
+    const ind = INDICATORS.find(i => i.code === r.code);
+    return ind && r.value != null ? { ...r, status: evalStatus(ind, r.value, statusConfig.value) } : r;
+  });
+});
 </script>
 
 <style scoped>
@@ -265,6 +385,9 @@ onMounted(async () => { await loadDepartments(); await reload(); });
 @keyframes spin { to { transform:rotate(360deg); } }
 .export-btn { background:var(--brand); color:#fff; border:none; border-radius:7px;
   padding:7px 16px; cursor:pointer; font-size:13px; font-weight:500; }
+.guide-btn { background:#f8fafc; color:#1e3a5f; border:1px solid #cbd5e1; border-radius:7px;
+  padding:7px 14px; cursor:pointer; font-size:13px; font-weight:500; }
+.guide-btn:hover { background:#eff6ff; border-color:#93c5fd; color:#1d4ed8; }
 
 /* Toast 通知 */
 .toast { position:fixed; bottom:32px; right:32px; z-index:999;
@@ -329,7 +452,7 @@ onMounted(async () => { await loadDepartments(); await reload(); });
 /* 状态徽章:圆点+文字 */
 .badge { padding:3px 10px; border-radius:20px; font-size:11px; font-weight:500;
   display:inline-flex; align-items:center; gap:4px; }
-.badge::before { content:''; width:5px; height:5px; border-radius:50%; flex-shrink:0; }
+.badge-dot { width:5px; height:5px; border-radius:50%; flex-shrink:0; display:inline-block; }
 .badge.good { background:rgba(21,150,107,0.08); color:var(--good); }
 .badge.good::before { background:var(--good); }
 .badge.warn { background:rgba(201,122,22,0.08); color:var(--warn); }

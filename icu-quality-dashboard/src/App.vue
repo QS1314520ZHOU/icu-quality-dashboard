@@ -18,6 +18,12 @@
         >
           📊 实时大屏看板
         </button>
+        <button
+          :class="['nav-btn', { active: currentView === 'statusConfig' }]"
+          @click="currentView = 'statusConfig'"
+        >
+          ⚙ 状态配置
+        </button>
       </div>
     </nav>
     
@@ -33,12 +39,14 @@
 <script setup>
 import { ref } from 'vue';
 import Dashboard from './views/Dashboard.vue';
+import StatusConfig from './views/StatusConfig.vue';
 import IndicatorTable from './IndicatorTable.vue';
 
 const currentView = ref('table'); // 默认显示指标明细表
 
 const views = {
   dashboard: Dashboard,
+  statusConfig: StatusConfig,
   table: IndicatorTable
 };
 </script>

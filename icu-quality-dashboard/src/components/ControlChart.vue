@@ -15,7 +15,8 @@ let chart = null;
 
 function render() {
   if (!chart || !props.data) return;
-  const mean = props.data.reduce((a, b) => a + b, 0) / props.data.length;
+  const valid = props.data.filter(v => typeof v === 'number');
+  const mean = valid.length ? valid.reduce((a, b) => a + b, 0) / valid.length : 0;
   chart.setOption({
     title: { text: props.name, left: 0, top: 0, textStyle: { color: '#6b7c93', fontSize: 13, fontWeight: 600 } },
     tooltip: { trigger: 'axis' },
@@ -34,13 +35,13 @@ function render() {
           { yAxis: props.ucl, name: '警戒线(UCL)',
             lineStyle: { color: '#ef4444', type: 'dashed' },
             label: { color: '#ef4444', formatter: 'UCL' } },
-          { yAxis: +mean.toFixed(1), name: '均值',
+          ...(valid.length ? [{ yAxis: +mean.toFixed(1), name: '均值',
             lineStyle: { color: '#10b981', type: 'dotted' },
-            label: { color: '#10b981', formatter: '均值' } },
+            label: { color: '#10b981', formatter: '均值' } }] : []),
         ],
       },
       markPoint: {
-        data: props.data.map((v, i) => v > props.ucl
+        data: props.data.map((v, i) => typeof v === 'number' && v > props.ucl
           ? { coord: [i, v], itemStyle: { color: '#ef4444' } } : null).filter(Boolean),
       },
     }],

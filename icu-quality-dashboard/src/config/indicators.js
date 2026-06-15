@@ -2,6 +2,15 @@
 // 指标类型: ratio(百分率) / permille(千分率) / proportion(配比) / index(指数)
 // thresholds: 红黄绿阈值, direction: higher_better / lower_better
 
+export const STATUS_CONFIG_KEY = 'icu-quality-status-config';
+
+export const DEFAULT_STATUS_META = {
+  good: { label: '达标', color: '#15966b', background: 'rgba(21,150,107,0.08)' },
+  warn: { label: '预警', color: '#c97a16', background: 'rgba(201,122,22,0.08)' },
+  danger: { label: '异常', color: '#cf4040', background: 'rgba(207,64,64,0.08)' },
+  unknown: { label: '/', color: '#94a3b8', background: 'rgba(148,163,184,0.10)' },
+};
+
 export const INDICATORS = [
   {
     code: 'ICU-01', name: 'ICU床位使用率', type: 'ratio', unit: '%',
@@ -149,26 +158,70 @@ export const INDICATORS = [
     meaning: '反映感控及导管留置管理能力', chart: 'control',
   },
   {
-    code: 'ICU-18', name: '急性脑损伤意识评估率', type: 'ratio', unit: '%',
+    code: 'ICU-18', displayCode: 'ICU-19', name: '急性脑损伤意识评估率', type: 'ratio', unit: '%',
     numerator: '完成意识评估患者数(GCS/FOUR)', denominator: '急性脑损伤患者总数',
     multiplier: 100, direction: 'higher_better',
     thresholds: { good: [90, 100], warn: [70, 100] },
     meaning: '反映脑损伤患者评估规范性', chart: 'gauge',
   },
   {
-    code: 'ICU-19', name: '48h内肠内营养启动率', type: 'ratio', unit: '%',
+    code: 'ICU-19', displayCode: 'ICU-20', name: '48h内肠内营养启动率', type: 'ratio', unit: '%',
     numerator: '48h内启动EN患者数', denominator: '入住>48h患者总数',
     multiplier: 100, direction: 'higher_better',
     thresholds: { good: [80, 100], warn: [50, 100] },
     meaning: '反映营养治疗规范性', chart: 'gauge',
   },
+  {
+    code: 'CAUTI', displayCode: 'ICU-18', name: 'CAUTI尿管相关感染率', type: 'permille', unit: '‰',
+    numerator: 'CAUTI新发例次', denominator: '导尿管累计使用天数',
+    multiplier: 1000, direction: 'lower_better',
+    thresholds: { good: [0, 2], warn: [0, 5] },
+    meaning: '反映感控及导尿管留置管理能力', chart: 'control',
+  },
 ];
 
+export function getStatusConfig() {
+  try {
+    const saved = JSON.parse(localStorage.getItem(STATUS_CONFIG_KEY) || '{}');
+    const thresholds = Object.fromEntries(
+      INDICATORS.map(ind => [
+        ind.code,
+        {
+          direction: saved.thresholds?.[ind.code]?.direction || ind.direction,
+          thresholds: saved.thresholds?.[ind.code]?.thresholds || ind.thresholds,
+        },
+      ])
+    );
+    return {
+      meta: { ...DEFAULT_STATUS_META, ...(saved.meta || {}) },
+      thresholds,
+    };
+  } catch {
+    return {
+      meta: DEFAULT_STATUS_META,
+      thresholds: Object.fromEntries(
+        INDICATORS.map(ind => [ind.code, { direction: ind.direction, thresholds: ind.thresholds }])
+      ),
+    };
+  }
+}
+
+export function saveStatusConfig(config) {
+  localStorage.setItem(STATUS_CONFIG_KEY, JSON.stringify(config));
+  window.dispatchEvent(new CustomEvent('status-config-updated'));
+}
+
 // 阈值判定 -> 返回 'good' | 'warn' | 'danger'
-export function evalStatus(indicator, value) {
-  const { good, warn } = indicator.thresholds;
+export function evalStatus(indicator, value, statusConfig = getStatusConfig()) {
+  if (value == null || Number.isNaN(Number(value))) return 'unknown';
+  const cfg = statusConfig.thresholds?.[indicator.code] || indicator;
+  const { good, warn } = cfg.thresholds || indicator.thresholds;
   const inRange = (v, [a, b]) => v >= a && v <= b;
   if (inRange(value, good)) return 'good';
   if (inRange(value, warn)) return 'warn';
   return 'danger';
+}
+
+export function statusText(status, statusConfig = getStatusConfig()) {
+  return statusConfig.meta?.[status]?.label || status;
 }

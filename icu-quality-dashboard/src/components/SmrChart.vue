@@ -15,6 +15,7 @@ const el = ref(null);
 let chart = null;
 
 function colorOf(v) {
+  if (typeof v !== 'number') return '#9aa7b8';
   if (v < 1) return '#10b981';      // 优于预期
   if (v <= 1.2) return '#f59e0b';   // 略差
   return '#ef4444';                 // 明显差于预期

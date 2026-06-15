@@ -1,7 +1,16 @@
 @echo off
+setlocal
 echo ==================================================
 echo         ICU Quality Dashboard - Startup Script
 echo ==================================================
+
+set "BACKEND_PORT=8091"
+set "FRONTEND_PORT=5173"
+if exist ".env" (
+    for /f "usebackq eol=# tokens=1,* delims==" %%A in (".env") do (
+        if not "%%A"=="" set "%%A=%%B"
+    )
+)
 
 echo [1/3] Checking and installing Python backend dependencies...
 cd icu-quality-backend
@@ -18,17 +27,17 @@ call npm install
 cd ..
 
 echo [3/3] Starting frontend and backend services in parallel...
-echo Backend server will run at http://localhost:8080
-echo Frontend dev server will run at http://localhost:5173
+echo Backend server will run at http://localhost:%BACKEND_PORT%
+echo Frontend dev server will run at http://localhost:%FRONTEND_PORT%
 echo.
 
 :: Start Backend
-start "FastAPI Backend" cmd /k "cd icu-quality-backend && python -m uvicorn main:app --port 8080 --reload"
+start "FastAPI Backend" cmd /k "cd icu-quality-backend && python -m uvicorn main:app --port %BACKEND_PORT% --reload"
 
 :: Start Frontend
 start "Vite Frontend" cmd /k "cd icu-quality-dashboard && npm run dev"
 
 echo Startup commands executed successfully. Please check the new command windows!
-echo If everything is fine, visit: http://localhost:5173
+echo If everything is fine, visit: http://localhost:%FRONTEND_PORT%
 echo.
 pause

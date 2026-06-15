@@ -4,6 +4,7 @@ from pathlib import Path
 from pymongo import MongoClient
 from datetime import datetime, timedelta
 from typing import Optional
+from collections import defaultdict
 from dotenv import load_dotenv
 
 # 加载 .env 文件
@@ -2010,6 +2011,45 @@ SCORE_PAIN_TYPES = {
     "painScore", "newBornPain", "xinShengErTengTong",
 }
 
+PAIN_SCALE_CN = {
+    "BPS": "行为疼痛量表(BPS)",
+    "CPOT": "重症监护疼痛观察工具(CPOT)",
+    "FLACC": "FLACC疼痛评估量表",
+    "NRS": "数字疼痛评分(NRS)",
+    "PAIN": "疼痛评分",
+    "VAS": "视觉模拟疼痛评分(VAS)",
+    "bps": "行为疼痛量表(BPS)",
+    "cpotScore": "重症监护疼痛观察工具(CPOT)",
+    "cpotScoreV2": "重症监护疼痛观察工具(CPOT)",
+    "nrsScore": "数字疼痛评分(NRS)",
+    "painScore": "疼痛评分",
+    "newBornPain": "新生儿疼痛评分",
+    "xinShengErTengTong": "新生儿疼痛评分",
+}
+
+SEDATION_SCALE_CN = {
+    "RASS": "Richmond躁动-镇静评分(RASS)",
+    "rass": "Richmond躁动-镇静评分(RASS)",
+}
+
+
+def _split_scale_value(raw):
+    text = str(raw or "").strip()
+    if not text:
+        return "", ""
+    if "-" in text:
+        name, value = text.split("-", 1)
+        return name.strip(), value.strip()
+    return text, ""
+
+
+def _score_total(doc):
+    for key in ("total", "score", "value", "fVal", "iVal", "strVal"):
+        val = doc.get(key)
+        if val not in (None, ""):
+            return str(val).strip()
+    return ""
+
 
 def get_icu09_data(dept_codes: list, start_date: str, end_date: str) -> dict:
     """
@@ -2079,7 +2119,8 @@ def get_icu09_data(dept_codes: list, start_date: str, end_date: str) -> dict:
                 bedside_docs = list(db.bedside.find(
                     {"pid": {"$in": den_pids_list},
                      "code": {"$in": list(BEDSIDE_PAIN_CODES)},
-                     "valid": True},
+                     "valid": True,
+                     "time": {"$gte": start_dt, "$lte": end_dt_wide}},
                     {"pid": 1, "strVal": 1, "history": 1, "time": 1},
                 ).max_time_ms(10000).limit(100000))
 
@@ -2106,7 +2147,7 @@ def get_icu09_data(dept_codes: list, start_date: str, end_date: str) -> dict:
 
                     # 前缀白名单校验：仅 CPOT/NRS/BPS/VAS/FLACC/PAIN 等合规量表
                     if score_val:
-                        prefix = score_val.split("-")[0] if "-" in score_val else score_val
+                        prefix, score_num = _split_scale_value(score_val)
                         if prefix not in PAIN_SCALE_PREFIXES:
                             continue  # 非镇痛量表脏值，跳过
 
@@ -2114,8 +2155,9 @@ def get_icu09_data(dept_codes: list, start_date: str, end_date: str) -> dict:
                         if spid not in a_pids:
                             a_pids.add(spid)
                             a_detail[spid] = {
-                                "source": "bedside",
-                                "scale": score_val[:40],
+                                "source": "床旁评估记录",
+                                "scale": PAIN_SCALE_CN.get(prefix, prefix),
+                                "score_value": score_num,
                                 "time": doc.get("time"),
                             }
             except Exception as e:
@@ -2131,8 +2173,10 @@ def get_icu09_data(dept_codes: list, start_date: str, end_date: str) -> dict:
                     score_docs = list(db.score.find(
                         {"pid": {"$in": need_b},
                          "scoreType": {"$in": list(SCORE_PAIN_TYPES)},
-                         "valid": True},
-                        {"pid": 1, "scoreType": 1, "time": 1},
+                         "valid": True,
+                         "time": {"$gte": start_dt, "$lte": end_dt_wide}},
+                        {"pid": 1, "scoreType": 1, "total": 1, "score": 1,
+                         "value": 1, "fVal": 1, "iVal": 1, "strVal": 1, "time": 1},
                     ).max_time_ms(10000).limit(50000))
 
                     for doc in score_docs:
@@ -2151,8 +2195,9 @@ def get_icu09_data(dept_codes: list, start_date: str, end_date: str) -> dict:
                         if spid not in b_pids:
                             b_pids.add(spid)
                             b_detail[spid] = {
-                                "source": "score",
-                                "scale": stype,
+                                "source": "量表评分记录",
+                                "scale": PAIN_SCALE_CN.get(stype, stype),
+                                "score_value": _score_total(doc),
                                 "time": doc.get("time"),
                             }
                 except Exception as e:
@@ -2184,6 +2229,7 @@ def get_icu09_data(dept_codes: list, start_date: str, end_date: str) -> dict:
                     "patient_id": p.get("hisPid", ""),
                     "assess_source": detail.get("source", ""),
                     "assess_scale": detail.get("scale", ""),
+                    "assess_value": detail.get("score_value", ""),
                     "assess_time": detail.get("time"),
                 })
 
@@ -2270,7 +2316,8 @@ def get_icu10_data(dept_codes: list, start_date: str, end_date: str) -> dict:
                 bedside_docs = list(db.bedside.find(
                     {"pid": {"$in": den_pids_list},
                      "code": BEDSIDE_SEDATION_CODE,
-                     "valid": True},
+                     "valid": True,
+                     "time": {"$gte": start_dt, "$lte": end_dt_wide}},
                     {"pid": 1, "strVal": 1, "fVal": 1, "time": 1},
                 ).max_time_ms(10000).limit(100000))
 
@@ -2288,11 +2335,14 @@ def get_icu10_data(dept_codes: list, start_date: str, end_date: str) -> dict:
                             continue
                     # RASS 值: strVal="-4"~"+4", fVal=-4.0~4.0
                     val = (doc.get("strVal") or "").strip()
+                    if not val and doc.get("fVal") not in (None, ""):
+                        val = str(doc.get("fVal")).strip()
                     if val and spid not in a_pids:
                         a_pids.add(spid)
                         a_detail[spid] = {
-                            "source": "bedside",
-                            "scale": f"RASS {val}",
+                            "source": "床旁评估记录",
+                            "scale": SEDATION_SCALE_CN["RASS"],
+                            "score_value": val,
                             "time": doc.get("time"),
                         }
             except Exception as e:
@@ -2308,8 +2358,10 @@ def get_icu10_data(dept_codes: list, start_date: str, end_date: str) -> dict:
                     score_docs = list(db.score.find(
                         {"pid": {"$in": need_b},
                          "scoreType": {"$in": list(SCORE_SEDATION_TYPES)},
-                         "valid": True},
-                        {"pid": 1, "scoreType": 1, "time": 1},
+                         "valid": True,
+                         "time": {"$gte": start_dt, "$lte": end_dt_wide}},
+                        {"pid": 1, "scoreType": 1, "total": 1, "score": 1,
+                         "value": 1, "fVal": 1, "iVal": 1, "strVal": 1, "time": 1},
                     ).max_time_ms(10000).limit(50000))
 
                     for doc in score_docs:
@@ -2327,8 +2379,9 @@ def get_icu10_data(dept_codes: list, start_date: str, end_date: str) -> dict:
                         if spid not in b_pids:
                             b_pids.add(spid)
                             b_detail[spid] = {
-                                "source": "score",
-                                "scale": "rass",
+                                "source": "量表评分记录",
+                                "scale": SEDATION_SCALE_CN["rass"],
+                                "score_value": _score_total(doc),
                                 "time": doc.get("time"),
                             }
                 except Exception as e:
@@ -2360,6 +2413,7 @@ def get_icu10_data(dept_codes: list, start_date: str, end_date: str) -> dict:
                     "patient_id": p.get("hisPid", ""),
                     "assess_source": detail.get("source", ""),
                     "assess_scale": detail.get("scale", ""),
+                    "assess_value": detail.get("score_value", ""),
                     "assess_time": detail.get("time"),
                 })
 
@@ -2372,6 +2426,1956 @@ def get_icu10_data(dept_codes: list, start_date: str, end_date: str) -> dict:
             continue
 
     return result
+
+
+# ============================================================
+# ICU-11：ICU患者标化病死指数(SMR)
+# ============================================================
+
+def _as_float_or_none(value):
+    if value in (None, ""):
+        return None
+    try:
+        return float(value)
+    except (TypeError, ValueError):
+        return None
+
+
+def get_icu11_data(dept_codes: list, start_date: str, end_date: str) -> dict:
+    """
+    ICU-11：ICU患者标化病死指数(SMR)。
+
+    分母人群 = 同期出科且 dischargedType 为“死亡/出院/非医嘱离院”，并有入科
+    24h 内首次 APACHE II 评分的完整病例。
+    分母数值 = 每例首次 APACHE II apacheII.calDead.score 之和。
+    分子 = 同一人群中 dischargedType 为“死亡/非医嘱离院”的人数。
+
+    返回 {den_count, num_count, value, den_patients, num_patients}
+    """
+    from datetime import datetime as dt, timedelta
+
+    start_dt = dt.fromisoformat(start_date)
+    end_dt = dt.fromisoformat(end_date)
+    end_dt_wide = dt(end_dt.year, end_dt.month, end_dt.day, 23, 59, 59)
+
+    result = {
+        "den_count": 0.0,
+        "num_count": 0,
+        "value": 0.0,
+        "den_patients": [],
+        "num_patients": [],
+    }
+
+    death_types = {"死亡", "非医嘱离院"}
+    closed_types = {"出院", *death_types}
+
+    for db_name in BED_DB_NAMES:
+        try:
+            db = get_client(db_name)[db_name]
+
+            patients = list(db.patient.find(
+                {
+                    "deptCode": {"$in": dept_codes},
+                    "status": {"$ne": "invalid"},
+                    "icuDischargeTime": {"$gte": start_dt, "$lte": end_dt_wide},
+                    "dischargedType": {"$in": list(closed_types)},
+                },
+                {
+                    "_id": 1, "hisPid": 1, "mrn": 1, "name": 1,
+                    "deptCode": 1, "icuAdmissionTime": 1, "icuDischargeTime": 1,
+                    "dischargeTime": 1, "dischargedType": 1,
+                },
+            ).max_time_ms(10000).limit(200000))
+
+            if not patients:
+                continue
+
+            pat_by_pid = {str(p["_id"]): p for p in patients}
+            pids = list(pat_by_pid.keys())
+
+            score_docs = list(db.score.find(
+                {
+                    "pid": {"$in": pids},
+                    "scoreType": "apacheII",
+                    "valid": True,
+                },
+                {
+                    "pid": 1, "time": 1, "total": 1,
+                    "apacheII.calDead.score": 1,
+                },
+            ).sort("time", 1).max_time_ms(15000).limit(300000))
+
+            first_score_by_pid = {}
+            for doc in score_docs:
+                spid = doc.get("pid")
+                if spid in first_score_by_pid:
+                    continue
+                pat = pat_by_pid.get(spid)
+                if not pat:
+                    continue
+                score_time = doc.get("time")
+                admit_time = pat.get("icuAdmissionTime")
+                if not score_time or not admit_time:
+                    continue
+                if score_time < admit_time or score_time > admit_time + timedelta(hours=24):
+                    continue
+                cal_dead = (((doc.get("apacheII") or {}).get("calDead") or {}).get("score"))
+                cal_dead = _as_float_or_none(cal_dead)
+                if cal_dead is None or cal_dead < 0 or cal_dead > 1:
+                    continue
+                first_score_by_pid[spid] = {
+                    "time": score_time,
+                    "total": doc.get("total"),
+                    "cal_dead": cal_dead,
+                }
+
+            den_patients = []
+            num_patients = []
+            expected_deaths = 0.0
+            actual_deaths = 0
+
+            for spid, score in first_score_by_pid.items():
+                pat = pat_by_pid[spid]
+                discharged_type = pat.get("dischargedType", "")
+                expected_deaths += score["cal_dead"]
+                if discharged_type in death_types:
+                    actual_deaths += 1
+
+                item = {
+                    "pid": spid,
+                    "mrn": pat.get("mrn", "") or pat.get("hisPid", ""),
+                    "patient_id": pat.get("hisPid", "") or pat.get("mrn", ""),
+                    "name": pat.get("name", ""),
+                    "dept_code": pat.get("deptCode", ""),
+                    "icu_admit": pat.get("icuAdmissionTime"),
+                    "icu_discharge": pat.get("icuDischargeTime") or pat.get("dischargeTime"),
+                    "dischargedType": discharged_type,
+                    "apache_time": score["time"],
+                    "apache_total": score.get("total"),
+                    "apache_calDead": score["cal_dead"],
+                }
+                den_patients.append(item)
+                if discharged_type in death_types:
+                    num_patients.append(item)
+
+            result["den_count"] = round(expected_deaths, 4)
+            result["num_count"] = actual_deaths
+            result["value"] = round(actual_deaths / expected_deaths, 2) if expected_deaths > 0 else 0.0
+            result["den_patients"] = den_patients
+            result["num_patients"] = num_patients
+            break
+
+        except Exception as e:
+            print(f"[ICU-11] Error in db {db_name}: {e}")
+            import traceback
+            traceback.print_exc()
+            continue
+
+    return result
+
+
+# ============================================================
+# ICU-12/13：人工气道非计划拔管与48小时再置管
+# ============================================================
+
+AIRWAY_TUBE_TYPES = {"气管插管", "气插管", "气切套管"}
+
+
+def _is_true(value) -> bool:
+    return value is True or str(value).strip().lower() == "true"
+
+
+def _fmt_dt(value):
+    if hasattr(value, "strftime"):
+        return value.strftime("%Y-%m-%d %H:%M")
+    return str(value)[:16] if value else ""
+
+
+def _get_airway_tube_data(dept_codes: list, start_date: str, end_date: str) -> dict:
+    """
+    共用取数：
+    - 分母：统计期内拔除的气管插管/气插管/气切套管，排除 replace=true 换管。
+    - ICU-12 分子：分母中 unPlannedEndTube 为 true 的非计划拔管。
+    - ICU-13 分子：分母拔管后48小时内同患者再次气管插管/气插管/气切套管，
+      再置管记录 replace=true 时不计；气管插管转气切套管计入。
+    """
+    from datetime import datetime as dt, timedelta
+
+    start_dt = dt.fromisoformat(start_date)
+    end_dt = dt.fromisoformat(end_date)
+    end_dt_wide = dt(end_dt.year, end_dt.month, end_dt.day, 23, 59, 59)
+    reinsert_until = end_dt_wide + timedelta(hours=48)
+
+    result = {
+        "den_count": 0,
+        "icu12_num_count": 0,
+        "icu13_num_count": 0,
+        "den_patients": [],
+        "icu12_num_patients": [],
+        "icu13_num_patients": [],
+    }
+
+    for db_name in BED_DB_NAMES:
+        try:
+            db = get_client(db_name)[db_name]
+
+            patients = list(db.patient.find(
+                {"deptCode": {"$in": dept_codes}, "status": {"$ne": "invalid"}},
+                {"_id": 1, "hisPid": 1, "mrn": 1, "name": 1, "deptCode": 1},
+            ).max_time_ms(10000).limit(200000))
+            if not patients:
+                continue
+
+            pat_by_pid = {str(p["_id"]): p for p in patients}
+            pids = list(pat_by_pid.keys())
+
+            ended_docs = list(db.tubeExe.find(
+                {
+                    "pid": {"$in": pids},
+                    "type": {"$in": list(AIRWAY_TUBE_TYPES)},
+                    "endTime": {"$gte": start_dt, "$lte": end_dt_wide},
+                },
+                {
+                    "_id": 1, "pid": 1, "type": 1, "startTime": 1, "endTime": 1,
+                    "unPlannedEndTube": 1, "replace": 1,
+                },
+            ).sort("endTime", 1).max_time_ms(15000).limit(300000))
+
+            den_docs = [d for d in ended_docs if not _is_true(d.get("replace")) and d.get("endTime")]
+            if not den_docs:
+                result["den_patients"] = []
+                break
+
+            reinsert_docs = list(db.tubeExe.find(
+                {
+                    "pid": {"$in": pids},
+                    "type": {"$in": list(AIRWAY_TUBE_TYPES)},
+                    "startTime": {"$gte": start_dt, "$lte": reinsert_until},
+                },
+                {
+                    "_id": 1, "pid": 1, "type": 1, "startTime": 1, "endTime": 1,
+                    "replace": 1,
+                },
+            ).sort("startTime", 1).max_time_ms(15000).limit(300000))
+
+            starts_by_pid = {}
+            for doc in reinsert_docs:
+                if _is_true(doc.get("replace")):
+                    continue
+                starts_by_pid.setdefault(doc.get("pid"), []).append(doc)
+
+            den_patients = []
+            icu12_num_patients = []
+            icu13_num_patients = []
+
+            for doc in den_docs:
+                pid = doc.get("pid")
+                pat = pat_by_pid.get(pid, {})
+                end_time = doc.get("endTime")
+                base_item = {
+                    "pid": pid,
+                    "mrn": pat.get("mrn", "") or pat.get("hisPid", ""),
+                    "patient_id": pat.get("hisPid", "") or pat.get("mrn", ""),
+                    "name": pat.get("name", ""),
+                    "dept_code": pat.get("deptCode", ""),
+                    "tube_id": str(doc.get("_id", "")),
+                    "tube_type": doc.get("type", ""),
+                    "tube_start": doc.get("startTime"),
+                    "tube_end": end_time,
+                    "unplanned": _is_true(doc.get("unPlannedEndTube")),
+                    "replace": _is_true(doc.get("replace")),
+                }
+                den_patients.append(base_item)
+
+                if base_item["unplanned"]:
+                    icu12_num_patients.append(base_item)
+
+                reinsert = None
+                for next_doc in starts_by_pid.get(pid, []):
+                    next_start = next_doc.get("startTime")
+                    if not next_start or next_doc.get("_id") == doc.get("_id"):
+                        continue
+                    if end_time < next_start <= end_time + timedelta(hours=48):
+                        reinsert = next_doc
+                        break
+
+                if reinsert:
+                    item = dict(base_item)
+                    item.update({
+                        "reinsert_type": reinsert.get("type", ""),
+                        "reinsert_start": reinsert.get("startTime"),
+                        "reinsert_tube_id": str(reinsert.get("_id", "")),
+                    })
+                    icu13_num_patients.append(item)
+
+            result["den_count"] = len(den_patients)
+            result["icu12_num_count"] = len(icu12_num_patients)
+            result["icu13_num_count"] = len(icu13_num_patients)
+            result["den_patients"] = den_patients
+            result["icu12_num_patients"] = icu12_num_patients
+            result["icu13_num_patients"] = icu13_num_patients
+            break
+
+        except Exception as e:
+            print(f"[ICU-12/13] Error in db {db_name}: {e}")
+            import traceback
+            traceback.print_exc()
+            continue
+
+    return result
+
+
+def get_icu12_data(dept_codes: list, start_date: str, end_date: str) -> dict:
+    data = _get_airway_tube_data(dept_codes, start_date, end_date)
+    return {
+        "den_count": data["den_count"],
+        "num_count": data["icu12_num_count"],
+        "den_patients": data["den_patients"],
+        "num_patients": data["icu12_num_patients"],
+    }
+
+
+def get_icu13_data(dept_codes: list, start_date: str, end_date: str) -> dict:
+    data = _get_airway_tube_data(dept_codes, start_date, end_date)
+    return {
+        "den_count": data["den_count"],
+        "num_count": data["icu13_num_count"],
+        "den_patients": data["den_patients"],
+        "num_patients": data["icu13_num_patients"],
+    }
+
+
+# ============================================================
+# ICU-14：非计划转入ICU率
+# ============================================================
+
+def _first_operation_name(patient: dict) -> str:
+    operations = patient.get("patientOperations") or []
+    if not operations or not isinstance(operations[0], dict):
+        return ""
+    return operations[0].get("name", "") or ""
+
+
+def get_icu14_data(dept_codes: list, start_date: str, end_date: str) -> dict:
+    """
+    分母：同期转入ICU的手术患者，admissionType 同时包含“手术”和“转入”。
+    分子：分母患者中 admissionPlan == “非计划转入”。
+    空值/缺失/其他 admissionPlan 默认不计入分子。
+    """
+    from datetime import datetime as dt
+
+    start_dt = dt.fromisoformat(start_date)
+    end_dt = dt.fromisoformat(end_date)
+    end_dt_wide = dt(end_dt.year, end_dt.month, end_dt.day, 23, 59, 59)
+
+    result = {
+        "den_count": 0,
+        "num_count": 0,
+        "value": 0.0,
+        "den_patients": [],
+        "num_patients": [],
+    }
+
+    for db_name in BED_DB_NAMES:
+        try:
+            db = get_client(db_name)[db_name]
+            query = {
+                "deptCode": {"$in": dept_codes},
+                "status": {"$ne": "invalid"},
+                "icuAdmissionTime": {"$gte": start_dt, "$lte": end_dt_wide},
+                "$and": [
+                    {"admissionType": {"$regex": "手术"}},
+                    {"admissionType": {"$regex": "转入"}},
+                ],
+            }
+            projection = {
+                "_id": 1,
+                "hisPid": 1,
+                "mrn": 1,
+                "name": 1,
+                "deptCode": 1,
+                "icuAdmissionTime": 1,
+                "admissionType": 1,
+                "admissionPlan": 1,
+                "patientOperations.name": 1,
+            }
+
+            patients = list(
+                db.patient.find(query, projection)
+                .sort("icuAdmissionTime", 1)
+                .max_time_ms(15000)
+                .limit(200000)
+            )
+            if not patients:
+                continue
+
+            den_patients = []
+            num_patients = []
+            seen = set()
+            for patient in patients:
+                pid = str(patient.get("_id"))
+                if pid in seen:
+                    continue
+                seen.add(pid)
+
+                item = {
+                    "pid": pid,
+                    "mrn": patient.get("mrn", "") or patient.get("hisPid", ""),
+                    "patient_id": patient.get("hisPid", "") or patient.get("mrn", "") or pid[-8:],
+                    "name": patient.get("name", ""),
+                    "dept_code": patient.get("deptCode", ""),
+                    "icuAdmissionTime": patient.get("icuAdmissionTime"),
+                    "admissionType": patient.get("admissionType", "") or "",
+                    "admissionPlan": patient.get("admissionPlan", "") or "",
+                    "operation_name": _first_operation_name(patient),
+                }
+                den_patients.append(item)
+                if item["admissionPlan"] == "非计划转入":
+                    num_patients.append(item)
+
+            den_count = len(den_patients)
+            num_count = len(num_patients)
+            result.update({
+                "den_count": den_count,
+                "num_count": num_count,
+                "value": round(num_count / den_count * 100, 1) if den_count > 0 else 0.0,
+                "den_patients": den_patients,
+                "num_patients": num_patients,
+            })
+            break
+
+        except Exception as e:
+            print(f"[ICU-14] Error in db {db_name}: {e}")
+            import traceback
+            traceback.print_exc()
+            continue
+
+    return result
+
+
+# ============================================================
+# ICU-16/17/CAUTI：三管院感发病率
+# ============================================================
+
+# ============================================================
+# ICU-15: 48h readmission after ICU discharge
+# ============================================================
+
+def _icu15_patient_identity(patient: dict, fallback_pid: str = "") -> str:
+    for key in ("hisPid", "mrn", "patientId", "inHospitalNo"):
+        val = patient.get(key)
+        if val not in (None, ""):
+            return f"{key}:{val}"
+    return f"pid:{fallback_pid or str(patient.get('_id', ''))}"
+
+
+def _icu15_patient_item(patient: dict, pid: str, discharge_time, source: str) -> dict:
+    return {
+        "pid": pid,
+        "mrn": patient.get("mrn", "") or patient.get("hisPid", ""),
+        "patient_id": patient.get("hisPid", "") or patient.get("mrn", "") or pid[-8:],
+        "name": patient.get("name", ""),
+        "dept_code": patient.get("deptCode", ""),
+        "icu_admit": patient.get("icuAdmissionTime"),
+        "icu_discharge": discharge_time,
+        "source": source,
+        "basis": "patient ICU discharge in period" if source == "patient" else "patInIcuHistoryList ICU discharge in period",
+    }
+
+
+def _icu15_event_key(identity: str, discharge_time) -> tuple:
+    rounded = discharge_time.replace(second=0, microsecond=0) if discharge_time else None
+    return identity, rounded
+
+
+def _icu15_find_merge_key(events: dict, identity: str, discharge_time, merge_hours: int = 2):
+    from datetime import timedelta
+
+    if not discharge_time:
+        return None
+    for key, item in events.items():
+        if key[0] != identity:
+            continue
+        existing_time = item.get("icu_discharge")
+        if existing_time and abs(existing_time - discharge_time) <= timedelta(hours=merge_hours):
+            return key
+    return None
+
+
+def _icu15_add_event(events: dict, identity: str, item: dict):
+    discharge_time = item.get("icu_discharge")
+    merge_key = _icu15_find_merge_key(events, identity, discharge_time)
+    if merge_key:
+        existing = events[merge_key]
+        if item.get("history_re_admit") and not existing.get("history_re_admit"):
+            existing["history_re_admit"] = item.get("history_re_admit")
+        existing["source"] = "patient+patInIcuHistoryList" if existing.get("source") != item.get("source") else existing.get("source")
+        existing["basis"] = "patient record and patInIcuHistoryList discharge merged"
+        return existing
+    key = _icu15_event_key(identity, discharge_time)
+    events[key] = item
+    return item
+
+
+def get_icu15_data(dept_codes: list, start_date: str, end_date: str) -> dict:
+    """
+    ICU-15: transfer-out ICU then return to ICU within 48h.
+
+    Denominator is discharge events in the period, including patient ICU discharge
+    records and patInIcuHistoryList ICU discharge records. Numerator is the same
+    events with a later ICU admission within 48 hours.
+    """
+    from datetime import datetime as dt, timedelta
+
+    start_dt = dt.fromisoformat(start_date)
+    end_dt = dt.fromisoformat(end_date)
+    end_dt_wide = dt(end_dt.year, end_dt.month, end_dt.day, 23, 59, 59)
+    lookahead_end = end_dt_wide + timedelta(hours=48)
+
+    result = {
+        "den_count": 0,
+        "num_count": 0,
+        "value": 0.0,
+        "value_type": "percent",
+        "den_patients": [],
+        "num_patients": [],
+    }
+
+    for db_name in BED_DB_NAMES:
+        try:
+            db = get_client(db_name)[db_name]
+            projection = {
+                "_id": 1, "hisPid": 1, "mrn": 1, "patientId": 1, "inHospitalNo": 1,
+                "name": 1, "deptCode": 1, "icuAdmissionTime": 1, "icuDischargeTime": 1,
+                "dischargeTime": 1, "patInIcuHistoryList": 1, "status": 1,
+            }
+
+            scoped_patients = list(db.patient.find(
+                {
+                    "deptCode": {"$in": dept_codes},
+                    "status": {"$ne": "invalid"},
+                    "$or": [
+                        {"icuDischargeTime": {"$gte": start_dt, "$lte": end_dt_wide}},
+                        {"dischargeTime": {"$gte": start_dt, "$lte": end_dt_wide}},
+                        {"patInIcuHistoryList.icuDischargeTime": {"$gte": start_dt, "$lte": end_dt_wide}},
+                    ],
+                },
+                projection,
+            ).sort("icuDischargeTime", 1).max_time_ms(20000).limit(200000))
+
+            if not scoped_patients:
+                continue
+
+            his_pids = [p.get("hisPid") for p in scoped_patients if p.get("hisPid")]
+            mrns = [p.get("mrn") for p in scoped_patients if p.get("mrn")]
+            patient_ids = [p.get("patientId") for p in scoped_patients if p.get("patientId")]
+            identities = {
+                _icu15_patient_identity(p, str(p.get("_id", "")))
+                for p in scoped_patients
+            }
+
+            identity_query = []
+            if his_pids:
+                identity_query.append({"hisPid": {"$in": list(set(his_pids))}})
+            if mrns:
+                identity_query.append({"mrn": {"$in": list(set(mrns))}})
+            if patient_ids:
+                identity_query.append({"patientId": {"$in": list(set(patient_ids))}})
+
+            related_patients = scoped_patients
+            if identity_query:
+                related_patients = list(db.patient.find(
+                    {
+                        "status": {"$ne": "invalid"},
+                        "$or": identity_query,
+                        "icuAdmissionTime": {"$lte": lookahead_end},
+                    },
+                    projection,
+                ).sort("icuAdmissionTime", 1).max_time_ms(20000).limit(300000))
+
+            admissions_by_identity = defaultdict(list)
+            for patient in related_patients:
+                pid = str(patient.get("_id", ""))
+                identity = _icu15_patient_identity(patient, pid)
+                if identity not in identities:
+                    continue
+                admit_time = patient.get("icuAdmissionTime")
+                if admit_time:
+                    admissions_by_identity[identity].append({
+                        "time": admit_time,
+                        "pid": pid,
+                        "dept_code": patient.get("deptCode", ""),
+                        "source": "patient",
+                    })
+                for hist in patient.get("patInIcuHistoryList") or []:
+                    re_time = hist.get("reIcuAdmissionTime")
+                    if re_time:
+                        admissions_by_identity[identity].append({
+                            "time": re_time,
+                            "pid": pid,
+                            "dept_code": patient.get("deptCode", ""),
+                            "source": "patInIcuHistoryList",
+                        })
+
+            for admits in admissions_by_identity.values():
+                admits.sort(key=lambda x: x["time"])
+
+            events = {}
+            for patient in scoped_patients:
+                pid = str(patient.get("_id", ""))
+                identity = _icu15_patient_identity(patient, pid)
+                discharge_time = patient.get("icuDischargeTime") or patient.get("dischargeTime")
+                if discharge_time and start_dt <= discharge_time <= end_dt_wide:
+                    _icu15_add_event(
+                        events,
+                        identity,
+                        _icu15_patient_item(patient, pid, discharge_time, "patient"),
+                    )
+
+                for hist in patient.get("patInIcuHistoryList") or []:
+                    hist_discharge = hist.get("icuDischargeTime")
+                    if not hist_discharge or not (start_dt <= hist_discharge <= end_dt_wide):
+                        continue
+                    item = _icu15_add_event(
+                        events,
+                        identity,
+                        _icu15_patient_item(patient, pid, hist_discharge, "patInIcuHistoryList"),
+                    )
+                    re_time = hist.get("reIcuAdmissionTime")
+                    if re_time:
+                        item["history_re_admit"] = re_time
+
+            den_patients = []
+            num_patients = []
+            for (identity, _), item in sorted(events.items(), key=lambda kv: kv[1].get("icu_discharge")):
+                discharge_time = item.get("icu_discharge")
+                readmit = None
+                history_re_admit = item.get("history_re_admit")
+                if history_re_admit and discharge_time < history_re_admit <= discharge_time + timedelta(hours=48):
+                    readmit = {
+                        "time": history_re_admit,
+                        "pid": item.get("pid", ""),
+                        "dept_code": item.get("dept_code", ""),
+                        "source": "patInIcuHistoryList",
+                    }
+                if not readmit:
+                    for admit in admissions_by_identity.get(identity, []):
+                        at = admit.get("time")
+                        if at and discharge_time < at <= discharge_time + timedelta(hours=48):
+                            readmit = admit
+                            break
+                item["re_icu_admit"] = readmit.get("time") if readmit else None
+                item["re_admit_dept_code"] = readmit.get("dept_code", "") if readmit else ""
+                item["re_admit_source"] = readmit.get("source", "") if readmit else ""
+                item["basis"] = (
+                    "ICU discharge followed by ICU readmission within 48h"
+                    if readmit else item.get("basis", "")
+                )
+                den_patients.append(item)
+                if readmit:
+                    num_patients.append(item)
+
+            den_count = len(den_patients)
+            num_count = len(num_patients)
+            result.update({
+                "den_count": den_count,
+                "num_count": num_count,
+                "value": round(num_count / den_count * 100, 1) if den_count > 0 else 0.0,
+                "den_patients": den_patients,
+                "num_patients": num_patients,
+            })
+            break
+        except Exception as e:
+            print(f"[ICU-15] Error in db {db_name}: {e}")
+            import traceback
+            traceback.print_exc()
+            continue
+
+    return result
+
+
+# ============================================================
+# ICU-18: acute brain injury consciousness assessment rate
+# ============================================================
+
+PRIMARY_BRAIN_INJURY_ICD_PREFIXES = {
+    "S02", "S06", "I60", "I61", "I62", "I63",
+    "C70", "C71", "D32", "D33", "D42", "D43",
+    "G40", "G41",
+    *{f"G0{i}" for i in range(10)},
+}
+SECONDARY_BRAIN_INJURY_ICD_PREFIXES = {
+    "G93.1", "G93.4", "T67.0", "K72",
+}
+IMAGING_BRAIN_INJURY_ICD_PREFIXES = {"R90"}
+CONDITIONAL_BRAIN_INJURY_ICD_PREFIXES = {"I46", "J96", "N18", "N19"}
+
+PRIMARY_BRAIN_KEYWORDS = {
+    "颅脑损伤", "脑外伤", "头部外伤", "蛛网膜下腔出血", "蛛血", "脑出血",
+    "脑梗", "脑梗死", "脑栓塞", "颅内感染", "脑炎", "脑膜炎", "脑脓肿",
+    "脑肿瘤", "颅内占位", "胶质瘤", "脑膜瘤", "癫痫", "惊厥",
+}
+SECONDARY_BRAIN_KEYWORDS = {
+    "心肺复苏后", "复苏后", "缺血缺氧性脑病", "缺氧缺血性脑病", "热射病",
+    "代谢性脑病", "肝性脑病", "肺性脑病", "肾性脑病", "尿毒症脑病",
+    "中毒性脑病", "脑病",
+}
+IMAGING_BRAIN_KEYWORDS = {"颅脑", "头颅", "脑"}
+IMAGING_ABNORMAL_KEYWORDS = {
+    "出血", "梗死", "梗塞", "占位", "肿瘤", "水肿", "挫裂伤", "骨折",
+    "蛛网膜下腔", "硬膜下", "硬膜外", "脑疝", "脑积水", "异常密度",
+    "异常信号", "缺血", "软化灶",
+}
+NEGATIVE_IMAGING_KEYWORDS = {"未见明显异常", "未见异常", "无明显异常"}
+GCS_BEDSIDE_CODES = {"param_score_gcs_obs"}
+FOUR_BEDSIDE_CODES = {"param_score_four", "param_score_four_obs"}
+GCS_SCORE_TYPES = {"gcsScore"}
+FOUR_SCORE_TYPES = {"fourScore", "FOUR", "four", "FourScore"}
+
+
+def _normalize_icd(code) -> str:
+    return str(code or "").strip().upper()
+
+
+def _patient_text_diagnoses(patient: dict) -> list[str]:
+    texts = []
+    for field in ("clinicalDiagnosis", "admissionDiagnosis"):
+        val = patient.get(field)
+        if val:
+            texts.append(str(val))
+    for item in patient.get("diagnosisHistoryList") or []:
+        val = item.get("diagnosis") if isinstance(item, dict) else None
+        if val:
+            texts.append(str(val))
+    cleaned = []
+    for text in texts:
+        text = text.replace("[", "|").replace("]", "|")
+        for part in text.split("|"):
+            part = part.strip()
+            if part:
+                cleaned.append(part)
+    return cleaned
+
+
+def _match_keyword(texts: list[str], keywords: set[str]):
+    for text in texts:
+        for keyword in keywords:
+            if keyword in text:
+                return keyword, text
+    return "", ""
+
+
+def _match_brain_injury_icd(codes: list[str], texts: list[str]) -> tuple[str, str, str]:
+    text_joined = "|".join(texts)
+    for code in codes:
+        icd = _normalize_icd(code)
+        if not icd:
+            continue
+        if any(icd.startswith(prefix) for prefix in PRIMARY_BRAIN_INJURY_ICD_PREFIXES):
+            return "原发神经", "icd", icd
+        if any(icd.startswith(prefix) for prefix in SECONDARY_BRAIN_INJURY_ICD_PREFIXES):
+            return "非原发脑损伤", "icd", icd
+        if any(icd.startswith(prefix) for prefix in IMAGING_BRAIN_INJURY_ICD_PREFIXES):
+            return "影像异常", "icd", icd
+        if any(icd.startswith(prefix) for prefix in CONDITIONAL_BRAIN_INJURY_ICD_PREFIXES):
+            kw, _ = _match_keyword([text_joined], SECONDARY_BRAIN_KEYWORDS)
+            if kw:
+                return "非原发脑损伤", "icd+text", f"{icd}+{kw}"
+    return "", "", ""
+
+
+def _match_brain_injury_text(texts: list[str]) -> tuple[str, str, str]:
+    kw, text = _match_keyword(texts, PRIMARY_BRAIN_KEYWORDS)
+    if kw:
+        return "原发神经", "文本", kw
+    kw, text = _match_keyword(texts, SECONDARY_BRAIN_KEYWORDS)
+    if kw:
+        return "非原发脑损伤", "文本", kw
+    return "", "", ""
+
+
+def _brain_injury_den_item(patient: dict, pid: str, category: str, source: str, evidence: str, confidence=1.0):
+    return {
+        "pid": pid,
+        "mrn": patient.get("mrn", "") or patient.get("hisPid", ""),
+        "patient_id": patient.get("hisPid", "") or patient.get("mrn", "") or pid[-8:],
+        "name": patient.get("name", ""),
+        "dept_code": patient.get("deptCode", ""),
+        "icu_admit": patient.get("icuAdmissionTime"),
+        "category": category,
+        "den_source": source,
+        "evidence": evidence,
+        "ai_confidence": confidence,
+        "assessed": False,
+        "first_assess_time": None,
+        "assess_source": "",
+    }
+
+
+def _apply_icu18_assessments(db, den_by_pid: dict, start_dt, end_dt_wide):
+    if not den_by_pid:
+        return
+    pids = list(den_by_pid.keys())
+
+    def accept_assessment(doc, source):
+        pid = doc.get("pid")
+        item = den_by_pid.get(pid)
+        if not item:
+            return
+        assess_time = doc.get("time")
+        patient_admit = item.get("icu_admit") or start_dt
+        if assess_time and (assess_time < patient_admit or assess_time > end_dt_wide):
+            return
+        old_time = item.get("first_assess_time")
+        if not old_time or (assess_time and assess_time < old_time):
+            item["assessed"] = True
+            item["first_assess_time"] = assess_time
+            item["assess_source"] = source
+
+    bedside_query = {
+        "pid": {"$in": pids},
+        "valid": True,
+        "code": {"$in": list(GCS_BEDSIDE_CODES | FOUR_BEDSIDE_CODES)},
+        "time": {"$gte": start_dt, "$lte": end_dt_wide},
+    }
+    for doc in db.bedside.find(
+        bedside_query,
+        {"pid": 1, "code": 1, "time": 1, "strVal": 1},
+    ).sort("time", 1).max_time_ms(30000).limit(300000):
+        code = doc.get("code")
+        source = "GCS床旁记录" if code in GCS_BEDSIDE_CODES else "FOUR床旁记录"
+        accept_assessment(doc, source)
+
+    score_query = {
+        "pid": {"$in": pids},
+        "valid": True,
+        "scoreType": {"$in": list(GCS_SCORE_TYPES | FOUR_SCORE_TYPES)},
+        "time": {"$gte": start_dt, "$lte": end_dt_wide},
+    }
+    for doc in db.score.find(
+        score_query,
+        {"pid": 1, "scoreType": 1, "time": 1, "total": 1},
+    ).sort("time", 1).max_time_ms(30000).limit(300000):
+        stype = doc.get("scoreType")
+        source = "GCS量表评分" if stype in GCS_SCORE_TYPES else "FOUR量表评分"
+        accept_assessment(doc, source)
+
+
+def _apply_icu18_image_reports(den_by_pid: dict, patients_by_his_pid: dict, start_dt, end_dt_wide):
+    if not patients_by_his_pid:
+        return
+    try:
+        dc = get_client("DataCenter")["DataCenter"]
+        if "VI_ICU_REPORT" not in dc.list_collection_names():
+            return
+        his_pids = list(patients_by_his_pid.keys())
+        query = {
+            "pid": {"$in": his_pids},
+            "$or": [
+                {"examTime": {"$gte": start_dt, "$lte": end_dt_wide}},
+                {"reportTime": {"$gte": start_dt, "$lte": end_dt_wide}},
+            ],
+            "$and": [
+                {"$or": [
+                    {"examName": {"$regex": "颅脑|头颅|脑"}},
+                    {"title": {"$regex": "颅脑|头颅|脑"}},
+                    {"bodyParts": {"$regex": "颅脑|头颅|脑"}},
+                ]},
+                {"$or": [
+                    {"diagnose": {"$regex": "出血|梗死|梗塞|占位|肿瘤|水肿|挫裂伤|骨折|脑疝|脑积水|异常"}},
+                    {"conclusion": {"$regex": "出血|梗死|梗塞|占位|肿瘤|水肿|挫裂伤|骨折|脑疝|脑积水|异常"}},
+                    {"reportDesc": {"$regex": "出血|梗死|梗塞|占位|肿瘤|水肿|挫裂伤|骨折|脑疝|脑积水|异常"}},
+                ]},
+            ],
+        }
+        for report in dc.VI_ICU_REPORT.find(
+            query,
+            {"pid": 1, "examName": 1, "title": 1, "diagnose": 1, "conclusion": 1, "reportDesc": 1, "examTime": 1, "reportTime": 1},
+        ).sort("examTime", 1).max_time_ms(30000).limit(100000):
+            his_pid = report.get("pid")
+            patient = patients_by_his_pid.get(his_pid)
+            if not patient:
+                continue
+            text = "|".join(str(report.get(f) or "") for f in ("diagnose", "conclusion", "reportDesc"))
+            if any(neg in text for neg in NEGATIVE_IMAGING_KEYWORDS):
+                continue
+            if not any(kw in text for kw in IMAGING_ABNORMAL_KEYWORDS):
+                continue
+            pid = str(patient.get("_id"))
+            if pid in den_by_pid:
+                continue
+            evidence = (report.get("examName") or report.get("title") or "颅脑影像") + ":" + text[:40]
+            den_by_pid[pid] = _brain_injury_den_item(patient, pid, "影像异常", "影像", evidence, 0.9)
+    except Exception as e:
+        print(f"[ICU-18] image report query error: {e}")
+
+
+def get_icu18_data(dept_codes: list, start_date: str, end_date: str) -> dict:
+    """
+    ICU-18: acute brain injury consciousness assessment rate.
+    Denominator uses patient diagnosis ICD/text plus image/manual supplements.
+    Numerator is distinct denominator patients with at least one GCS or FOUR record.
+    """
+    from datetime import datetime as dt
+
+    start_dt = dt.fromisoformat(start_date)
+    end_dt = dt.fromisoformat(end_date)
+    end_dt_wide = dt(end_dt.year, end_dt.month, end_dt.day, 23, 59, 59)
+    result = {
+        "den_count": 0,
+        "num_count": 0,
+        "value": 0.0,
+        "value_type": "percent",
+        "den_patients": [],
+        "num_patients": [],
+        "note": "",
+    }
+
+    for db_name in BED_DB_NAMES:
+        try:
+            db = get_client(db_name)[db_name]
+            patients = list(db.patient.find(
+                {
+                    "deptCode": {"$in": dept_codes},
+                    "status": {"$ne": "invalid"},
+                    "icuAdmissionTime": {"$gte": start_dt, "$lte": end_dt_wide},
+                },
+                {
+                    "_id": 1, "hisPid": 1, "mrn": 1, "name": 1, "deptCode": 1,
+                    "icuAdmissionTime": 1, "clinicalDiagnosisCodeList": 1,
+                    "dischargedDiagnosisIcd": 1, "clinicalDiagnosis": 1,
+                    "admissionDiagnosis": 1, "diagnosisHistoryList": 1,
+                    "patientOperations.name": 1,
+                },
+            ).sort("icuAdmissionTime", 1).max_time_ms(30000).limit(200000))
+            if not patients:
+                continue
+
+            den_by_pid = {}
+            patients_by_pid = {str(p["_id"]): p for p in patients}
+            patients_by_his_pid = {str(p.get("hisPid")): p for p in patients if p.get("hisPid")}
+
+            for patient in patients:
+                pid = str(patient["_id"])
+                texts = _patient_text_diagnoses(patient)
+                codes = []
+                for field in ("clinicalDiagnosisCodeList", "dischargedDiagnosisIcd"):
+                    value = patient.get(field)
+                    if isinstance(value, list):
+                        codes.extend(value)
+                    elif value:
+                        codes.append(value)
+
+                category, source, evidence = _match_brain_injury_icd(codes, texts)
+                if not category:
+                    category, source, evidence = _match_brain_injury_text(texts)
+                if category:
+                    den_by_pid[pid] = _brain_injury_den_item(patient, pid, category, source, evidence, 1.0)
+
+            disease_docs = list(db.diseaseDiagnosis.find(
+                {
+                    "pid": {"$in": list(patients_by_pid.keys())},
+                    "$or": [
+                        {"brainInjury.primaryNervousDisease": {"$exists": True, "$nin": [None, ""]}},
+                        {"brainInjury.notPrimaryNervousDisease": {"$exists": True, "$nin": [None, ""]}},
+                        {"brainInjury.luNaoCheckResult": {"$exists": True, "$nin": [None, ""]}},
+                    ],
+                },
+                {"pid": 1, "brainInjury": 1},
+            ).max_time_ms(15000).limit(100000))
+            for doc in disease_docs:
+                pid = doc.get("pid")
+                patient = patients_by_pid.get(pid)
+                if not patient or pid in den_by_pid:
+                    continue
+                brain = doc.get("brainInjury") or {}
+                evidence = brain.get("primaryNervousDisease") or brain.get("notPrimaryNervousDisease") or brain.get("luNaoCheckResult") or "brainInjury"
+                den_by_pid[pid] = _brain_injury_den_item(patient, pid, "人工确认脑损伤", "diseaseDiagnosis", str(evidence), 1.0)
+
+            _apply_icu18_image_reports(den_by_pid, patients_by_his_pid, start_dt, end_dt_wide)
+            _apply_icu18_assessments(db, den_by_pid, start_dt, end_dt_wide)
+
+            den_patients = list(den_by_pid.values())
+            num_patients = [p for p in den_patients if p.get("assessed")]
+            den_count = len(den_patients)
+            num_count = len(num_patients)
+            result.update({
+                "den_count": den_count,
+                "num_count": num_count,
+                "value": round(num_count / den_count * 100, 2) if den_count > 0 else 0.0,
+                "den_patients": den_patients,
+                "num_patients": num_patients,
+                "note": "" if den_count > 0 else "无急性脑损伤患者",
+            })
+            break
+        except Exception as e:
+            print(f"[ICU-18] Error in db {db_name}: {e}")
+            import traceback
+            traceback.print_exc()
+            continue
+
+    return result
+
+
+# ============================================================
+# ICU-19：48h 内肠内营养(EN)启动率
+# ============================================================
+
+EN_BEDSIDE_ROUTE_CODES = {"param_肠内营养途径"}
+EN_BEDSIDE_START_CODES = {"param_肠内营养措施", "param_营养输注方式"}
+EN_BEDSIDE_START_VALUES = {"开始", "启动", "给予", "分次推注", "间接重力滴注", "持续泵入", "顿服"}
+EN_ROUTE_KEYWORDS = {"经口", "口服", "胃管", "鼻胃管", "鼻空肠管", "鼻肠管", "造瘘", "空肠造瘘", "胃造瘘"}
+EN_METHOD_KEYWORDS = {"口服", "鼻饲", "管饲", "胃管", "鼻胃管", "鼻肠管", "肠内", "经口", "造瘘"}
+EN_NAME_WHITELIST = {
+    "肠内营养", "能全力", "瑞素", "瑞能", "瑞代", "瑞先", "百普力", "百普素",
+    "安素", "康全力", "佳维体", "益菲佳", "维沃", "全安素", "短肽型",
+    "整蛋白型", "匀浆膳", "鼻饲营养",
+}
+PN_NAME_BLACKLIST = {
+    "脂肪乳注射液", "中长链脂肪乳", "结构脂肪乳", "复方氨基酸注射液",
+    "葡萄糖注射液", "卡文", "卡全", "全合一", "静脉营养", "肠外营养",
+}
+EN_CONTRAINDICATION_KEYWORDS = {
+    "肠梗阻", "肠缺血", "消化道出血", "胃潴留", "肠瘘", "休克未纠正",
+    "严重腹胀", "腹腔间隔室综合征",
+}
+
+
+def _first_time_from_drugexe(doc):
+    t = doc.get("startTime") or doc.get("exeTime") or doc.get("orderTime")
+    if t:
+        return t
+    his_start = doc.get("hisStartTime")
+    if isinstance(his_start, dict):
+        return his_start.get("exeTime") or his_start.get("startTime")
+    return None
+
+
+def _drug_names(doc) -> list[str]:
+    names = []
+    for item in doc.get("drugList", []) or []:
+        name = str(item.get("name") or item.get("drugName") or "").strip()
+        if name:
+            names.append(name)
+    for key in ("drugName", "orderName", "name"):
+        name = str(doc.get(key) or "").strip()
+        if name:
+            names.append(name)
+    return names
+
+
+def _drug_codes(doc) -> set:
+    codes = set()
+    for item in doc.get("drugList", []) or []:
+        code = str(item.get("code") or item.get("drugCode") or "").strip()
+        if code:
+            codes.add(code)
+    for key in ("drugCode", "code"):
+        code = str(doc.get(key) or "").strip()
+        if code:
+            codes.add(code)
+    return codes
+
+
+def _is_executed_drugexe(doc) -> bool:
+    return (
+        doc.get("status") == "finished"
+        or doc.get("statusFlag") == "已执行"
+        or doc.get("executeStatus") == "已执行"
+    )
+
+
+def _match_enteral_name(names: list[str]) -> tuple[bool, str, str]:
+    text = " ".join(names)
+    for kw in EN_NAME_WHITELIST:
+        if kw in text:
+            return True, kw, ""
+    for kw in PN_NAME_BLACKLIST:
+        if kw in text:
+            return False, "", kw
+    if ("注射液" in text or "静脉" in text) and "肠内营养" not in text:
+        return False, "", "注射液/静脉"
+    return False, "", ""
+
+
+def _match_enteral_route(doc) -> tuple[bool, str]:
+    vals = []
+    for key in ("methodCode", "methodName", "route", "usage", "useWay"):
+        val = str(doc.get(key) or "").strip()
+        if val:
+            vals.append(val)
+    for item in doc.get("drugList", []) or []:
+        for key in ("methodCode", "methodName", "route", "usage", "useWay"):
+            val = str(item.get(key) or "").strip()
+            if val:
+                vals.append(val)
+    text = " ".join(vals)
+    for kw in EN_METHOD_KEYWORDS:
+        if kw in text:
+            return True, kw
+    return False, ""
+
+
+def _contraindication_evidence(patient: dict) -> list[str]:
+    text = " ".join(
+        str(patient.get(k) or "")
+        for k in ("clinicalDiagnosis", "diagnosis", "admissionDiagnosis")
+    )
+    return [kw for kw in EN_CONTRAINDICATION_KEYWORDS if kw in text]
+
+
+def _resolve_en_start_from_bedside(db, pids: list, start_dt, end_dt_wide) -> dict:
+    result = {}
+    docs = list(db.bedside.find(
+        {
+            "pid": {"$in": pids},
+            "valid": True,
+            "code": {"$in": list(EN_BEDSIDE_ROUTE_CODES | EN_BEDSIDE_START_CODES)},
+            "time": {"$gte": start_dt, "$lte": end_dt_wide},
+        },
+        {"_id": 1, "pid": 1, "code": 1, "strVal": 1, "time": 1},
+    ).sort("time", 1).max_time_ms(20000).limit(300000))
+
+    latest_route = {}
+    for doc in docs:
+        pid = doc.get("pid")
+        code = doc.get("code")
+        val = str(doc.get("strVal") or "").strip()
+        t = doc.get("time")
+        if not pid or not t:
+            continue
+        if code in EN_BEDSIDE_ROUTE_CODES and val:
+            latest_route[pid] = {"value": val, "time": t}
+            continue
+        if code not in EN_BEDSIDE_START_CODES:
+            continue
+        has_start = any(kw in val for kw in EN_BEDSIDE_START_VALUES)
+        route = latest_route.get(pid, {})
+        route_value = route.get("value", "")
+        has_route = any(kw in route_value for kw in EN_ROUTE_KEYWORDS)
+        if has_start and (has_route or "肠内" in code or "肠内" in val):
+            if pid not in result or t < result[pid]["time"]:
+                result[pid] = {
+                    "time": t,
+                    "source": "bedside",
+                    "rule": "en_bedside_start",
+                    "hit": val or "开始",
+                    "route": route_value,
+                    "record_id": str(doc.get("_id", "")),
+                }
+    return result
+
+
+def _resolve_en_start_from_drugexe(db, pids: list, start_dt, end_dt_wide) -> dict:
+    nutrition_codes = {
+        str(d.get("code"))
+        for d in db.configDrug.find({"classification": "营养"}, {"code": 1}).max_time_ms(10000)
+        if d.get("code")
+    }
+    docs = list(db.drugExe.find(
+        {
+            "pid": {"$in": pids},
+            "startTime": {"$gte": start_dt, "$lte": end_dt_wide},
+            "$or": [
+                {"status": "finished"},
+                {"statusFlag": "已执行"},
+                {"executeStatus": "已执行"},
+            ],
+        },
+        {
+            "_id": 1, "pid": 1, "startTime": 1, "exeTime": 1, "hisStartTime": 1,
+            "status": 1, "statusFlag": 1, "executeStatus": 1,
+            "methodCode": 1, "methodName": 1, "route": 1, "usage": 1, "useWay": 1,
+            "drugName": 1, "orderName": 1, "name": 1,
+            "drugList.code": 1, "drugList.name": 1, "drugList.methodCode": 1,
+            "drugList.methodName": 1, "drugList.route": 1, "drugList.usage": 1,
+            "drugList.useWay": 1,
+        },
+    ).sort("startTime", 1).max_time_ms(30000).limit(500000))
+
+    result = {}
+    for doc in docs:
+        if not _is_executed_drugexe(doc):
+            continue
+        pid = doc.get("pid")
+        t = _first_time_from_drugexe(doc)
+        if not pid or not t:
+            continue
+        names = _drug_names(doc)
+        codes = _drug_codes(doc)
+        name_hit, name_kw, pn_kw = _match_enteral_name(names)
+        route_hit, route_kw = _match_enteral_route(doc)
+        class_hit = bool(nutrition_codes & codes)
+        if name_hit:
+            evidence = {"source": "name", "rule": "en_name_whitelist", "hit": name_kw}
+        elif class_hit and route_hit:
+            evidence = {"source": "classification", "rule": "nutrition_enteral", "hit": route_kw}
+        elif class_hit and pn_kw:
+            continue
+        else:
+            continue
+        if pid not in result or t < result[pid]["time"]:
+            result[pid] = {
+                **evidence,
+                "time": t,
+                "route": route_kw,
+                "drug_name": ", ".join(names[:3]),
+                "record_id": str(doc.get("_id", "")),
+            }
+    return result
+
+
+def get_icu19_data(dept_codes: list, start_date: str, end_date: str) -> dict:
+    """ICU-19: 48h 内肠内营养(EN)启动率。"""
+    from datetime import datetime as dt, timedelta
+
+    start_dt = dt.fromisoformat(start_date)
+    end_dt = dt.fromisoformat(end_date)
+    end_dt_wide = dt(end_dt.year, end_dt.month, end_dt.day, 23, 59, 59)
+    result = {"den_count": 0, "num_count": 0, "den_patients": [], "num_patients": []}
+
+    for db_name in BED_DB_NAMES:
+        try:
+            db = get_client(db_name)[db_name]
+            patients = list(db.patient.find(
+                {
+                    "deptCode": {"$in": dept_codes},
+                    "status": {"$ne": "invalid"},
+                    "icuAdmissionTime": {"$gte": start_dt, "$lte": end_dt_wide},
+                },
+                {
+                    "_id": 1, "hisPid": 1, "mrn": 1, "name": 1, "deptCode": 1,
+                    "icuAdmissionTime": 1, "icuDischargeTime": 1, "dischargeTime": 1,
+                    "clinicalDiagnosis": 1, "diagnosis": 1, "admissionDiagnosis": 1,
+                },
+            ).sort("icuAdmissionTime", 1).max_time_ms(20000).limit(200000))
+            if not patients:
+                continue
+
+            den_patients = []
+            pat_by_pid = {}
+            for p in patients:
+                pid = str(p["_id"])
+                admit = p.get("icuAdmissionTime")
+                if not admit:
+                    continue
+                stay_end = p.get("icuDischargeTime") or p.get("dischargeTime") or min(dt.now(), end_dt_wide)
+                if stay_end < admit:
+                    continue
+                if (stay_end - admit).total_seconds() <= 48 * 3600:
+                    continue
+                p["_pid"] = pid
+                p["_stay_end"] = stay_end
+                pat_by_pid[pid] = p
+                den_patients.append(p)
+
+            if not den_patients:
+                break
+
+            pids = list(pat_by_pid.keys())
+            bedside_starts = _resolve_en_start_from_bedside(db, pids, start_dt, end_dt_wide)
+            drug_starts = _resolve_en_start_from_drugexe(db, pids, start_dt, end_dt_wide)
+
+            den_items = []
+            num_items = []
+            for pid, p in pat_by_pid.items():
+                admit = p.get("icuAdmissionTime")
+                candidates = [ev for ev in (bedside_starts.get(pid), drug_starts.get(pid)) if ev]
+                ev = min(candidates, key=lambda x: x["time"]) if candidates else None
+                en_start = ev.get("time") if ev else None
+                within_48h = bool(en_start and en_start - admit <= timedelta(hours=48))
+                contraindications = _contraindication_evidence(p)
+                item = {
+                    "pid": pid,
+                    "mrn": p.get("mrn", "") or p.get("hisPid", ""),
+                    "patient_id": p.get("hisPid", "") or p.get("mrn", "") or pid[-8:],
+                    "name": p.get("name", ""),
+                    "dept_code": p.get("deptCode", ""),
+                    "icu_admit": admit,
+                    "icu_discharge": p.get("_stay_end"),
+                    "en_start_time": en_start,
+                    "within_48h": within_48h,
+                    "source": ev.get("source", "none") if ev else "none",
+                    "rule": ev.get("rule", "") if ev else "",
+                    "hit": ev.get("hit", "") if ev else "",
+                    "route": ev.get("route", "") if ev else "",
+                    "drug_name": ev.get("drug_name", "") if ev else "",
+                    "contraindication": bool(contraindications),
+                    "contraindication_hits": contraindications,
+                    "basis": (
+                        "48h内启动EN" if within_48h else
+                        ("已启动EN但超过48h" if en_start else "未检出EN启动记录")
+                    ),
+                }
+                den_items.append(item)
+                if within_48h:
+                    num_items.append(item)
+
+            result.update({
+                "den_count": len(den_items),
+                "num_count": len(num_items),
+                "den_patients": den_items,
+                "num_patients": num_items,
+            })
+            break
+        except Exception as e:
+            print(f"[ICU-19] Error in db {db_name}: {e}")
+            import traceback
+            traceback.print_exc()
+            continue
+    return result
+
+
+TRI_TUBE_CONFIG = {
+    "ICU-16": {
+        "name": "VAP发病率",
+        "diseaseType": "VAP呼吸机相关性肺炎",
+        "propertyType": "respirator",
+        "denominator": "ventilator",
+    },
+    "ICU-17": {
+        "name": "CRBSI发病率",
+        "diseaseType": "CRBSI血管内管道相关血流感染",
+        "propertyType": "vascularInfection",
+        "denominator": "vascular",
+    },
+    "CAUTI": {
+        "name": "CAUTI尿管相关感染率",
+        "diseaseType": "CAUTI尿管相关感染",
+        "propertyType": "urinaryTractInfection",
+        "denominator": "urinary",
+    },
+}
+
+TRI_TUBE_EVENT_WINDOW_DAYS = 14
+INVASIVE_VENT_VALUES = {"管辅", "切辅", "有创"}
+INVASIVE_VENT_KEYWORDS = ("有创呼吸机(气辅)", "有创呼吸机(切辅)")
+VASCULAR_TUBE_TYPES = {
+    "中心静脉导管", "动脉导管", "PICC管", "PICCO管", "透析管", "血滤管",
+    "CRRT管", "中长导管", "输液港",
+}
+CENTRAL_VASCULAR_TUBE_TYPES = {
+    "中心静脉导管", "PICC管", "透析管", "血滤管", "CRRT管",
+}
+EXCLUDED_VASCULAR_TUBE_TYPES = {
+    "动脉导管": "动脉导管-非中心导管",
+    "PICCO管": "PICCO管-非中心导管",
+    "中长导管": "中长导管-非中心导管",
+    "输液港": "输液港-待确认中心属性，默认剔除",
+}
+URINARY_TUBE_TYPES = {"尿管"}
+
+
+def _day_range(start_time, end_time):
+    from datetime import timedelta
+
+    if not start_time or not end_time:
+        return
+    day = start_time.date()
+    last_day = end_time.date()
+    while day <= last_day:
+        yield day
+        day += timedelta(days=1)
+
+
+def _is_invasive_vent_value(value) -> bool:
+    text = str(value or "").strip()
+    if not text:
+        return False
+    if text in INVASIVE_VENT_VALUES:
+        return True
+    return any(keyword in text for keyword in INVASIVE_VENT_KEYWORDS)
+
+
+def _tri_tube_patient_scope(db, dept_codes, start_dt, end_dt_wide):
+    patients = list(db.patient.find(
+        {
+            "deptCode": {"$in": dept_codes},
+            "status": {"$ne": "invalid"},
+            "icuAdmissionTime": {"$lte": end_dt_wide},
+            "$or": [
+                {"icuDischargeTime": {"$gte": start_dt}},
+                {"dischargeTime": {"$gte": start_dt}},
+                {"icuDischargeTime": None},
+                {"icuDischargeTime": {"$exists": False}},
+            ],
+        },
+        {
+            "_id": 1, "hisPid": 1, "mrn": 1, "name": 1, "deptCode": 1,
+            "icuAdmissionTime": 1, "icuDischargeTime": 1, "dischargeTime": 1,
+        },
+    ).max_time_ms(15000).limit(200000))
+    return {str(p["_id"]): p for p in patients}
+
+
+def _patient_item(patient, pid: str) -> dict:
+    return {
+        "pid": pid,
+        "mrn": patient.get("mrn", "") or patient.get("hisPid", ""),
+        "patient_id": patient.get("hisPid", "") or patient.get("mrn", "") or pid[-8:],
+        "name": patient.get("name", ""),
+        "dept_code": patient.get("deptCode", ""),
+    }
+
+
+def _dedup_tri_tube_diagnoses(docs: list) -> list:
+    from datetime import timedelta
+
+    docs = sorted(docs, key=lambda d: (d.get("pid", ""), d.get("diseaseType", ""), d.get("diagnosisTime")))
+    events = []
+    current = None
+    window = timedelta(days=TRI_TUBE_EVENT_WINDOW_DAYS)
+    for doc in docs:
+        dtm = doc.get("diagnosisTime")
+        key = (doc.get("pid"), doc.get("diseaseType"))
+        if not dtm:
+            continue
+        if (
+            current
+            and current["key"] == key
+            and dtm - current["last_time"] <= window
+        ):
+            current["last_time"] = dtm
+            current["duplicate_count"] += 1
+            current["duplicates"].append(doc)
+            continue
+        current = {
+            "key": key,
+            "first": doc,
+            "last_time": dtm,
+            "duplicate_count": 1,
+            "duplicates": [doc],
+        }
+        events.append(current)
+    return events
+
+
+def _tri_tube_numerator(db, pat_by_pid: dict, cfg: dict, start_dt, end_dt_wide) -> list:
+    docs = list(db.diseaseDiagnosis.find(
+        {
+            "pid": {"$in": list(pat_by_pid.keys())},
+            "diagnosisTime": {"$gte": start_dt, "$lte": end_dt_wide},
+            "$or": [
+                {"diseaseType": cfg["diseaseType"]},
+                {"propertyType": cfg["propertyType"]},
+            ],
+        },
+        {
+            "_id": 1, "pid": 1, "diseaseType": 1, "propertyType": 1,
+            "diagnosisTime": 1, "notes": 1, "lastEditUserId": 1,
+        },
+    ).sort("diagnosisTime", 1).max_time_ms(15000).limit(100000))
+
+    patients = []
+    for event in _dedup_tri_tube_diagnoses(docs):
+        doc = event["first"]
+        pid = doc.get("pid")
+        patient = pat_by_pid.get(pid, {})
+        item = _patient_item(patient, pid)
+        item.update({
+            "diagnosis_id": str(doc.get("_id", "")),
+            "diseaseType": doc.get("diseaseType", ""),
+            "propertyType": doc.get("propertyType", ""),
+            "diagnosisTime": doc.get("diagnosisTime"),
+            "notes": doc.get("notes", "") or "",
+            "lastEditUserId": doc.get("lastEditUserId", "") or "",
+            "duplicate_count": event["duplicate_count"],
+            "dedup_basis": f"同一患者同一感染类型{TRI_TUBE_EVENT_WINDOW_DAYS}天事件窗内去重",
+        })
+        patients.append(item)
+    return patients
+
+
+def _ventilator_days(db, pat_by_pid: dict, start_dt, end_dt_wide) -> tuple[int, list]:
+    day_rows = {}
+    cursor = db.bedside.find(
+        {
+            "pid": {"$in": list(pat_by_pid.keys())},
+            "code": "param_XiYangTuJing",
+            "valid": True,
+            "time": {"$gte": start_dt, "$lte": end_dt_wide},
+            "$or": [
+                {"strVal": {"$in": list(INVASIVE_VENT_VALUES)}},
+                {"strVal": {"$regex": "有创呼吸机"}},
+            ],
+        },
+        {"_id": 1, "pid": 1, "strVal": 1, "time": 1},
+    ).sort("time", 1).max_time_ms(30000).limit(500000)
+    for doc in cursor:
+        if not _is_invasive_vent_value(doc.get("strVal")):
+            continue
+        t = doc.get("time")
+        pid = doc.get("pid")
+        if not t or not pid:
+            continue
+        key = (pid, t.date())
+        if key in day_rows:
+            continue
+        patient = pat_by_pid.get(pid, {})
+        item = _patient_item(patient, pid)
+        item.update({
+            "device_type": "有创呼吸机",
+            "device_value": doc.get("strVal", ""),
+            "device_day": t.strftime("%Y-%m-%d"),
+            "record_time": t,
+            "basis": "当日氧疗途径为有创机械通气",
+        })
+        day_rows[key] = item
+    return len(day_rows), list(day_rows.values())
+
+
+def _tube_days(db, pat_by_pid: dict, tube_types: set, start_dt, end_dt_wide, label: str) -> tuple[int, list]:
+    day_rows = {}
+    query = {
+        "pid": {"$in": list(pat_by_pid.keys())},
+        "type": {"$in": list(tube_types)},
+        "startTime": {"$lte": end_dt_wide},
+        "$or": [
+            {"endTime": {"$gte": start_dt}},
+            {"endTime": None},
+            {"endTime": {"$exists": False}},
+        ],
+    }
+    cursor = db.tubeExe.find(
+        query,
+        {"_id": 1, "pid": 1, "type": 1, "startTime": 1, "endTime": 1, "replace": 1},
+    ).sort("startTime", 1).max_time_ms(30000).limit(300000)
+    for doc in cursor:
+        pid = doc.get("pid")
+        start_time = doc.get("startTime")
+        if not pid or not start_time:
+            continue
+        patient = pat_by_pid.get(pid, {})
+        fallback_end = patient.get("icuDischargeTime") or patient.get("dischargeTime") or end_dt_wide
+        end_time = doc.get("endTime") or fallback_end
+        span_start = max(start_time, start_dt)
+        span_end = min(end_time, end_dt_wide)
+        if span_end < span_start:
+            continue
+        for day in _day_range(span_start, span_end):
+            key = (pid, day)
+            if key in day_rows:
+                continue
+            item = _patient_item(patient, pid)
+            item.update({
+                "tube_id": str(doc.get("_id", "")),
+                "device_type": label,
+                "tube_type": doc.get("type", ""),
+                "device_day": day.strftime("%Y-%m-%d"),
+                "tube_start": start_time,
+                "tube_end": end_time,
+                "basis": f"当日存在{label}留置记录",
+            })
+            day_rows[key] = item
+    return len(day_rows), list(day_rows.values())
+
+
+def _central_line_days(db, pat_by_pid: dict, start_dt, end_dt_wide) -> tuple[int, list]:
+    included = {}
+    excluded_by_patient_day = {}
+    all_vascular_types = CENTRAL_VASCULAR_TUBE_TYPES | set(EXCLUDED_VASCULAR_TUBE_TYPES)
+    query = {
+        "pid": {"$in": list(pat_by_pid.keys())},
+        "type": {"$in": list(all_vascular_types)},
+        "startTime": {"$lte": end_dt_wide},
+        "$or": [
+            {"endTime": {"$gte": start_dt}},
+            {"endTime": None},
+            {"endTime": {"$exists": False}},
+        ],
+    }
+    cursor = db.tubeExe.find(
+        query,
+        {"_id": 1, "pid": 1, "type": 1, "startTime": 1, "endTime": 1, "replace": 1},
+    ).sort("startTime", 1).max_time_ms(30000).limit(300000)
+
+    for doc in cursor:
+        pid = doc.get("pid")
+        tube_type = doc.get("type", "")
+        start_time = doc.get("startTime")
+        if not pid or not start_time:
+            continue
+        patient = pat_by_pid.get(pid, {})
+        fallback_end = patient.get("icuDischargeTime") or patient.get("dischargeTime") or end_dt_wide
+        end_time = doc.get("endTime") or fallback_end
+        span_start = max(start_time, start_dt)
+        span_end = min(end_time, end_dt_wide)
+        if span_end < span_start:
+            continue
+
+        is_central = tube_type in CENTRAL_VASCULAR_TUBE_TYPES
+        exclude_reason = "" if is_central else EXCLUDED_VASCULAR_TUBE_TYPES.get(tube_type, "非中心血管导管")
+        evidence = {
+            "tube_id": str(doc.get("_id", "")),
+            "tube_type": tube_type,
+            "tube_start": start_time,
+            "tube_end": end_time,
+            "included": is_central,
+            "exclude_reason": exclude_reason,
+        }
+        for day in _day_range(span_start, span_end):
+            key = (pid, day)
+            if not is_central:
+                excluded_by_patient_day.setdefault(key, []).append(evidence)
+                continue
+
+            item = included.get(key)
+            if not item:
+                item = _patient_item(patient, pid)
+                item.update({
+                    "tube_id": evidence["tube_id"],
+                    "device_type": "中心血管导管",
+                    "tube_type": tube_type,
+                    "device_day": day.strftime("%Y-%m-%d"),
+                    "tube_start": start_time,
+                    "tube_end": end_time,
+                    "included": True,
+                    "exclude_reason": "",
+                    "tube_ids": [evidence["tube_id"]],
+                    "tube_types": [tube_type],
+                    "included_segments": [evidence],
+                    "excluded_evidence": [],
+                    "dedup_basis": "患者-中心导管日：同一患者同一日存在≥1根中心导管计1日",
+                    "basis": "当日存在中心血管导管留置记录",
+                })
+                included[key] = item
+                continue
+
+            item["tube_ids"].append(evidence["tube_id"])
+            if tube_type not in item["tube_types"]:
+                item["tube_types"].append(tube_type)
+            item["included_segments"].append(evidence)
+            if start_time < item["tube_start"]:
+                item["tube_start"] = start_time
+            if end_time > item["tube_end"]:
+                item["tube_end"] = end_time
+            item["tube_type"] = "、".join(item["tube_types"])
+            item["tube_id"] = ",".join(item["tube_ids"])
+            item["basis"] = f"当日存在{len(item['tube_ids'])}根中心血管导管，按患者-日去重计1日"
+
+    for key, evidence_list in excluded_by_patient_day.items():
+        if key in included:
+            included[key]["excluded_evidence"].extend(evidence_list)
+
+    return len(included), list(included.values())
+
+
+def get_tri_tube_infection_data(code: str, dept_codes: list, start_date: str, end_date: str) -> dict:
+    from datetime import datetime as dt
+
+    cfg = TRI_TUBE_CONFIG[code]
+    start_dt = dt.fromisoformat(start_date)
+    end_dt = dt.fromisoformat(end_date)
+    end_dt_wide = dt(end_dt.year, end_dt.month, end_dt.day, 23, 59, 59)
+    result = {
+        "num_count": 0,
+        "den_count": 0,
+        "value": 0.0,
+        "value_type": "permille",
+        "num_patients": [],
+        "den_patients": [],
+        "note": "",
+    }
+
+    for db_name in BED_DB_NAMES:
+        try:
+            db = get_client(db_name)[db_name]
+            pat_by_pid = _tri_tube_patient_scope(db, dept_codes, start_dt, end_dt_wide)
+            if not pat_by_pid:
+                continue
+            num_patients = _tri_tube_numerator(db, pat_by_pid, cfg, start_dt, end_dt_wide)
+            denom = cfg["denominator"]
+            if denom == "ventilator":
+                den_count, den_patients = _ventilator_days(db, pat_by_pid, start_dt, end_dt_wide)
+            elif denom == "vascular":
+                den_count, den_patients = _central_line_days(db, pat_by_pid, start_dt, end_dt_wide)
+            else:
+                den_count, den_patients = _tube_days(db, pat_by_pid, URINARY_TUBE_TYPES, start_dt, end_dt_wide, "导尿管")
+
+            num_count = len(num_patients)
+            result.update({
+                "num_count": num_count,
+                "den_count": den_count,
+                "value": round(num_count / den_count * 1000, 2) if den_count > 0 else 0.0,
+                "num_patients": num_patients,
+                "den_patients": den_patients,
+                "note": "" if den_count > 0 else "无导管/通气使用记录",
+            })
+            break
+        except Exception as e:
+            print(f"[{code}] Error in db {db_name}: {e}")
+            import traceback
+            traceback.print_exc()
+            continue
+    return result
+
+
+def get_icu16_data(dept_codes: list, start_date: str, end_date: str) -> dict:
+    return get_tri_tube_infection_data("ICU-16", dept_codes, start_date, end_date)
+
+
+def get_icu17_data(dept_codes: list, start_date: str, end_date: str) -> dict:
+    return get_tri_tube_infection_data("ICU-17", dept_codes, start_date, end_date)
+
+
+def get_cauti_data(dept_codes: list, start_date: str, end_date: str) -> dict:
+    return get_tri_tube_infection_data("CAUTI", dept_codes, start_date, end_date)
+
+
+# ============================================================
+# 三管感染疑似预警：仅作为医生确认线索，不计入正式分子
+# ============================================================
+
+TRI_TUBE_WARNING_TYPES = {
+    "VAP": TRI_TUBE_CONFIG["ICU-16"],
+    "CRBSI": TRI_TUBE_CONFIG["ICU-17"],
+    "CAUTI": TRI_TUBE_CONFIG["CAUTI"],
+}
+
+
+def _safe_float(value):
+    try:
+        return float(str(value).strip())
+    except Exception:
+        return None
+
+
+def _confirmed_tri_tube_keys(db, pids: list, start_dt, end_dt_wide) -> set:
+    docs = db.diseaseDiagnosis.find(
+        {
+            "pid": {"$in": pids},
+            "diagnosisTime": {"$gte": start_dt, "$lte": end_dt_wide},
+            "propertyType": {"$in": [cfg["propertyType"] for cfg in TRI_TUBE_WARNING_TYPES.values()]},
+        },
+        {"pid": 1, "propertyType": 1},
+    ).max_time_ms(10000).limit(100000)
+    return {(d.get("pid"), d.get("propertyType")) for d in docs}
+
+
+def _fever_evidence(db, pids: list, start_dt, end_dt_wide) -> dict:
+    evidence = {}
+    if "temperatureData" not in db.list_collection_names():
+        return evidence
+    for doc in db.temperatureData.find(
+        {
+            "pid": {"$in": pids},
+            "record_time": {"$gte": start_dt, "$lte": end_dt_wide},
+        },
+        {"pid": 1, "record_time": 1, "Temperature": 1},
+    ).sort("record_time", -1).max_time_ms(15000).limit(200000):
+        temp = _safe_float(doc.get("Temperature"))
+        if temp is not None and temp >= 38:
+            evidence.setdefault(doc.get("pid"), []).append({
+                "type": "发热",
+                "time": _fmt_dt(doc.get("record_time")),
+                "value": f"T={temp}",
+            })
+    return evidence
+
+
+def _wbc_evidence(db, pids: list, start_dt, end_dt_wide) -> dict:
+    evidence = {}
+    if "criticalValue" not in db.list_collection_names():
+        return evidence
+    patient_id_alias = set(pids)
+    for doc in db.criticalValue.find(
+        {
+            "publishTime": {"$gte": start_dt, "$lte": end_dt_wide},
+            "$or": [
+                {"pid": {"$in": list(patient_id_alias)}},
+                {"lisItem": {"$regex": "白细胞|WBC"}},
+                {"bigItemName": {"$regex": "血常规"}},
+            ],
+        },
+        {"pid": 1, "lisItem": 1, "value": 1, "publishTime": 1, "bigItemName": 1},
+    ).sort("publishTime", -1).max_time_ms(15000).limit(50000):
+        text = f"{doc.get('lisItem', '')} {doc.get('value', '')} {doc.get('bigItemName', '')}"
+        if "白细胞" not in text and "WBC" not in text.upper():
+            continue
+        evidence.setdefault(doc.get("pid"), []).append({
+            "type": "WBC异常危急值",
+            "time": _fmt_dt(doc.get("publishTime")),
+            "value": text[:80],
+        })
+    return evidence
+
+
+def _sputum_evidence(db, pids: list, start_dt, end_dt_wide) -> dict:
+    evidence = {}
+    for doc in db.bedside.find(
+        {
+            "pid": {"$in": pids},
+            "valid": True,
+            "time": {"$gte": start_dt, "$lte": end_dt_wide},
+            "code": {"$in": ["param_痰液护理", "param_tanColor", "param_tanLiang", "param_tanYeFenJi"]},
+        },
+        {"pid": 1, "code": 1, "strVal": 1, "time": 1},
+    ).sort("time", -1).max_time_ms(15000).limit(100000):
+        text = str(doc.get("strVal") or "").strip()
+        if not text:
+            continue
+        evidence.setdefault(doc.get("pid"), []).append({
+            "type": "痰液护理记录",
+            "time": _fmt_dt(doc.get("time")),
+            "value": f"{doc.get('code')}={text}"[:80],
+        })
+    return evidence
+
+
+def _long_vent_patients(db, pat_by_pid: dict, start_dt, end_dt_wide, hours: int) -> dict:
+    records = defaultdict(list)
+    for doc in db.bedside.find(
+        {
+            "pid": {"$in": list(pat_by_pid.keys())},
+            "code": "param_XiYangTuJing",
+            "valid": True,
+            "time": {"$gte": start_dt, "$lte": end_dt_wide},
+            "$or": [
+                {"strVal": {"$in": list(INVASIVE_VENT_VALUES)}},
+                {"strVal": {"$regex": "有创呼吸机"}},
+            ],
+        },
+        {"pid": 1, "strVal": 1, "time": 1},
+    ).sort("time", 1).max_time_ms(30000).limit(300000):
+        if _is_invasive_vent_value(doc.get("strVal")):
+            records[doc.get("pid")].append(doc)
+    result = {}
+    for pid, docs in records.items():
+        first = docs[0].get("time")
+        last = docs[-1].get("time")
+        if first and last and (last - first).total_seconds() >= hours * 3600:
+            result[pid] = {
+                "first_time": first,
+                "last_time": last,
+                "value": docs[0].get("strVal"),
+            }
+    return result
+
+
+def _long_tube_patients(db, pat_by_pid: dict, tube_types: set, start_dt, end_dt_wide, hours: int) -> dict:
+    result = {}
+    for doc in db.tubeExe.find(
+        {
+            "pid": {"$in": list(pat_by_pid.keys())},
+            "type": {"$in": list(tube_types)},
+            "startTime": {"$lte": end_dt_wide},
+            "$or": [
+                {"endTime": {"$gte": start_dt}},
+                {"endTime": None},
+                {"endTime": {"$exists": False}},
+            ],
+        },
+        {"pid": 1, "type": 1, "startTime": 1, "endTime": 1},
+    ).sort("startTime", 1).max_time_ms(30000).limit(200000):
+        pid = doc.get("pid")
+        st = doc.get("startTime")
+        if not pid or not st:
+            continue
+        patient = pat_by_pid.get(pid, {})
+        et = doc.get("endTime") or patient.get("icuDischargeTime") or patient.get("dischargeTime") or end_dt_wide
+        if et and (min(et, end_dt_wide) - max(st, start_dt)).total_seconds() >= hours * 3600:
+            result.setdefault(pid, {
+                "first_time": st,
+                "last_time": et,
+                "value": doc.get("type", ""),
+            })
+    return result
+
+
+def get_tri_tube_suspected_warnings(dept_codes: list, start_date: str, end_date: str, min_hours: int = 48) -> list:
+    from datetime import datetime as dt
+    from collections import defaultdict
+
+    start_dt = dt.fromisoformat(start_date)
+    end_dt = dt.fromisoformat(end_date)
+    end_dt_wide = dt(end_dt.year, end_dt.month, end_dt.day, 23, 59, 59)
+    warnings = []
+
+    for db_name in BED_DB_NAMES:
+        try:
+            db = get_client(db_name)[db_name]
+            pat_by_pid = _tri_tube_patient_scope(db, dept_codes, start_dt, end_dt_wide)
+            if not pat_by_pid:
+                continue
+            pids = list(pat_by_pid.keys())
+            confirmed = _confirmed_tri_tube_keys(db, pids, start_dt, end_dt_wide)
+            fever = _fever_evidence(db, pids, start_dt, end_dt_wide)
+            wbc = _wbc_evidence(db, pids, start_dt, end_dt_wide)
+            sputum = _sputum_evidence(db, pids, start_dt, end_dt_wide)
+
+            long_vent = _long_vent_patients(db, pat_by_pid, start_dt, end_dt_wide, min_hours)
+            long_vascular = _long_tube_patients(db, pat_by_pid, VASCULAR_TUBE_TYPES, start_dt, end_dt_wide, min_hours)
+            long_urinary = _long_tube_patients(db, pat_by_pid, URINARY_TUBE_TYPES, start_dt, end_dt_wide, min_hours)
+
+            def append_warning(pid, warn_type, device_info, extra_evidence):
+                cfg = TRI_TUBE_WARNING_TYPES[warn_type]
+                if (pid, cfg["propertyType"]) in confirmed:
+                    return
+                patient = pat_by_pid.get(pid, {})
+                evidence = [{
+                    "type": "装置留置超过阈值",
+                    "time": f"{_fmt_dt(device_info.get('first_time'))} ~ {_fmt_dt(device_info.get('last_time'))}",
+                    "value": f"{device_info.get('value')} > {min_hours}h",
+                }]
+                evidence.extend(extra_evidence[:5])
+                if len(evidence) < 2:
+                    return
+                confidence = min(0.95, 0.45 + 0.15 * (len(evidence) - 1))
+                item = _patient_item(patient, pid)
+                item.update({
+                    "suspect_type": warn_type,
+                    "diseaseType": cfg["diseaseType"],
+                    "propertyType": cfg["propertyType"],
+                    "confidence": round(confidence, 2),
+                    "evidence": evidence,
+                    "suggestion": "AI疑似预警，需医生确认后才写入正式诊断",
+                })
+                warnings.append(item)
+
+            for pid, info in long_vent.items():
+                append_warning(pid, "VAP", info, fever.get(pid, []) + wbc.get(pid, []) + sputum.get(pid, []))
+            for pid, info in long_vascular.items():
+                append_warning(pid, "CRBSI", info, fever.get(pid, []) + wbc.get(pid, []))
+            for pid, info in long_urinary.items():
+                append_warning(pid, "CAUTI", info, fever.get(pid, []) + wbc.get(pid, []))
+            break
+        except Exception as e:
+            print(f"[tri-tube-warning] Error in db {db_name}: {e}")
+            import traceback
+            traceback.print_exc()
+            continue
+    return sorted(warnings, key=lambda x: x.get("confidence", 0), reverse=True)
+
+
+def confirm_tri_tube_warning(pid: str, suspect_type: str, diagnosis_time, user_id: str, notes: str = "") -> dict:
+    cfg = TRI_TUBE_WARNING_TYPES.get(suspect_type)
+    if not cfg:
+        raise ValueError("unsupported suspect_type")
+    from bson import ObjectId
+    for db_name in BED_DB_NAMES:
+        db = get_client(db_name)[db_name]
+        patient = None
+        if len(pid) == 24:
+            try:
+                patient = db.patient.find_one({"_id": ObjectId(pid)})
+            except Exception:
+                patient = None
+        if not patient:
+            patient = db.patient.find_one({"hisPid": pid}) or db.patient.find_one({"mrn": pid})
+        if not patient:
+            continue
+        normalized_pid = str(patient["_id"])
+        doc = {
+            "pid": normalized_pid,
+            "diseaseType": cfg["diseaseType"],
+            "propertyType": cfg["propertyType"],
+            "diagnosisTime": diagnosis_time,
+            "notes": notes or "AI疑似预警经医生确认录入",
+            "lastEditUserId": user_id,
+        }
+        inserted = db.diseaseDiagnosis.insert_one(doc)
+        return {"inserted_id": str(inserted.inserted_id), **doc}
+    raise ValueError("patient not found")
 
 
 # ============================================================

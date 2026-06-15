@@ -1,12 +1,21 @@
-import { defineConfig } from 'vite';
+import { fileURLToPath, URL } from 'node:url';
+import { defineConfig, loadEnv } from 'vite';
 import vue from '@vitejs/plugin-vue';
 
-export default defineConfig({
-  plugins: [vue()],
-  server: {
-    port: 5173,
-    proxy: {
-      '/api': 'http://localhost:8080' // 转发给 FastAPI 后端
-    }
-  }
+const envDir = fileURLToPath(new URL('..', import.meta.url));
+
+export default defineConfig(({ mode }) => {
+  const env = loadEnv(mode, envDir, '');
+  const frontendPort = Number(env.FRONTEND_PORT || 5173);
+  const backendPort = Number(env.BACKEND_PORT || 8091);
+
+  return {
+    plugins: [vue()],
+    server: {
+      port: frontendPort,
+      proxy: {
+        '/api': `http://localhost:${backendPort}`,
+      },
+    },
+  };
 });

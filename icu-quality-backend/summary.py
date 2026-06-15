@@ -9,6 +9,7 @@
   4. 幂等 upsert，可重复执行
 """
 import time
+from concurrent.futures import ThreadPoolExecutor, as_completed
 from datetime import datetime, timedelta
 from typing import Optional
 from pymongo import MongoClient, ASCENDING
@@ -16,6 +17,8 @@ from db import (
     get_client, get_datacenter_client, BED_DB_NAMES,
     get_open_bed_count, get_occupied_bed_days, get_staff_count,
     get_icu04_apache_data, get_bundle_data, get_icu06_data, get_icu09_data, get_icu10_data,
+    get_icu11_data, get_icu12_data, get_icu13_data, get_icu14_data, get_icu15_data,
+    get_icu16_data, get_icu17_data, get_icu18_data, get_icu19_data, get_cauti_data,
     get_dvt_prevention_patients, get_icu08_data,
 )
 
@@ -123,6 +126,96 @@ def _compute_icu10(dept_codes, start, end):
     return {"num": num, "den": den, "val": val, "val_type": "percent"}
 
 
+def _compute_icu11(dept_codes, start, end):
+    """ICU-11: ICU患者标化病死指数(SMR)"""
+    d = get_icu11_data(dept_codes, start, end)
+    num = d["num_count"]
+    den = d["den_count"]
+    val = round(num / den, 2) if den > 0 else 0.0
+    return {"num": num, "den": den, "val": val, "val_type": "ratio"}
+
+
+def _compute_icu12(dept_codes, start, end):
+    """ICU-12: 非计划气管插管拔管率"""
+    d = get_icu12_data(dept_codes, start, end)
+    num = d["num_count"]
+    den = d["den_count"]
+    val = round(num / den * 100, 1) if den > 0 else 0.0
+    return {"num": num, "den": den, "val": val, "val_type": "percent"}
+
+
+def _compute_icu13(dept_codes, start, end):
+    """ICU-13: 拔管后48h再插管率"""
+    d = get_icu13_data(dept_codes, start, end)
+    num = d["num_count"]
+    den = d["den_count"]
+    val = round(num / den * 100, 1) if den > 0 else 0.0
+    return {"num": num, "den": den, "val": val, "val_type": "percent"}
+
+
+def _compute_icu14(dept_codes, start, end):
+    """ICU-14: 非计划转入ICU率"""
+    d = get_icu14_data(dept_codes, start, end)
+    num = d["num_count"]
+    den = d["den_count"]
+    val = round(num / den * 100, 1) if den > 0 else 0.0
+    return {"num": num, "den": den, "val": val, "val_type": "percent"}
+
+
+def _compute_icu15(dept_codes, start, end):
+    """ICU-15: 转出ICU后48h重返率"""
+    d = get_icu15_data(dept_codes, start, end)
+    num = d["num_count"]
+    den = d["den_count"]
+    val = round(num / den * 100, 1) if den > 0 else 0.0
+    return {"num": num, "den": den, "val": val, "val_type": "percent"}
+
+
+def _compute_icu16(dept_codes, start, end):
+    """ICU-16: VAP发病率"""
+    d = get_icu16_data(dept_codes, start, end)
+    num = d["num_count"]
+    den = d["den_count"]
+    val = round(num / den * 1000, 2) if den > 0 else 0.0
+    return {"num": num, "den": den, "val": val, "val_type": "permille"}
+
+
+def _compute_icu17(dept_codes, start, end):
+    """ICU-17: CRBSI发病率"""
+    d = get_icu17_data(dept_codes, start, end)
+    num = d["num_count"]
+    den = d["den_count"]
+    val = round(num / den * 1000, 2) if den > 0 else 0.0
+    return {"num": num, "den": den, "val": val, "val_type": "permille"}
+
+
+def _compute_icu18(dept_codes, start, end):
+    """ICU-18: 急性脑损伤患者意识评估率"""
+    d = get_icu18_data(dept_codes, start, end)
+    num = d["num_count"]
+    den = d["den_count"]
+    val = round(num / den * 100, 2) if den > 0 else 0.0
+    return {"num": num, "den": den, "val": val, "val_type": "percent"}
+
+
+def _compute_icu19(dept_codes, start, end):
+    """ICU-19: 48h内肠内营养启动率"""
+    d = get_icu19_data(dept_codes, start, end)
+    num = d["num_count"]
+    den = d["den_count"]
+    val = round(num / den * 100, 2) if den > 0 else 0.0
+    return {"num": num, "den": den, "val": val, "val_type": "percent"}
+
+
+def _compute_cauti(dept_codes, start, end):
+    """CAUTI: 尿管相关感染率"""
+    d = get_cauti_data(dept_codes, start, end)
+    num = d["num_count"]
+    den = d["den_count"]
+    val = round(num / den * 1000, 2) if den > 0 else 0.0
+    return {"num": num, "den": den, "val": val, "val_type": "permille"}
+
+
 def _count_icu_patients(dept_codes, start, end):
     """辅助：统计期内在科患者数"""
     try:
@@ -160,13 +253,20 @@ INDICATOR_COMPUTERS = {
     "ICU-08": _compute_icu08,
     "ICU-09": _compute_icu09,
     "ICU-10": _compute_icu10,
-    # ICU-11~19 暂用 mock：分子=0, 分母=在科患者数
+    "ICU-11": _compute_icu11,
+    "ICU-12": _compute_icu12,
+    "ICU-13": _compute_icu13,
+    "ICU-14": _compute_icu14,
+    "ICU-15": _compute_icu15,
+    "ICU-16": _compute_icu16,
+    "ICU-17": _compute_icu17,
+    "ICU-18": _compute_icu18,
+    "ICU-19": _compute_icu19,
+    "CAUTI": _compute_cauti,
 }
 
-MOCK_INDICATORS = [
-    "ICU-11", "ICU-12", "ICU-13", "ICU-14",
-    "ICU-15", "ICU-16", "ICU-17", "ICU-18", "ICU-19",
-]
+MOCK_INDICATORS = []
+NO_DATA_INDICATORS = set()
 
 # ============================================================
 # 3. 汇总表结构 & 索引
@@ -221,39 +321,63 @@ def rebuild_summary(dept_codes: list, periods: list, indicators: list = None,
         stats["errors"].append({"error": "No database available"})
         return stats
 
-    for period in periods:
+    def _emit_progress(current_period: str = "", current_indicator: str = "", event: str = "progress"):
+        if not progress_callback:
+            return
+        try:
+            progress_callback(
+                stats["total"],
+                stats["success"],
+                stats["failed"],
+                current_period,
+                current_indicator,
+                event,
+            )
+        except TypeError:
+            progress_callback(stats["total"], stats["success"], stats["failed"])
+
+    def _compute_one(period: str, indicator: str) -> dict:
+        _emit_progress(period, indicator, "started")
         year, month = period.split("-")
         start = f"{year}-{month}-01"
         end_day = 31 if int(month) in [1,3,5,7,8,10,12] else (30 if int(month) != 2 else 28)
         end = f"{year}-{month}-{end_day:02d}"
+        t0 = time.time()
+        if indicator not in INDICATOR_COMPUTERS:
+            raise ValueError(f"Unknown indicator: {indicator}")
+        result = INDICATOR_COMPUTERS[indicator](dept_codes, start, end)
+        elapsed = int((time.time() - t0) * 1000)
+        return {
+            "dept_code": ",".join(dept_codes) if len(dept_codes) > 1 else dept_codes[0],
+            "period": period,
+            "indicator": indicator,
+            "numerator": result["num"],
+            "denominator": result["den"],
+            "value": result["val"],
+            "value_type": result.get("val_type", "percent"),
+            "updated_at": datetime.utcnow(),
+            "calc_duration_ms": elapsed,
+        }
 
-        for indicator in indicators:
-            stats["total"] += 1
-            t0 = time.time()
-
+    light_first = {
+        "ICU-01": 10, "ICU-02": 10, "ICU-03": 10,
+        "ICU-04": 20, "ICU-05-1h": 20, "ICU-05-3h": 20, "ICU-05-6h": 20,
+        "ICU-07": 20, "ICU-08": 20, "ICU-09": 30, "ICU-10": 30,
+        "ICU-12": 30, "ICU-13": 30, "ICU-14": 30, "ICU-15": 30,
+        "ICU-16": 30, "ICU-17": 30, "ICU-18": 30,
+        "ICU-06": 90, "ICU-11": 80, "ICU-19": 80,
+    }
+    tasks = sorted(
+        [(period, indicator) for period in periods for indicator in indicators],
+        key=lambda item: (light_first.get(item[1], 50), item[0], item[1]),
+    )
+    max_workers = min(6, max(1, len(tasks)))
+    with ThreadPoolExecutor(max_workers=max_workers) as executor:
+        futures = {executor.submit(_compute_one, period, indicator): (period, indicator) for period, indicator in tasks}
+        for future in as_completed(futures):
+            period, indicator = futures[future]
             try:
-                if indicator in INDICATOR_COMPUTERS:
-                    result = INDICATOR_COMPUTERS[indicator](dept_codes, start, end)
-                elif indicator in MOCK_INDICATORS:
-                    den = _count_icu_patients(dept_codes, start, end)
-                    result = {"num": 0, "den": den, "val": 0.0, "val_type": "percent"}
-                else:
-                    raise ValueError(f"Unknown indicator: {indicator}")
-
-                elapsed = int((time.time() - t0) * 1000)
-
-                doc = {
-                    "dept_code": ",".join(dept_codes) if len(dept_codes) > 1 else dept_codes[0],
-                    "period": period,
-                    "indicator": indicator,
-                    "numerator": result["num"],
-                    "denominator": result["den"],
-                    "value": result["val"],
-                    "value_type": result.get("val_type", "percent"),
-                    "updated_at": datetime.utcnow(),
-                    "calc_duration_ms": elapsed,
-                }
-
+                doc = future.result()
                 coll.update_one(
                     {"dept_code": doc["dept_code"], "period": period, "indicator": indicator},
                     {"$set": doc},
@@ -268,8 +392,8 @@ def rebuild_summary(dept_codes: list, periods: list, indicators: list = None,
                     "error": str(e)[:200],
                 })
 
-            if progress_callback:
-                progress_callback(stats["total"], stats["success"], stats["failed"])
+            stats["total"] += 1
+            _emit_progress(period, indicator, "finished")
 
     return stats
 
@@ -316,7 +440,9 @@ def read_summary(dept_codes: list, periods: list, indicators: list = None) -> li
             dept_key = ",".join(dept_codes) if len(dept_codes) > 1 else dept_codes[0]
             query = {"dept_code": dept_key, "period": {"$in": periods}}
             if indicators:
-                query["indicator"] = {"$in": indicators}
+                query["indicator"] = {"$in": [i for i in indicators if i not in NO_DATA_INDICATORS]}
+            else:
+                query["indicator"] = {"$nin": list(NO_DATA_INDICATORS)}
             return list(coll.find(query, {"_id": 0}).sort([("indicator", 1), ("period", 1)]))
         except Exception: continue
     return []
