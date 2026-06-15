@@ -39,6 +39,7 @@ const isSummary = computed(() =>
 const isICU06 = computed(() => props.data?.code === 'ICU-06');
 const isICU07 = computed(() => props.data?.code === 'ICU-07');
 const isICU08 = computed(() => props.data?.code === 'ICU-08');
+const isICU09 = computed(() => props.data?.code === 'ICU-09');
 const col1 = computed(() => isStaff.value ? '账号' : '住院号');
 const col3 = computed(() => {
   if (isStaff.value) return '职称';
@@ -47,6 +48,7 @@ const col3 = computed(() => {
   if (isICU06.value && props.data?.part === 'denominator') return '抗菌药 [目的]';
   if (isICU06.value && props.data?.part === 'numerator') return '送检项目';
   if (isICU07.value && props.data?.part === 'numerator') return '预防措施';
+  if (isICU09.value && props.data?.part === 'numerator') return '评估来源';
   return '床号';
 });
 const col4 = computed(() => {
@@ -56,6 +58,7 @@ const col4 = computed(() => {
   if (isICU06.value && props.data?.part === 'denominator') return '给药 & 判定理由';
   if (isICU06.value && props.data?.part === 'numerator') return '送检时间';
   if (isICU07.value && props.data?.part === 'numerator') return '医嘱示例';
+  if (isICU09.value && props.data?.part === 'numerator') return '评估量表';
   return '入科时间';
 });
 const col5 = computed(() => {
@@ -67,6 +70,7 @@ const col5 = computed(() => {
   if (props.data?.part === 'numerator' && props.data?.code === 'ICU-01') return '在床天数';
   if (isICU06.value && props.data?.part === 'denominator') return '给药次数';
   if (isICU07.value && props.data?.part === 'numerator') return '医嘱条数';
+  if (isICU09.value && props.data?.part === 'numerator') return '评估时间';
   return '数值';
 });
 // ICU-06 分母：低置信度 AI 判定行 → 标黄提示人工复核

@@ -15,7 +15,7 @@ from pymongo import MongoClient, ASCENDING
 from db import (
     get_client, get_datacenter_client, BED_DB_NAMES,
     get_open_bed_count, get_occupied_bed_days, get_staff_count,
-    get_icu04_apache_data, get_bundle_data, get_icu06_data,
+    get_icu04_apache_data, get_bundle_data, get_icu06_data, get_icu09_data,
     get_dvt_prevention_patients, get_icu08_data,
 )
 
@@ -105,6 +105,15 @@ def _compute_icu08(dept_codes, start, end):
     return {"num": num, "den": den, "val": val, "val_type": "percent"}
 
 
+def _compute_icu09(dept_codes, start, end):
+    """ICU-09: 镇痛评估率"""
+    d = get_icu09_data(dept_codes, start, end)
+    num = d["num_count"]
+    den = d["den_count"]
+    val = round(num / den * 100, 1) if den > 0 else 0.0
+    return {"num": num, "den": den, "val": val, "val_type": "percent"}
+
+
 def _count_icu_patients(dept_codes, start, end):
     """辅助：统计期内在科患者数"""
     try:
@@ -140,11 +149,12 @@ INDICATOR_COMPUTERS = {
     "ICU-06": _compute_icu06,
     "ICU-07": _compute_icu07,
     "ICU-08": _compute_icu08,
-    # ICU-09~19 暂用 mock：分子=0, 分母=在科患者数
+    "ICU-09": _compute_icu09,
+    # ICU-10~19 暂用 mock：分子=0, 分母=在科患者数
 }
 
 MOCK_INDICATORS = [
-    "ICU-09", "ICU-10", "ICU-11", "ICU-12", "ICU-13", "ICU-14",
+    "ICU-10", "ICU-11", "ICU-12", "ICU-13", "ICU-14",
     "ICU-15", "ICU-16", "ICU-17", "ICU-18", "ICU-19",
 ]
 

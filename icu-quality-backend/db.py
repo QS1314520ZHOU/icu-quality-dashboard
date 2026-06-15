@@ -1992,6 +1992,196 @@ def get_icu06_data(dept_codes: list, start_date: str, end_date: str) -> dict:
 
 
 # ============================================================
+# ICU-09：镇痛评估率
+# ============================================================
+
+# ---- 镇痛评估量表白名单 ----
+# bedside: pain-related codes (strVal 直接存评分结果如 CPOT-8)
+BEDSIDE_PAIN_CODES = {"param_tengTong_score", "param_painscore_nicu_newborn"}
+
+# bedside strVal 合规镇痛量表前缀白名单（提取 - 之前的部分）
+# CPOT/NRS/BPS/VAS 为规范镇痛评估工具；其他前缀（如FRS/RASS等）非镇痛，已排除
+PAIN_SCALE_PREFIXES = {"CPOT", "NRS", "BPS", "VAS", "FLACC", "PAIN"}
+
+# score: 合规镇痛评估量表 scoreType
+# ⚠️ nrs2002 / nrs2002Score 是营养风险筛查 NRS-2002，非镇痛评估，已排除
+SCORE_PAIN_TYPES = {
+    "bps", "cpotScore", "cpotScoreV2", "nrsScore",
+    "painScore", "newBornPain", "xinShengErTengTong",
+}
+
+
+def get_icu09_data(dept_codes: list, start_date: str, end_date: str) -> dict:
+    """
+    ICU-09：镇痛评估率。
+
+    分母 = 统计期内本科室 ICU 患者总人数（按 _id 去重，无排除）。
+    分子 = 分母中住 ICU 期间进行过 ≥1 次镇痛评估的患者数。
+
+    分子源 A（优先）：bedside 表，code ∈ BEDSIDE_PAIN_CODES 且 valid=True。
+          命中患者不再回查源 B。
+    分子源 B（兜底）：score 表，scoreType ∈ SCORE_PAIN_TYPES 且 valid=True。
+          仅对源 A 未命中的患者补判。
+
+    关联键：bedside.pid / score.pid ↔ str(patient._id)
+      ⚠️ patient._id 是 ObjectId，bedside.pid/score.pid 是字符串，
+         匹配时统一用 str(patient._id)。
+
+    返回：{den_count, num_count, den_patients, num_patients}
+    """
+    from datetime import datetime as dt
+
+    start_dt = dt.fromisoformat(start_date)
+    end_dt = dt.fromisoformat(end_date)
+    end_dt_wide = dt(end_dt.year, end_dt.month, end_dt.day, 23, 59, 59)
+
+    result = {"den_count": 0, "num_count": 0,
+              "den_patients": [], "num_patients": []}
+
+    for db_name in BED_DB_NAMES:
+        try:
+            db = get_client(db_name)[db_name]
+
+            # ---- 1. 分母：在科患者 ----
+            patients = list(db.patient.find(
+                {"deptCode": {"$in": dept_codes}, "status": {"$ne": "invalid"},
+                 "icuAdmissionTime": {"$lte": end_dt_wide},
+                 "$or": [{"icuDischargeTime": {"$gte": start_dt}},
+                         {"icuDischargeTime": None},
+                         {"icuDischargeTime": {"$exists": False}}]},
+                {"_id": 1, "hisPid": 1, "mrn": 1, "name": 1,
+                 "icuAdmissionTime": 1, "icuDischargeTime": 1},
+            ))
+            if not patients:
+                continue
+
+            # pid 映射：ObjectId → str (统一为字符串用于关联)
+            den_pids_obj = set()
+            pat_by_strpid = {}
+            for p in patients:
+                oid = p["_id"]
+                spid = str(oid)
+                den_pids_obj.add(spid)
+                pat_by_strpid[spid] = p
+
+            result["den_count"] = len(den_pids_obj)
+            if not den_pids_obj:
+                continue
+
+            # ---- 2. 分子源 A：bedside 批量查 ----
+            # 一次性查出所有分母患者中、命中镇痛 code 的 distinct pid
+            den_pids_list = list(den_pids_obj)
+            a_pids = set()
+            a_detail = {}  # strpid → {scale_name, time}
+
+            try:
+                # 批量查 bedside，只取需要的字段
+                bedside_docs = list(db.bedside.find(
+                    {"pid": {"$in": den_pids_list},
+                     "code": {"$in": list(BEDSIDE_PAIN_CODES)},
+                     "valid": True},
+                    {"pid": 1, "strVal": 1, "history": 1, "time": 1},
+                ).max_time_ms(10000).limit(100000))
+
+                for doc in bedside_docs:
+                    spid = doc.get("pid", "")
+                    if spid not in den_pids_obj:
+                        continue
+
+                    # 取评分值：优先 strVal，无则 history[].desc
+                    score_val = (doc.get("strVal") or "").strip()
+                    if not score_val:
+                        hist = doc.get("history") or []
+                        if hist:
+                            score_val = (hist[0].get("desc") or "").strip()
+
+                    # 前缀白名单校验：仅 CPOT/NRS/BPS/VAS/FLACC/PAIN 等合规量表
+                    if score_val:
+                        prefix = score_val.split("-")[0] if "-" in score_val else score_val
+                        if prefix not in PAIN_SCALE_PREFIXES:
+                            continue  # 非镇痛量表脏值，跳过
+
+                    if score_val:
+                        if spid not in a_pids:
+                            a_pids.add(spid)
+                            a_detail[spid] = {
+                                "source": "bedside",
+                                "scale": score_val[:40],
+                                "time": doc.get("time"),
+                            }
+            except Exception as e:
+                print(f"[ICU-09] bedside query error: {e}")
+
+            # ---- 3. 分子源 B：score 补判（仅 A 未命中者） ----
+            b_pids = set()
+            b_detail = {}  # strpid → {scale_name, time}
+
+            need_b = [spid for spid in den_pids_list if spid not in a_pids]
+            if need_b:
+                try:
+                    score_docs = list(db.score.find(
+                        {"pid": {"$in": need_b},
+                         "scoreType": {"$in": list(SCORE_PAIN_TYPES)},
+                         "valid": True},
+                        {"pid": 1, "scoreType": 1, "time": 1},
+                    ).max_time_ms(10000).limit(50000))
+
+                    for doc in score_docs:
+                        spid = doc.get("pid", "")
+                        if spid not in den_pids_obj:
+                            continue
+                        stype = doc.get("scoreType", "painScore")
+                        if spid not in b_pids:
+                            b_pids.add(spid)
+                            b_detail[spid] = {
+                                "source": "score",
+                                "scale": stype,
+                                "time": doc.get("time"),
+                            }
+                except Exception as e:
+                    print(f"[ICU-09] score query error: {e}")
+
+            # ---- 4. 分子 = A ∪ B ----
+            num_pids = a_pids | b_pids
+            result["num_count"] = min(len(num_pids), result["den_count"])
+
+            # ---- 5. 构建明细 ----
+            result["den_patients"] = [
+                {"pid": spid,
+                 "mrn": pat_by_strpid[spid].get("mrn", "") or pat_by_strpid[spid].get("hisPid", ""),
+                 "name": pat_by_strpid[spid].get("name", ""),
+                 "patient_id": pat_by_strpid[spid].get("hisPid", ""),
+                 "icu_admit": pat_by_strpid[spid].get("icuAdmissionTime"),
+                 }
+                for spid in den_pids_obj
+            ]
+
+            result["num_patients"] = []
+            for spid in num_pids:
+                p = pat_by_strpid[spid]
+                detail = a_detail.get(spid) or b_detail.get(spid) or {}
+                result["num_patients"].append({
+                    "pid": spid,
+                    "mrn": p.get("mrn", "") or p.get("hisPid", ""),
+                    "name": p.get("name", ""),
+                    "patient_id": p.get("hisPid", ""),
+                    "assess_source": detail.get("source", ""),
+                    "assess_scale": detail.get("scale", ""),
+                    "assess_time": detail.get("time"),
+                })
+
+            break  # 拿到数据即退出库名循环
+
+        except Exception as e:
+            print(f"[ICU-09] Error in db {db_name}: {e}")
+            import traceback
+            traceback.print_exc()
+            continue
+
+    return result
+
+
+# ============================================================
 # 连接测试
 # ============================================================
 def test_connections() -> dict:
