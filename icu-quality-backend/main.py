@@ -2,7 +2,7 @@
 from fastapi import FastAPI, BackgroundTasks
 from datetime import date, datetime, timedelta
 from ai_analyzer import analyze, get_all_ai_decisions, override_ai_decision, ensure_ai_cache_collection as ensure_ai_cache
-from db import get_open_bed_count, get_occupied_bed_days, get_staff_count, get_icu04_apache_data, get_bundle_data, get_icu08_data, get_icu06_data, get_icu09_data, get_dvt_prevention_patients, get_client, BED_DB_NAMES, PROFESSION_CN
+from db import get_open_bed_count, get_occupied_bed_days, get_staff_count, get_icu04_apache_data, get_bundle_data, get_icu08_data, get_icu06_data, get_icu09_data, get_icu10_data, get_dvt_prevention_patients, get_client, BED_DB_NAMES, PROFESSION_CN
 import random
 import time as time_module
 import threading
@@ -308,6 +308,14 @@ def query_summary(period: str, icu_unit: str = "all"):
         icu09_den = icu04_den
         icu09_num = 0
 
+    # ----- ICU-10：镇静评估率（bedside param_score_rass_obs + score rass）-----
+    icu10_data = get_icu10_data(dept_codes, start_date, end_date)
+    icu10_num = icu10_data["num_count"]
+    icu10_den = icu10_data["den_count"]
+    if icu10_den == 0:
+        icu10_den = icu04_den
+        icu10_num = 0
+
     # ----- ICU-07：DVT预防率（DataCenter.VI_ICU_ZYYZ 医嘱包含匹配）-----
     dvt_data = get_dvt_prevention_patients(dept_codes, start_date, end_date)
     icu07_num = dvt_data.get("all_count", 0)
@@ -342,7 +350,7 @@ def query_summary(period: str, icu_unit: str = "all"):
         "ICU-07": {"num": icu07_num, "den": icu07_den},
         "ICU-08": {"num": icu08_num, "den": icu08_den},
         "ICU-09": {"num": icu09_num, "den": icu09_den},
-        "ICU-10": {"num": _jitter(142, 0.1), "den": 155},
+        "ICU-10": {"num": icu10_num, "den": icu10_den},
         "ICU-11": {"num": _jitter(11, 0.1), "den": 12},
         "ICU-12": {"num": _jitter(2, 0.3), "den": 62},
         "ICU-13": {"num": _jitter(3, 0.3), "den": 73},
@@ -604,6 +612,42 @@ def query_detail(code: str, period: str, part: str, icu_unit: str = "all"):
     # ---- ICU-09：镇痛评估率明细 ----
     if code == "ICU-09":
         data = get_icu09_data(dept_codes, start_date, end_date)
+        if part == "numerator":
+            items = []
+            for p in data.get("num_patients", []):
+                at = p.get("assess_time")
+                items.append({
+                    "patient_id": p.get("patient_id", p.get("mrn", "")),
+                    "name": p.get("name", ""),
+                    "gender": "", "age": "",
+                    "bed_no": p.get("assess_source", ""),
+                    "dept": p.get("assess_scale", ""),
+                    "admit_time": at.strftime("%Y-%m-%d %H:%M") if hasattr(at, 'strftime') else str(at)[:16] if at else "",
+                    "discharge_time": "",
+                    "admission_source": "",
+                    "value": 1,
+                })
+            return items
+        else:
+            items = []
+            for p in data.get("den_patients", []):
+                at = p.get("icu_admit")
+                items.append({
+                    "patient_id": p.get("patient_id", p.get("mrn", "")),
+                    "name": p.get("name", ""),
+                    "gender": "", "age": "",
+                    "bed_no": "",
+                    "dept": "",
+                    "admit_time": at.strftime("%Y-%m-%d %H:%M") if hasattr(at, 'strftime') else str(at)[:16] if at else "",
+                    "discharge_time": "",
+                    "admission_source": "",
+                    "value": 1,
+                })
+            return items
+
+    # ---- ICU-10：镇静评估率明细 ----
+    if code == "ICU-10":
+        data = get_icu10_data(dept_codes, start_date, end_date)
         if part == "numerator":
             items = []
             for p in data.get("num_patients", []):

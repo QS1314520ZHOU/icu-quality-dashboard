@@ -2182,6 +2182,166 @@ def get_icu09_data(dept_codes: list, start_date: str, end_date: str) -> dict:
 
 
 # ============================================================
+# ICU-10：镇静评估率
+# ============================================================
+
+# bedside: RASS 镇静评分 code
+BEDSIDE_SEDATION_CODE = "param_score_rass_obs"
+
+# score: 镇静评估量表 scoreType
+SCORE_SEDATION_TYPES = {"rass"}
+
+
+def get_icu10_data(dept_codes: list, start_date: str, end_date: str) -> dict:
+    """
+    ICU-10：镇静评估率。
+
+    分母 = 统计期内本科室 ICU 患者总人数（按 _id 去重，无排除）。
+    分子 = 分母中住 ICU 期间进行过 ≥1 次镇静评估（RASS）的患者数。
+
+    分子源 A（优先）：bedside 表，code='param_score_rass_obs' 且 valid=True。
+    分子源 B（兜底）：score 表，scoreType='rass' 且 valid=True。
+          仅对源 A 未命中的患者补判。
+
+    关联键：bedside.pid / score.pid ↔ str(patient._id)
+
+    返回：{den_count, num_count, den_patients, num_patients}
+    """
+    from datetime import datetime as dt
+
+    start_dt = dt.fromisoformat(start_date)
+    end_dt = dt.fromisoformat(end_date)
+    end_dt_wide = dt(end_dt.year, end_dt.month, end_dt.day, 23, 59, 59)
+
+    result = {"den_count": 0, "num_count": 0,
+              "den_patients": [], "num_patients": []}
+
+    for db_name in BED_DB_NAMES:
+        try:
+            db = get_client(db_name)[db_name]
+
+            # ---- 1. 分母 ----
+            patients = list(db.patient.find(
+                {"deptCode": {"$in": dept_codes}, "status": {"$ne": "invalid"},
+                 "icuAdmissionTime": {"$lte": end_dt_wide},
+                 "$or": [{"icuDischargeTime": {"$gte": start_dt}},
+                         {"icuDischargeTime": None},
+                         {"icuDischargeTime": {"$exists": False}}]},
+                {"_id": 1, "hisPid": 1, "mrn": 1, "name": 1,
+                 "icuAdmissionTime": 1},
+            ))
+            if not patients:
+                continue
+
+            den_pids_obj = set()
+            pat_by_strpid = {}
+            for p in patients:
+                spid = str(p["_id"])
+                den_pids_obj.add(spid)
+                pat_by_strpid[spid] = p
+
+            result["den_count"] = len(den_pids_obj)
+            if not den_pids_obj:
+                continue
+            den_pids_list = list(den_pids_obj)
+
+            # ---- 2. 源 A：bedside ----
+            a_pids = set()
+            a_detail = {}
+
+            try:
+                bedside_docs = list(db.bedside.find(
+                    {"pid": {"$in": den_pids_list},
+                     "code": BEDSIDE_SEDATION_CODE,
+                     "valid": True},
+                    {"pid": 1, "strVal": 1, "fVal": 1, "time": 1},
+                ).max_time_ms(10000).limit(100000))
+
+                for doc in bedside_docs:
+                    spid = doc.get("pid", "")
+                    if spid not in den_pids_obj:
+                        continue
+                    # RASS 值: strVal="-4"~"+4", fVal=-4.0~4.0
+                    val = (doc.get("strVal") or "").strip()
+                    if val and spid not in a_pids:
+                        a_pids.add(spid)
+                        a_detail[spid] = {
+                            "source": "bedside",
+                            "scale": f"RASS {val}",
+                            "time": doc.get("time"),
+                        }
+            except Exception as e:
+                print(f"[ICU-10] bedside query error: {e}")
+
+            # ---- 3. 源 B：score 补判 ----
+            b_pids = set()
+            b_detail = {}
+
+            need_b = [spid for spid in den_pids_list if spid not in a_pids]
+            if need_b:
+                try:
+                    score_docs = list(db.score.find(
+                        {"pid": {"$in": need_b},
+                         "scoreType": {"$in": list(SCORE_SEDATION_TYPES)},
+                         "valid": True},
+                        {"pid": 1, "scoreType": 1, "time": 1},
+                    ).max_time_ms(10000).limit(50000))
+
+                    for doc in score_docs:
+                        spid = doc.get("pid", "")
+                        if spid not in den_pids_obj:
+                            continue
+                        if spid not in b_pids:
+                            b_pids.add(spid)
+                            b_detail[spid] = {
+                                "source": "score",
+                                "scale": "rass",
+                                "time": doc.get("time"),
+                            }
+                except Exception as e:
+                    print(f"[ICU-10] score query error: {e}")
+
+            # ---- 4. 分子 = A ∪ B ----
+            num_pids = a_pids | b_pids
+            result["num_count"] = min(len(num_pids), result["den_count"])
+
+            # ---- 5. 构建明细 ----
+            result["den_patients"] = [
+                {"pid": spid,
+                 "mrn": pat_by_strpid[spid].get("mrn", "") or pat_by_strpid[spid].get("hisPid", ""),
+                 "name": pat_by_strpid[spid].get("name", ""),
+                 "patient_id": pat_by_strpid[spid].get("hisPid", ""),
+                 "icu_admit": pat_by_strpid[spid].get("icuAdmissionTime"),
+                 }
+                for spid in den_pids_obj
+            ]
+
+            result["num_patients"] = []
+            for spid in num_pids:
+                p = pat_by_strpid[spid]
+                detail = a_detail.get(spid) or b_detail.get(spid) or {}
+                result["num_patients"].append({
+                    "pid": spid,
+                    "mrn": p.get("mrn", "") or p.get("hisPid", ""),
+                    "name": p.get("name", ""),
+                    "patient_id": p.get("hisPid", ""),
+                    "assess_source": detail.get("source", ""),
+                    "assess_scale": detail.get("scale", ""),
+                    "assess_time": detail.get("time"),
+                })
+
+            break
+
+        except Exception as e:
+            print(f"[ICU-10] Error in db {db_name}: {e}")
+            import traceback
+            traceback.print_exc()
+            continue
+
+    return result
+
+
+# ============================================================
 # 连接测试
 # ============================================================
 def test_connections() -> dict:
