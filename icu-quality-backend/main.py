@@ -1,7 +1,7 @@
 # main.py
 from fastapi import FastAPI, BackgroundTasks
 from datetime import date, datetime, timedelta
-from ai_analyzer import analyze
+from ai_analyzer import analyze, get_all_ai_decisions, override_ai_decision, ensure_ai_cache_collection as ensure_ai_cache
 from db import get_open_bed_count, get_occupied_bed_days, get_staff_count, get_icu04_apache_data, get_bundle_data, get_icu08_data, get_icu06_data, get_dvt_prevention_patients, get_client, BED_DB_NAMES, PROFESSION_CN
 import random
 import time as time_module
@@ -43,6 +43,7 @@ def _start_scheduler():
 @app.on_event("startup")
 def on_startup():
     summary_module.ensure_summary_collection()
+    ensure_ai_cache()
     _start_scheduler()
 
 # 简易缓存（TTL 60秒）
@@ -144,7 +145,7 @@ SOURCE_DESC = {
     "ICU-05-1h": {"numerator": "1h内完成bundle患者数", "denominator": "确诊感染性休克患者数"},
     "ICU-05-3h": {"numerator": "3h内完成bundle患者数", "denominator": "确诊感染性休克患者数"},
     "ICU-05-6h": {"numerator": "6h内完成bundle患者数", "denominator": "确诊感染性休克患者数"},
-    "ICU-06": {"numerator": "使用限制/非限制类抗生素前送检病原学标本的患者数", "denominator": "接受抗菌药物治疗的患者总数"},
+    "ICU-06": {"numerator": "首剂抗菌药前完成病原学送检(培养/镜检/免疫/分子)的患者数", "denominator": "以治疗为目的使用抗菌药的患者数(已剔除围术期/短疗程预防)"},
     "ICU-07": {"numerator": "实施物理或药物DVT预防措施的患者数", "denominator": "同期入住ICU的所有患者数"},
     "ICU-08": {"numerator": "实施俯卧位通气治疗的患者数", "denominator": "满足PEEP≥5且OI≤150的ARDS患者数"},
     "ICU-09": {"numerator": "进行镇痛评分(NRS/CPOT/BPS)测定的患者数", "denominator": "同期入住ICU的所有患者数"},
@@ -538,7 +539,7 @@ def query_detail(code: str, period: str, part: str, icu_unit: str = "all"):
                      for d in data.get("den_patients", [])]
             return items
 
-    # ---- ICU-06：抗菌药物送检率明细 ----
+    # ---- ICU-06：抗菌药物送检率明细（含治疗/预防判定） ----
     if code == "ICU-06":
         data = get_icu06_data(dept_codes, start_date, end_date)
         if part == "numerator":
@@ -549,8 +550,8 @@ def query_detail(code: str, period: str, part: str, icu_unit: str = "all"):
                     "patient_id": p.get("patient_id", p.get("mrn", "")),
                     "name": p.get("name", ""),
                     "gender": "", "age": "",
-                    "bed_no": p.get("test_source", ""),
-                    "dept": p.get("test_name", "")[:60],
+                    "bed_no": p.get("test_name", "")[:60] or p.get("test_source", ""),
+                    "dept": "",
                     "admit_time": tt.strftime("%Y-%m-%d %H:%M") if hasattr(tt, 'strftime') else str(tt)[:16] if tt else "",
                     "discharge_time": "",
                     "admission_source": "",
@@ -561,16 +562,24 @@ def query_detail(code: str, period: str, part: str, icu_unit: str = "all"):
             items = []
             for p in data.get("den_patients", []):
                 at = p.get("abx_time")
+                purpose = p.get("purpose", "治疗性")
+                decided_by = p.get("decided_by", "rule")
+                reason = p.get("reason", "")
+                confidence = p.get("confidence", 1.0)
+                drug = p.get("abx_drug", "")[:50] or "抗菌药"
+                # 抗菌药 + 目的徽章
+                drug_display = f"{drug} [{purpose}·{decided_by}]"
+                abx_time_str = at.strftime("%m/%d %H:%M") if hasattr(at, 'strftime') else str(at)[:16] if at else ""
                 items.append({
                     "patient_id": p.get("patient_id", p.get("mrn", "")),
                     "name": p.get("name", ""),
                     "gender": "", "age": "",
-                    "bed_no": "抗菌药",
-                    "dept": p.get("abx_drug", "")[:60],
-                    "admit_time": at.strftime("%Y-%m-%d %H:%M") if hasattr(at, 'strftime') else str(at)[:16] if at else "",
+                    "bed_no": drug_display,
+                    "dept": f"c={confidence:.2f}" if decided_by == "ai" else "",
+                    "admit_time": f"⏱{abx_time_str} | {reason[:60]}" if reason else abx_time_str,
                     "discharge_time": "",
-                    "admission_source": "",
-                    "value": 1,
+                    "admission_source": "low_confidence" if decided_by == "ai" and confidence < 0.6 else "",
+                    "value": p.get("total_doses", 1),
                 })
             return items
 
@@ -967,8 +976,8 @@ def indicator_detail(code: str, period: str, part: str, icu_unit: str = "all", e
         source_desc = f"分子：来自 infectionShockV2 表，{h} bundle 达标（baStandard或finish）的患者" if part == "numerator" \
             else "分母：来自 diseaseDiagnosis 表，脓毒性休克诊断 + patient 表在科过滤"
     elif code == "ICU-06":
-        source_desc = "分子：来自 VI_ICU_ZYYZ，首次抗生素前有病原学送检的患者" if part == "numerator" \
-            else "分母：来自 VI_ICU_ZYYZ，统计期内有抗菌药物医嘱的患者"
+        source_desc = (f"分子：来自 VI_ICU_ZYYZ 培养类检验医嘱，首次抗生素前有病原学送检的患者（送检≤首剂时间）" if part == "numerator"
+            else f"分母：来自 drugExe 抗菌药执行记录，经三层判定（A感染信号→B围术期→C短疗程→AI灰区）确认治疗目的，已剔除预防性用药")
     elif code == "ICU-07":
         source_desc = "分子：来自 DataCenter.VI_ICU_ZYYZ，抗凝药或机械预防医嘱包含匹配（排除封管/有创压肝素）" if part == "numerator" \
             else "分母：来自 patient 表，统计期内在科患者（排除 invalid）"
@@ -1098,3 +1107,58 @@ def admin_rebuild_status():
             }
         except Exception: continue
     return {"error": "Database not available"}
+
+
+# ============================================================
+# ICU-06 AI 决策复核接口
+# ============================================================
+
+@app.get("/api/ai-decisions")
+def list_ai_decisions(dept: str = "all", period_start: str = "",
+                      period_end: str = "", min_confidence: float = None,
+                      limit: int = 500):
+    """
+    查询 AI 判定记录，供主任复核。
+    可选筛选：科室、时间范围、置信度阈值。
+
+    GET /api/ai-decisions?period_start=2026-06&min_confidence=0.6
+    返回: [{hisPid, task, purpose, confidence, reason, decided_by, created_at}]
+    """
+    return get_all_ai_decisions(
+        dept_codes=None,
+        period_start=period_start or None,
+        period_end=period_end or None,
+        min_confidence=min_confidence,
+        limit=limit,
+    )
+
+
+@app.post("/api/ai-decisions/override")
+def override_ai(payload: dict):
+    """
+    人工推翻 AI 判定。
+
+    POST /api/ai-decisions/override
+    Body: {
+      "hisPid": "ZY0100000001",
+      "purpose": "治疗性",
+      "reason": "患者有明确肺部感染影像学证据",
+      "overridden_by": "张主任"
+    }
+
+    写回 ai_decision_cache 表，标记 by='manual_override'，置信度=1.0。
+    下次同 hisPid 查询时直接使用人工判定，不再调 AI。
+    """
+    hispid = payload.get("hisPid", "").strip()
+    purpose = payload.get("purpose", "").strip()
+    reason = payload.get("reason", "").strip()
+    overridden_by = payload.get("overridden_by", "主任").strip()
+
+    if not hispid:
+        return {"success": False, "error": "hisPid is required"}
+    if purpose not in ("治疗性", "预防性"):
+        return {"success": False, "error": "purpose must be 治疗性 or 预防性"}
+    if not reason:
+        return {"success": False, "error": "reason is required"}
+
+    return override_ai_decision(hispid, purpose, reason, overridden_by)

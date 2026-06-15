@@ -49,3 +49,24 @@ export async function fetchAiAnalysis(indicators, period) {
   });
   return res.json();
 }
+
+// ---- ICU-06 AI 决策复核 ----
+export async function fetchAiDecisions(params = {}) {
+  const qs = new URLSearchParams();
+  if (params.period_start) qs.set('period_start', params.period_start);
+  if (params.period_end) qs.set('period_end', params.period_end);
+  if (params.min_confidence != null) qs.set('min_confidence', params.min_confidence);
+  if (params.limit) qs.set('limit', params.limit);
+  const url = `${BASE}/ai-decisions?${qs.toString()}`;
+  const res = await fetch(url);
+  return res.json();
+}
+
+export async function overrideAiDecision(hisPid, purpose, reason, overriddenBy = '主任') {
+  const res = await fetch(`${BASE}/ai-decisions/override`, {
+    method: 'POST',
+    headers: { 'Content-Type': 'application/json' },
+    body: JSON.stringify({ hisPid, purpose, reason, overridden_by: overriddenBy }),
+  });
+  return res.json();
+}

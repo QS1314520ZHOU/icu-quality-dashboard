@@ -1135,103 +1135,408 @@ def get_dvt_prevention_patients(dept_codes: list, start_date: str, end_date: str
 
 
 # ============================================================
-# ICU-06：抗菌药物前病原学送检率
+# ICU-06：抗菌药物治疗前病原学送检率（治疗/预防三层判定）
 # ============================================================
 
-ANTIBIOTIC_KEYWORDS = [
-    # β-内酰胺类
-    "头孢", "西林", "青霉素", "培南", "曲松", "他啶", "吡肟", "西丁",
-    "哌酮", "氨曲南", "头霉素", "碳青霉烯", "亚胺培南", "厄他培南",
-    "克拉维酸", "舒巴坦", "他唑巴坦", "巴坦",
-    # 氟喹诺酮类
-    "沙星",
-    # 氨基糖苷类
-    "米星", "卡星", "庆大", "妥布",
-    # 大环内酯类
-    "红霉素", "阿奇", "克拉",
-    # 糖肽类/环脂肽类
-    "万古", "拉宁", "达托", "替考",
-    # 噁唑烷酮类
-    "利奈", "唑胺",
-    # 四环素类
-    "环素",
-    # 硝基咪唑类
-    "硝唑", "替硝",
-    # 抗真菌类
-    "康唑", "芬净", "两性霉素",
-    # 其他
-    "克林", "林可", "磷霉素", "夫西地酸", "莫匹罗星",
+# ---- 可配置阈值常量 ----
+FEVER_TEMP = 38.5               # 发热体温阈值 (℃)
+WBC_HIGH = 10.0                 # WBC 升高阈值 (×10⁹/L)
+WBC_LOW = 4.0                   # WBC 降低阈值 (×10⁹/L)
+CRP_HIGH = 10.0                 # CRP 升高阈值 (mg/L)
+PCT_HIGH = 0.5                  # PCT 升高阈值 (ng/mL)
+INFLAM_WINDOW_H = 24            # 炎症指标时间窗口 (小时, 首剂前后)
+PERIOP_PRE_H = 2                # 围术期术前窗口 (小时)
+PERIOP_POST_H = 48              # 围术期术后/总疗程阈值 (小时)
+SHORT_COURSE_H = 24             # 短疗程总跨度阈值 (小时)
+SHORT_COURSE_MAX_DOSES = 2      # 短疗程最多给药次数
+AI_CONFIDENCE_THRESHOLD = 0.6   # AI 低置信度阈值
+CRP_AS_PATHOGEN = False         # CRP 默认不计入病原学送检
+
+# ---- 治疗目的诊断关键词（A1 信号） ----
+TREATMENT_DIAG_KEYWORDS = [
+    "肺炎", "脓毒", "感染", "败血", "菌血", "腹膜炎", "脓肿", "化脓",
+    "尿路感染", "胆管炎", "脑膜炎", "蜂窝织炎", "感染性休克",
 ]
 
-# 病原学送检关键词（血培养、痰培养、尿培养等）
-PATHOGEN_TEST_KEYWORDS = [
+# ---- 病原学送检关键词（源A：VI_ICU_ZYYZ, yaoType='检验'） ----
+# ⚠️ 不含宽泛"培养"兜底，避免误命中非病原学检验
+CULTURE_KEYWORDS_FULL = [
     "血培养", "痰培养", "尿培养", "细菌培养", "真菌培养",
-    "涂片", "革兰染色", "抗酸染色", "G试验", "GM试验",
-    "降钙素原", "PCT", "内毒素", "病原学", "微生物",
+    "分泌物培养", "引流液培养", "胸水培养", "腹水培养", "脑脊液培养",
+    "导管培养", "涂片", "革兰染色", "抗酸染色", "G试验", "GM试验", "药敏",
+    "内毒素", "隐球菌", "曲霉", "半乳甘露聚糖", "结核",
+    "核酸", "微生物", "细菌",
 ]
+PATHOGEN_REGEX = "|".join(CULTURE_KEYWORDS_FULL)
 
-# VI_ICU_EXAM_ITEM 病原学相关 itemName 关键词
-PATHOGEN_ITEM_KEYWORDS = [
-    "降钙素原", "内毒素", "真菌", "隐球菌", "革兰",
-    "结核分枝杆菌核酸检测", "微生物", "细菌",
-    "G试验", "GM试验",
-]
+# ---- 检验结果清洗 ----
+def _clean_test_value(raw) -> float | None:
+    """
+    清洗检验结果值。
+    - 去除 > < ≥ ≤ 前缀
+    - 跳过 "阴性" "未检出" "正常" "未见异常" 等非数值
+    - 返回 float 或 None
+    """
+    if raw is None:
+        return None
+    s = str(raw).strip()
+    non_numeric = {"", "阴性", "未检出", "正常", "未见异常", "-", "—", "无", "弱阳性",
+                   "阴性(-)", "阴性（-）", "(-)", "neg", "negative", "Neg"}
+    if s in non_numeric:
+        return None
+    # 去除比较符号 (含组合如 >=, <=, ≥, ≤ 等)
+    for ch in (">=", "<=", "≥", "≤", ">", "<", "="):
+        s = s.replace(ch, "")
+    # 去除常见单位后缀
+    for suffix in ("℃", "°C", "mg/L", "ng/mL", "×10⁹/L", "x10⁹/L",
+                   "g/L", "mmol/L", "μmol/L", "U/L", "%", "mm/h"):
+        if s.endswith(suffix):
+            s = s[:-len(suffix)].strip()
+    s = s.strip()
+    try:
+        return float(s)
+    except ValueError:
+        return None
 
 
+# ---- 炎症指标查询 ----
+def get_inflammation_signals(pat_pid: str, pat_hispid: str, first_dose,
+                             db_sc, db_dc) -> dict:
+    """
+    查询首剂±INFLAM_WINDOW_H 内的炎症指标。
+
+    数据源：
+      - 体温: SmartCare.bedside, code='param_T', strVal 取数值
+      - WBC/CRP/PCT: DataCenter.VI_ICU_EXAM (主表) + VI_ICU_EXAM_ITEM (子表)
+        主表 collectTime 为检验时间，子表 itemCode 精确匹配取值。
+
+    ⚠️ 字段陷阱：
+      - PCT: 只认 itemCode=='PCT1' 或 itemName=='降钙素原'，itemCode='PCT' 是血小板比容
+      - WBC: 只认 itemCode in {'WBC','WBCJS'}，不可用 itemName 模糊（会误命中尿白细胞 NYWBC）
+
+    返回 {fever, fever_val, wbc_high, wbc_low, wbc_val,
+           crp_high, crp_val, pct_high, pct_val, has_any_abnormal, details}
+    """
+    from datetime import timedelta
+
+    window_start = first_dose - timedelta(hours=INFLAM_WINDOW_H)
+    window_end = first_dose + timedelta(hours=INFLAM_WINDOW_H)
+
+    result = {
+        "fever": False, "fever_val": None,
+        "wbc_high": False, "wbc_low": False, "wbc_val": None,
+        "crp_high": False, "crp_val": None,
+        "pct_high": False, "pct_val": None,
+        "has_any_abnormal": False,
+        "details": [],
+    }
+
+    # ---- 体温 (SmartCare.bedside) ----
+    try:
+        temp_docs = list(db_sc.bedside.find(
+            {"pid": pat_pid, "code": "param_T", "valid": True,
+             "time": {"$gte": window_start, "$lte": window_end}},
+            {"strVal": 1, "time": 1},
+        ).sort("time", -1).limit(5))
+        for doc in temp_docs:
+            val = _clean_test_value(doc.get("strVal"))
+            if val is not None:
+                if val >= FEVER_TEMP:
+                    result["fever"] = True
+                    result["fever_val"] = val
+                    result["details"].append(f"体温{val}℃≥{FEVER_TEMP}℃")
+                break  # 只取最近一条有效值
+    except Exception as e:
+        pass  # bedside 不可用则跳过
+
+    # ---- WBC / CRP / PCT (DataCenter.EXAM + EXAM_ITEM) ----
+    if pat_hispid and db_dc is not None:
+        _query_exam_inflammation(db_dc, pat_hispid, window_start, window_end, result)
+
+    result["has_any_abnormal"] = (
+        result["fever"] or result["wbc_high"] or result["wbc_low"]
+        or result["crp_high"] or result["pct_high"]
+    )
+    return result
+
+
+def _query_exam_inflammation(db_dc, hispid: str, window_start, window_end, result: dict):
+    """
+    从 DataCenter 查询炎症相关检验指标。
+    VI_ICU_EXAM (主表, pid=hisPid, collectTime) + VI_ICU_EXAM_ITEM (子表, itemCode/itemValue)。
+
+    ⚠️ 字段名不确定项（按推测标注，如不匹配需调整）：
+      - VI_ICU_EXAM.pid ↔ hisPid
+      - VI_ICU_EXAM.examID 或 reportID ↔ VI_ICU_EXAM_ITEM.examID
+      - VI_ICU_EXAM.collectTime 为主检验时间
+    """
+    try:
+        # Step 1: 查主表，获取窗口内的检验记录
+        exam_docs = list(db_dc["VI_ICU_EXAM"].find(
+            {"pid": hispid,
+             "collectTime": {"$gte": window_start, "$lte": window_end}},
+            {"examID": 1, "reportID": 1, "collectTime": 1},
+        ))
+        if not exam_docs:
+            return
+
+        # 构建 examID 集合 (优先 examID，兜底 reportID)
+        exam_ids = []
+        exam_time_by_id = {}  # exam_id → collectTime
+        for e in exam_docs:
+            eid = e.get("examID") or e.get("reportID")
+            if eid:
+                exam_ids.append(eid)
+                exam_time_by_id[str(eid)] = e.get("collectTime")
+        if not exam_ids:
+            return
+
+        # Step 2: 查子表，精确匹配 itemCode
+        WBC_CODES = {"WBC", "WBCJS"}        # 血白细胞 — 绝不可用 itemName 模糊
+        CRP_CODES = {"CRP", "sCRP"}          # C反应蛋白
+        PCT_CODES = {"PCT1"}                 # ⚠️ 只认 PCT1 — "PCT" 是血小板比容
+
+        target_codes = list(WBC_CODES | CRP_CODES | PCT_CODES)
+        items = list(db_dc["VI_ICU_EXAM_ITEM"].find(
+            {"examID": {"$in": exam_ids},
+             "itemCode": {"$in": target_codes}},
+            {"examID": 1, "itemCode": 1, "itemName": 1, "itemValue": 1, "authTime": 1},
+        ))
+
+        # Step 3: 逐条判定
+        for item in items:
+            code = item.get("itemCode", "")
+            raw_val = item.get("itemValue")
+            val = _clean_test_value(raw_val)
+            if val is None:
+                continue
+
+            # 时间：优先主表 collectTime，无则子表 authTime
+            eid = str(item.get("examID", ""))
+            item_time = exam_time_by_id.get(eid) or item.get("authTime")
+
+            if code in WBC_CODES:
+                result["wbc_val"] = val
+                if val > WBC_HIGH:
+                    result["wbc_high"] = True
+                    result["details"].append(f"WBC {val}>10×10⁹/L")
+                elif val < WBC_LOW:
+                    result["wbc_low"] = True
+                    result["details"].append(f"WBC {val}<4×10⁹/L")
+
+            elif code in CRP_CODES:
+                result["crp_val"] = val
+                if val > CRP_HIGH:
+                    result["crp_high"] = True
+                    result["details"].append(f"CRP {val}>10mg/L")
+
+            elif code in PCT_CODES:
+                # 双重保险：itemCode==PCT1 且 itemName 含"降钙素原"才认
+                item_name = item.get("itemName", "")
+                if "降钙素原" in str(item_name):
+                    result["pct_val"] = val
+                    if val > PCT_HIGH:
+                        result["pct_high"] = True
+                        result["details"].append(f"PCT {val}>0.5ng/mL")
+                # 纯 itemCode==PCT1 但 itemName 无降钙素原也认（有的系统只存 code）
+                elif code == "PCT1" and "血小板" not in str(item_name):
+                    result["pct_val"] = val
+                    if val > PCT_HIGH:
+                        result["pct_high"] = True
+                        result["details"].append(f"PCT {val}>0.5ng/mL")
+
+    except Exception:
+        pass  # 检验数据不可用则跳过，炎症指标只正向判治疗
+
+
+# ---- 三层判定：classify_abx_purpose ----
+def classify_abx_purpose(pat_doc: dict, first_dose, total_doses: int,
+                         total_hours: float, drug_names: list,
+                         db_sc=None, db_dc=None,
+                         inflammation_signals: dict | None = None) -> dict:
+    """
+    治疗 vs 预防三层漏斗判定。
+
+    参数：
+      pat_doc         - SmartCare.patient 文档 (含 clinicalDiagnosis, patientOperations, hisPid, _id)
+      first_dose      - 首剂抗菌药时间 (datetime)
+      total_doses     - 总给药次数
+      total_hours     - 总疗程跨度 (小时)
+      drug_names      - 抗菌药名称列表
+      db_sc, db_dc    - SmartCare / DataCenter 数据库句柄
+      inflammation_signals - 预查询的炎症指标 (避免重复查库)
+
+    返回 {purpose: "治疗性"|"预防性", decided_by: "rule"|"ai", reason: str, confidence: float}
+    """
+    from datetime import timedelta
+
+    hispid = pat_doc.get("hisPid", "")
+    pat_pid = str(pat_doc.get("_id", ""))
+    diagnosis = pat_doc.get("clinicalDiagnosis", "") or ""
+    operations = pat_doc.get("patientOperations") or []
+
+    # ---- 第一层 A: 治疗信号（任一命中即判治疗） ----
+
+    # A1: 临床诊断命中治疗关键词
+    for kw in TREATMENT_DIAG_KEYWORDS:
+        if kw in diagnosis:
+            return {"purpose": "治疗性", "decided_by": "rule",
+                    "reason": f"A1-诊断含「{kw}」", "confidence": 1.0}
+
+    # A2–A5: 炎症指标（预查询结果或现场查询）
+    if inflammation_signals is None:
+        inflammation_signals = get_inflammation_signals(
+            pat_pid, hispid, first_dose, db_sc, db_dc)
+
+    inflam = inflammation_signals
+
+    # A2: 体温 ≥ 38.5℃
+    if inflam.get("fever"):
+        return {"purpose": "治疗性", "decided_by": "rule",
+                "reason": f"A2-首剂±{INFLAM_WINDOW_H}h体温{inflam.get('fever_val')}℃≥{FEVER_TEMP}℃",
+                "confidence": 1.0}
+
+    # A3: WBC 异常 (>10 或 <4)
+    if inflam.get("wbc_high"):
+        return {"purpose": "治疗性", "decided_by": "rule",
+                "reason": f"A3-WBC {inflam.get('wbc_val')}>10×10⁹/L",
+                "confidence": 1.0}
+    if inflam.get("wbc_low"):
+        return {"purpose": "治疗性", "decided_by": "rule",
+                "reason": f"A3-WBC {inflam.get('wbc_val')}<4×10⁹/L",
+                "confidence": 1.0}
+
+    # A4: CRP 升高 >10mg/L
+    if inflam.get("crp_high"):
+        return {"purpose": "治疗性", "decided_by": "rule",
+                "reason": f"A4-CRP {inflam.get('crp_val')}>10mg/L",
+                "confidence": 1.0}
+
+    # A5: PCT 升高 >0.5ng/mL (仅真降钙素原 PCT1)
+    if inflam.get("pct_high"):
+        return {"purpose": "治疗性", "decided_by": "rule",
+                "reason": f"A5-PCT {inflam.get('pct_val')}>0.5ng/mL",
+                "confidence": 1.0}
+
+    # ---- 第二层 B: 围术期预防 ----
+    # 首剂在术前2h~术后 + 总疗程≤48h
+    for op in operations:
+        op_start = op.get("startTime") or op.get("opTime") or op.get("surgeryTime")
+        op_end = op.get("endTime") or op.get("opEndTime")
+        if op_start is None:
+            continue
+        # 术前 2h 窗口
+        pre_op = op_start - timedelta(hours=PERIOP_PRE_H)
+        # 术后窗口（手术结束时间 or 手术开始+24h）— 用于判断"围术期"范围
+        post_op = op_end if op_end else op_start
+
+        if pre_op <= first_dose <= post_op and total_hours <= PERIOP_POST_H:
+            return {"purpose": "预防性", "decided_by": "rule",
+                    "reason": f"B-围术期预防(术前{PERIOP_PRE_H}h~术后,疗程{total_hours:.0f}h≤{PERIOP_POST_H}h)",
+                    "confidence": 1.0}
+
+    # ---- 第二层 C: 短疗程预防 ----
+    # 无 A 信号 + 总跨度≤24h + 次数≤2
+    if total_hours <= SHORT_COURSE_H and total_doses <= SHORT_COURSE_MAX_DOSES:
+        return {"purpose": "预防性", "decided_by": "rule",
+                "reason": f"C-短疗程(跨度{total_hours:.0f}h≤{SHORT_COURSE_H}h, {total_doses}次≤{SHORT_COURSE_MAX_DOSES})",
+                "confidence": 1.0}
+
+    # ---- 第三层: 灰区 AI ----
+    # A/B/C 均不命中 → AI 判定（结果缓存，不会重复调用）
+    try:
+        from ai_analyzer import classify_abx_with_ai
+        diag = diagnosis[:200] if diagnosis else ""
+        ops_summary = ",".join(
+            o.get("name", o.get("code", ""))[:40] for o in operations[:3]
+        ) if operations else "无"
+        drug_summary = ",".join(d[:40] for d in drug_names[:5])
+        inflam_summary = ";".join(inflam.get("details", [])) or "无异常"
+
+        ai_result = classify_abx_with_ai({
+            "hisPid": hispid,
+            "diagnosis": diag,
+            "surgery": ops_summary,
+            "antibiotics": drug_summary,
+            "course_hours": round(total_hours, 1),
+            "dose_count": total_doses,
+            "inflammation": inflam_summary,
+        })
+        if ai_result:
+            return {
+                "purpose": ai_result.get("purpose", "治疗性"),
+                "decided_by": "ai",
+                "reason": ai_result.get("reason", ""),
+                "confidence": ai_result.get("confidence", 0.5),
+            }
+    except Exception:
+        pass
+
+    # AI 不可用兜底：保守判治疗
+    return {"purpose": "治疗性", "decided_by": "rule",
+            "reason": "灰区-兜底(规则无法判定且AI不可用,保守归为治疗)",
+            "confidence": 0.3}
+
+
+# ---- ICU-06 主取数函数 ----
 def get_icu06_data(dept_codes: list, start_date: str, end_date: str) -> dict:
     """
-    ICU-06：抗菌药物前病原学送检率。
+    ICU-06：抗菌药物治疗前病原学送检率。
 
-    分母：SmartCare.drugExe 统计期内有抗菌药物给药记录的患者。
-          抗菌药判定：drugList.code ∈ configDrug.classification='抗生素' 的 code 集合。
-          首剂时间取 drugExe.startTime（实际给药时间，比 orderTime 更准）。
+    分母：统计期内本科室以治疗为目的用抗菌药的患者（按人数去重）。
+          - 抗菌药：configDrug.classification=='抗生素' 的 code 集合
+          - 治疗目的：三层漏斗判定 (A 治疗信号 → B/C 预防 → AI 灰区)
+          - 预防性使用剔除出分母
 
-    分子：分母患者中，首次送检时间 ≤ 首剂抗菌药时间的人。
-          送检源A：DataCenter.VI_ICU_ZYYZ, yaoType='检验', orderName 含培养类关键词, 时间用 orderTime。
-          送检源B：DataCenter.VI_ICU_EXAM_ITEM (排除降钙素原) + VI_ICU_EXAM.collectTime。
-          首次送检时间 = min(A最早, B最早)。
+    分子：分母中首剂抗菌药给药前完成病原学送检的患者（送检时间 ≤ 首剂时间）。
+          - 源A：DataCenter.VI_ICU_ZYYZ, yaoType='检验', orderName 含培养类关键词
+          - 首剂时间回溯全程（含入 ICU 前），不限统计窗口
+          - 时间用 orderTime
 
-    跨库对齐：SmartCare patient.hisPid ↔ DataCenter hisPid (已验证 100% 匹配)。
-    返回：{den_count, num_count, den_patients, num_patients}
+    跨库对齐：SmartCare patient.hisPid ↔ DataCenter VI_ICU_ZYYZ.pid
+
+    返回：{den_count, num_count, den_patients, num_patients,
+           excluded_prophylaxis, low_confidence}
     """
-    from datetime import datetime as dt
+    from datetime import datetime as dt, timedelta
 
     start_dt = dt.fromisoformat(start_date)
     end_dt = dt.fromisoformat(end_date)
     end_dt_wide = dt(end_dt.year, end_dt.month, end_dt.day, 23, 59, 59)
 
-    result = {"den_count": 0, "num_count": 0, "den_patients": [], "num_patients": []}
-
-    # 培养类关键词（源A）
-    CULTURE_KEYWORDS = "血培养|痰培养|尿培养|细菌培养|真菌培养|涂片|革兰染色|抗酸染色|G试验|GM试验"
-    # 源B 排除项
-    EXCLUDE_ITEM = "降钙素原"
+    result = {
+        "den_count": 0, "num_count": 0,
+        "den_patients": [], "num_patients": [],
+        "excluded_prophylaxis": [],
+        "low_confidence": [],
+    }
 
     for db_name in BED_DB_NAMES:
         try:
             db = get_client(db_name)[db_name]
 
-            # ---- 1. 取抗生素 drug codes ----
+            # ---- 1. 取抗生素 drug codes (configDrug.classification='抗生素') ----
             abx_codes = [d["code"] for d in db.configDrug.find(
                 {"classification": "抗生素"}, {"code": 1}
             )]
             if not abx_codes:
                 continue
 
-            # ---- 2. 在科患者 ----
+            # ---- 2. 在科患者 (统计期内在 ICU 的患者) ----
             patients = list(db.patient.find(
                 {"deptCode": {"$in": dept_codes}, "status": {"$ne": "invalid"},
                  "icuAdmissionTime": {"$lte": end_dt_wide},
                  "$or": [{"icuDischargeTime": {"$gte": start_dt}}, {"icuDischargeTime": None},
                          {"icuDischargeTime": {"$exists": False}}]},
-                {"_id": 1, "hisPid": 1, "mrn": 1, "name": 1},
+                {"_id": 1, "hisPid": 1, "mrn": 1, "name": 1,
+                 "clinicalDiagnosis": 1, "patientOperations": 1},
             ))
             pid_set = {str(p["_id"]) for p in patients}
             pat_by_pid = {str(p["_id"]): p for p in patients}
             if not pid_set:
                 continue
 
-            # ---- 3. 分母：drugExe 抗菌药执行记录，取首剂 startTime ----
+            # ---- 3. 分母候选：drugExe 统计期内有抗菌药执行记录 ----
             abx_docs = list(db.drugExe.find(
                 {"pid": {"$in": list(pid_set)}, "status": "finished",
                  "drugList.code": {"$in": abx_codes},
@@ -1239,115 +1544,185 @@ def get_icu06_data(dept_codes: list, start_date: str, end_date: str) -> dict:
                 {"pid": 1, "startTime": 1, "drugList.code": 1, "drugList.name": 1},
             ).sort("startTime", 1))
 
-            abx_time = {}   # pid -> first antibiotic administration time
-            abx_detail = {}  # pid -> {time, drug_name}
+            if not abx_docs:
+                continue
+
+            # 按 pid 聚合首剂时间、总次数、总跨度、用药名称
+            abx_by_pid = {}  # pid → {first_time, last_time, doses, drug_names}
             for d in abx_docs:
                 pid = d.get("pid", "")
                 t = d.get("startTime")
-                if pid and t and pid not in abx_time:
-                    abx_time[pid] = t
-                    # 取抗菌药名称
-                    drug_name = ""
-                    for dl in d.get("drugList", []):
+                if not pid or not t:
+                    continue
+                if pid not in abx_by_pid:
+                    abx_by_pid[pid] = {"first_time": t, "last_time": t, "doses": 0,
+                                       "drug_names": set()}
+                entry = abx_by_pid[pid]
+                if t < entry["first_time"]:
+                    entry["first_time"] = t
+                if t > entry["last_time"]:
+                    entry["last_time"] = t
+                entry["doses"] += 1
+                for dl in d.get("drugList", []):
+                    if dl.get("code") in abx_codes:
+                        entry["drug_names"].add(dl.get("name", "")[:60])
+
+            # 回溯全程首剂：对每个候选患者，查统计期前的 drugExe 找真正首剂
+            for pid in list(abx_by_pid.keys()):
+                earliest = abx_by_pid[pid]["first_time"]
+                earlier = list(db.drugExe.find(
+                    {"pid": pid, "status": "finished",
+                     "drugList.code": {"$in": abx_codes},
+                     "startTime": {"$lt": earliest}},
+                    {"startTime": 1, "drugList.code": 1, "drugList.name": 1},
+                ).sort("startTime", 1).limit(1))
+                if earlier:
+                    abx_by_pid[pid]["first_time"] = earlier[0]["startTime"]
+                    for dl in earlier[0].get("drugList", []):
                         if dl.get("code") in abx_codes:
-                            drug_name = dl.get("name", "")[:60]
-                            break
-                    abx_detail[pid] = {"time": t, "drug": drug_name}
+                            abx_by_pid[pid]["drug_names"].add(dl.get("name", "")[:60])
 
-            result["den_count"] = len(abx_time)
-            if not abx_time:
-                continue
-
-            # ---- 4. 分子：送检时间 < 首剂抗生素时间 ----
-            test_time = {}   # pid -> earliest test time
-            test_detail = {} # pid -> {time, source, name}
-
-            # hisPid 映射（跨库对齐键）
-            smart_pid_by_hispid = {}
-            for spid, p in pat_by_pid.items():
-                hp = p.get("hisPid", "")
-                if hp:
-                    smart_pid_by_hispid[hp] = spid
-
+            # ---- 4. 连接 DataCenter ----
+            dc_db = None
             try:
-                dc = get_datacenter_client()["DataCenter"]
-                hispids = list(smart_pid_by_hispid.keys())
-                if not hispids:
+                dc_db = get_datacenter_client()["DataCenter"]
+            except Exception:
+                pass
+
+            # 批量预查炎症指标（减少逐条查库开销）
+            inflam_cache = {}  # pid → inflammation_signals
+            hispid_list = []
+            for pid in abx_by_pid:
+                p = pat_by_pid.get(pid)
+                if p and p.get("hisPid"):
+                    hispid_list.append(p.get("hisPid", ""))
+
+            # 按 pid 批量查炎症（每个 pid 最多一条 bedside + exam 查询）
+
+            # ---- 5. 三层判定：逐患者 classify ----
+            den_patients = []
+            excluded_prophylaxis = []
+            low_confidence = []
+
+            for pid, info in abx_by_pid.items():
+                p = pat_by_pid.get(pid)
+                if not p:
                     continue
 
+                first_dose = info["first_time"]
+                total_doses = info["doses"]
+                total_hours = (info["last_time"] - info["first_time"]).total_seconds() / 3600.0
+                drug_names = list(info["drug_names"])[:10]
+
+                # 预查炎症（一次查询，A1 命中可跳过但简单起见统一查）
+                hispid = p.get("hisPid", "")
+                inflam = get_inflammation_signals(pid, hispid, first_dose, db, dc_db)
+
+                classification = classify_abx_purpose(
+                    p, first_dose, total_doses, total_hours, drug_names,
+                    db_sc=db, db_dc=dc_db,
+                    inflammation_signals=inflam,
+                )
+
+                pat_entry = {
+                    "pid": pid,
+                    "mrn": p.get("mrn", "") or hispid,
+                    "name": p.get("name", ""),
+                    "patient_id": hispid,
+                    "abx_time": first_dose,
+                    "abx_drug": ", ".join(drug_names[:3]),
+                    "total_doses": total_doses,
+                    "total_hours": round(total_hours, 1),
+                    "purpose": classification["purpose"],
+                    "decided_by": classification["decided_by"],
+                    "reason": classification["reason"],
+                    "confidence": classification.get("confidence", 1.0),
+                    "inflammation": inflam.get("details", []),
+                }
+
+                if classification["purpose"] == "治疗性":
+                    den_patients.append(pat_entry)
+                else:
+                    excluded_prophylaxis.append(pat_entry)
+
+                # 低置信度 AI 判定（待人工复核）
+                if (classification["decided_by"] == "ai"
+                        and classification.get("confidence", 0) < AI_CONFIDENCE_THRESHOLD):
+                    low_confidence.append(pat_entry)
+
+            result["den_count"] = len(den_patients)
+            result["den_patients"] = den_patients
+            result["excluded_prophylaxis"] = excluded_prophylaxis
+            result["low_confidence"] = low_confidence
+
+            if not den_patients:
+                continue
+
+            den_pids = {p["pid"] for p in den_patients}
+
+            # ---- 6. 分子：病原学送检 (源A: VI_ICU_ZYYZ) ----
+            # hisPid 映射
+            smart_pid_by_hispid = {}
+            for pid in den_pids:
+                p = pat_by_pid.get(pid)
+                if p and p.get("hisPid"):
+                    smart_pid_by_hispid[p["hisPid"]] = pid
+
+            test_time = {}   # pid → earliest test time
+            test_detail = {} # pid → {time, source, name}
+
+            if dc_db and smart_pid_by_hispid:
+                hispids = list(smart_pid_by_hispid.keys())
                 # 源A: VI_ICU_ZYYZ (培养类医嘱, yaoType='检验')
-                #   ZYYZ.pid == patient.hisPid (已验证 10/10)
-                culture_orders = list(dc["VI_ICU_ZYYZ"].find(
+                culture_orders = list(dc_db["VI_ICU_ZYYZ"].find(
                     {"pid": {"$in": hispids}, "status": "已执行",
                      "yaoType": "检验",
-                     "orderName": {"$regex": CULTURE_KEYWORDS, "$options": "i"},
-                     "orderTime": {"$gte": start_dt, "$lte": end_dt_wide}},
+                     "orderName": {"$regex": PATHOGEN_REGEX, "$options": "i"},
+                     "orderTime": {"$lte": end_dt_wide}},  # 回溯全程，时间上限宽松
                     {"pid": 1, "orderTime": 1, "orderName": 1},
                 ).sort("orderTime", 1))
+
                 for o in culture_orders:
                     hp = o.get("pid", "")
                     t = o.get("orderTime")
                     spid = smart_pid_by_hispid.get(hp)
                     if spid and t and (spid not in test_time or t < test_time[spid]):
                         test_time[spid] = t
-                        test_detail[spid] = {"time": t, "source": "检验医嘱", "name": o.get("orderName", "")[:80]}
+                        test_detail[spid] = {
+                            "time": t, "source": "检验医嘱",
+                            "name": o.get("orderName", "")[:80],
+                        }
 
-                # 源B: VI_ICU_EXAM_ITEM (排除降钙素原) + VI_ICU_EXAM.collectTime
-                exam_items = list(dc["VI_ICU_EXAM_ITEM"].find(
-                    {"hisPid": {"$in": hispids},
-                     "itemName": {"$not": {"$regex": EXCLUDE_ITEM}},
-                     "authTime": {"$gte": start_dt, "$lte": end_dt_wide}},
-                    {"hisPid": 1, "examID": 1, "authTime": 1, "itemName": 1},
-                ).sort("authTime", 1))
-                if exam_items:
-                    eids = list(set(i["examID"] for i in exam_items if i.get("examID")))
-                    exam_coll = {}  # examID -> collectTime
-                    if eids:
-                        for e in dc["VI_ICU_EXAM"].find(
-                            {"reportID": {"$in": eids}},
-                            {"reportID": 1, "collectTime": 1},
-                        ):
-                            exam_coll[e["reportID"]] = e.get("collectTime")
-                    for item in exam_items:
-                        hp = item.get("hisPid", "")
-                        ct = exam_coll.get(item.get("examID", "")) or item.get("authTime")
-                        spid = smart_pid_by_hispid.get(hp)
-                        if spid and ct and (spid not in test_time or ct < test_time[spid]):
-                            test_time[spid] = ct
-                            test_detail[spid] = {"time": ct, "source": "检验报告", "name": item.get("itemName", "")[:60]}
-
-            except Exception:
-                pass
-
-            # ---- 5. 计算分子 ----
+            # ---- 7. 计算分子：送检时间 ≤ 首剂时间 ----
             num_pids = set()
-            for pid, abx_t in abx_time.items():
+            for p in den_patients:
+                pid = p["pid"]
                 tt = test_time.get(pid)
-                if tt and tt <= abx_t:
+                first_dose_t = abx_by_pid.get(pid, {}).get("first_time")
+                if tt and first_dose_t and tt <= first_dose_t:
                     num_pids.add(pid)
+
             result["num_count"] = min(len(num_pids), result["den_count"])
 
-            result["den_patients"] = [
-                {"pid": pid, "mrn": pat_by_pid[pid].get("mrn", "") or pat_by_pid[pid].get("hisPid", ""),
-                 "name": pat_by_pid[pid].get("name", ""),
-                 "abx_time": abx_detail.get(pid, {}).get("time"),
-                 "abx_drug": abx_detail.get(pid, {}).get("drug", ""),
-                 "patient_id": pat_by_pid[pid].get("hisPid", "")}
-                for pid in abx_time
-            ]
             result["num_patients"] = [
-                {"pid": pid, "mrn": pat_by_pid[pid].get("mrn", "") or pat_by_pid[pid].get("hisPid", ""),
+                {"pid": pid,
+                 "mrn": pat_by_pid[pid].get("mrn", "") or pat_by_pid[pid].get("hisPid", ""),
                  "name": pat_by_pid[pid].get("name", ""),
+                 "patient_id": pat_by_pid[pid].get("hisPid", ""),
                  "test_time": test_detail.get(pid, {}).get("time"),
                  "test_source": test_detail.get(pid, {}).get("source", ""),
                  "test_name": test_detail.get(pid, {}).get("name", ""),
-                 "patient_id": pat_by_pid[pid].get("hisPid", "")}
+                 "abx_time": abx_by_pid.get(pid, {}).get("first_time"),
+                 }
                 for pid in num_pids
             ]
-            break
+
+            break  # 拿到数据即退出库名循环
 
         except Exception as e:
-            print(f"[ICU-06] Error: {e}")
+            print(f"[ICU-06] Error in db {db_name}: {e}")
+            import traceback
+            traceback.print_exc()
             continue
 
     return result

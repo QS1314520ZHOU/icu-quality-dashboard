@@ -156,3 +156,327 @@ def _fallback_summary(abnormal: list, good_count: int) -> str:
         return f"本期共 {good_count} 项指标全部达标，整体平稳。"
     names = "、".join(f"{a['name']}({a['value']}{a['unit']})" for a in abnormal)
     return f"本期 {good_count} 项达标，{len(abnormal)} 项需关注：{names}。建议质控团队核查相关流程依从性。"
+
+
+# ============================================================
+# ICU-06 AI 判定：抗菌药使用目的分类（治疗性 vs 预防性）
+# ============================================================
+
+import json
+import hashlib
+import threading
+from datetime import datetime as _dt
+
+# AI 并发控制
+_AI_SEMAPHORE = threading.Semaphore(5)
+
+# AI 提示词模板 — 强制 JSON 输出
+ABX_PURPOSE_SYSTEM_PROMPT = """你是ICU临床药师，辅助判断住院患者使用抗菌药物的真实目的（治疗性 vs 预防性）。
+
+【判断规则】
+- 治疗性：有明确感染证据（临床诊断含感染关键词、体温≥38.5℃、WBC/CRP/PCT显著升高），或临床场景高度指向活动性感染。
+- 预防性：围术期短程用药、无感染相关症状体征、炎症指标正常或仅轻微波动、给药次数少且疗程极短。
+
+【输入上下文】
+你将收到患者的诊断、手术史、抗菌药名称、疗程小时数、给药次数、炎症指标摘要。
+
+【输出要求】
+严格输出以下JSON格式，不得包含任何其他文字：
+{"purpose":"治疗性"|"预防性","confidence":0.0-1.0,"reason":"一句话依据（≤50字）"}
+
+其中：
+- purpose: 必须是"治疗性"或"预防性"二选一
+- confidence: 0.0~1.0，表示你的判定确信度
+- reason: 用一句话说明判定依据，引用输入中的关键信息"""
+
+
+def call_llm_json(prompt: str) -> dict | None:
+    """
+    调用 LLM 返回结构化 JSON。
+    复用现有 OpenAI client 配置，强制 JSON 输出。
+    """
+    import os
+    from openai import OpenAI
+
+    client = OpenAI(
+        api_key=os.getenv("LLM_API_KEY"),
+        base_url=os.getenv("LLM_BASE_URL", "https://api.openai.com/v1"),
+    )
+    resp = client.chat.completions.create(
+        model=os.getenv("LLM_MODEL", "gpt-4o-mini"),
+        messages=[
+            {"role": "system", "content": ABX_PURPOSE_SYSTEM_PROMPT},
+            {"role": "user", "content": prompt},
+        ],
+        temperature=0.1,       # 极低温度，保证判定一致
+        max_tokens=200,
+        response_format={"type": "json_object"},  # 强制 JSON
+    )
+    raw = resp.choices[0].message.content.strip()
+    try:
+        return json.loads(raw)
+    except json.JSONDecodeError:
+        # 尝试从文本中提取 JSON
+        import re
+        match = re.search(r'\{[^{}]*"purpose"[^{}]*\}', raw)
+        if match:
+            try:
+                return json.loads(match.group())
+            except json.JSONDecodeError:
+                pass
+        return None
+
+
+# ============================================================
+# ai_decision_cache 缓存表
+# ============================================================
+
+AI_CACHE_COLLECTION = "ai_decision_cache"
+
+
+def ensure_ai_cache_collection():
+    """
+    创建 ai_decision_cache 集合及唯一索引 (hisPid, task)。
+    幂等 — 多次调用安全。
+    """
+    from db import BED_DB_NAMES, get_client
+    for db_name in BED_DB_NAMES:
+        try:
+            db = get_client(db_name)[db_name]
+            coll = db[AI_CACHE_COLLECTION]
+            # 唯一索引: 同一患者同一任务只判一次
+            try:
+                coll.create_index(
+                    [("hisPid", 1), ("task", 1)],
+                    unique=True, background=True,
+                    name="idx_hispid_task",
+                )
+            except Exception:
+                pass
+            # 辅助索引: 按时间查
+            try:
+                coll.create_index(
+                    [("created_at", -1)],
+                    background=True,
+                    name="idx_created_at",
+                )
+            except Exception:
+                pass
+            break
+        except Exception:
+            continue
+
+
+def get_ai_cache(hispid: str, task: str = "abx_purpose") -> dict | None:
+    """读取 AI 判定缓存。返回 result 子文档或 None。"""
+    from db import BED_DB_NAMES, get_client
+    for db_name in BED_DB_NAMES:
+        try:
+            db = get_client(db_name)[db_name]
+            doc = db[AI_CACHE_COLLECTION].find_one(
+                {"hisPid": hispid, "task": task},
+                {"result": 1, "_id": 0},
+            )
+            if doc:
+                return doc.get("result")
+        except Exception:
+            continue
+    return None
+
+
+def set_ai_cache(hispid: str, task: str, result: dict, prompt_snapshot: str):
+    """写入 AI 判定缓存。幂等 upsert，缓存命中时直接返回不重调。"""
+    from db import BED_DB_NAMES, get_client
+    for db_name in BED_DB_NAMES:
+        try:
+            db = get_client(db_name)[db_name]
+            doc = {
+                "hisPid": hispid,
+                "task": task,
+                "result": result,
+                "prompt_snapshot": prompt_snapshot,
+                "created_at": _dt.utcnow(),
+            }
+            db[AI_CACHE_COLLECTION].update_one(
+                {"hisPid": hispid, "task": task},
+                {"$set": doc},
+                upsert=True,
+            )
+            break
+        except Exception:
+            continue
+
+
+def _build_abx_prompt(ctx: dict) -> str:
+    """构造抗菌药目的判定提示词"""
+    return f"""请判断以下ICU患者使用抗菌药的真实目的。
+
+【患者信息】
+诊断：{ctx.get('diagnosis', '未知')}
+手术史：{ctx.get('surgery', '无')}
+抗菌药：{ctx.get('antibiotics', '未知')}
+疗程：{ctx.get('course_hours', '?')} 小时
+给药次数：{ctx.get('dose_count', '?')} 次
+炎症指标：{ctx.get('inflammation', '未查')}
+
+请按要求输出JSON判定结果。"""
+
+
+def classify_abx_with_ai(ctx: dict) -> dict | None:
+    """
+    调用 AI 判定抗菌药使用目的（治疗性 vs 预防性）。
+
+    ctx 需包含:
+      - hisPid: 患者住院号（缓存键）
+      - diagnosis: 临床诊断
+      - surgery: 手术史摘要
+      - antibiotics: 抗菌药名称
+      - course_hours: 疗程小时数
+      - dose_count: 给药次数
+      - inflammation: 炎症指标摘要
+
+    流程:
+      1. 查 ai_decision_cache，命中直接返回
+      2. 未命中 → 调 LLM（受并发上限 Semaphore(5) 控制）
+      3. 结果写缓存
+      4. 返回 result 子文档
+
+    返回: {purpose, confidence, reason, by: "ai"} 或 None
+    """
+    hispid = ctx.get("hisPid", "")
+    if not hispid:
+        return None
+
+    # Step 1: 查缓存
+    cached = get_ai_cache(hispid, "abx_purpose")
+    if cached:
+        return cached
+
+    # Step 2: 调 LLM（并发控制）
+    acquired = _AI_SEMAPHORE.acquire(timeout=30)
+    if not acquired:
+        # 并发满 → 保守兜底
+        return {"purpose": "治疗性", "confidence": 0.3,
+                "reason": "AI并发已满,保守归为治疗", "by": "ai"}
+
+    try:
+        prompt = _build_abx_prompt(ctx)
+        llm_result = call_llm_json(prompt)
+
+        if not llm_result:
+            # LLM 解析失败 → 兜底
+            result = {"purpose": "治疗性", "confidence": 0.3,
+                      "reason": "AI返回解析失败,保守归为治疗", "by": "ai"}
+        else:
+            # 规范化
+            purpose_raw = str(llm_result.get("purpose", "治疗性"))
+            if "预防" in purpose_raw:
+                purpose = "预防性"
+            else:
+                purpose = "治疗性"
+
+            try:
+                conf = float(llm_result.get("confidence", 0.5))
+                conf = max(0.0, min(1.0, conf))
+            except (ValueError, TypeError):
+                conf = 0.5
+
+            reason = str(llm_result.get("reason", ""))[:200]
+            result = {
+                "purpose": purpose,
+                "confidence": conf,
+                "reason": reason,
+                "by": "ai",
+            }
+
+        # Step 3: 写缓存
+        set_ai_cache(hispid, "abx_purpose", result, prompt)
+
+        return result
+
+    except Exception:
+        return {"purpose": "治疗性", "confidence": 0.3,
+                "reason": "AI调用异常,保守归为治疗", "by": "ai"}
+    finally:
+        _AI_SEMAPHORE.release()
+
+
+def get_all_ai_decisions(dept_codes: list = None, period_start: str = None,
+                         period_end: str = None, min_confidence: float = None,
+                         limit: int = 500) -> list:
+    """
+    查询 ai_decision_cache 中的 AI 判定记录。
+    支持按科室、时间范围、置信度阈值筛选。
+    用于前端 AI 决策复核界面。
+    """
+    from db import BED_DB_NAMES, get_client
+    results = []
+    for db_name in BED_DB_NAMES:
+        try:
+            db = get_client(db_name)[db_name]
+            query = {"task": "abx_purpose"}
+            if period_start:
+                query["created_at"] = query.get("created_at", {})
+                query["created_at"]["$gte"] = _dt.fromisoformat(period_start)
+            if period_end:
+                query["created_at"] = query.get("created_at", {})
+                query["created_at"]["$lte"] = _dt.fromisoformat(
+                    f"{period_end}-31" if len(period_end) == 7 else period_end)
+            if min_confidence is not None:
+                query["result.confidence"] = {"$lte": float(min_confidence)}
+
+            docs = list(db[AI_CACHE_COLLECTION].find(
+                query,
+                {"hisPid": 1, "task": 1, "result": 1, "created_at": 1, "_id": 0},
+            ).sort("created_at", -1).limit(limit))
+            if docs:
+                results = docs
+                break
+        except Exception:
+            continue
+
+    # 格式化返回
+    return [{
+        "hisPid": d["hisPid"],
+        "task": d["task"],
+        "purpose": d.get("result", {}).get("purpose", ""),
+        "confidence": d.get("result", {}).get("confidence", 0),
+        "reason": d.get("result", {}).get("reason", ""),
+        "decided_by": d.get("result", {}).get("by", "ai"),
+        "created_at": d.get("created_at").isoformat() if d.get("created_at") else "",
+    } for d in results]
+
+
+def override_ai_decision(hispid: str, purpose: str, reason: str,
+                         overridden_by: str = "主任") -> dict:
+    """
+    人工推翻 AI 判定。
+    写回 ai_decision_cache，标记 by='manual_override'。
+    返回更新后的文档。
+    """
+    from db import BED_DB_NAMES, get_client
+    result = {
+        "purpose": purpose,
+        "confidence": 1.0,
+        "reason": f"[人工推翻({overridden_by})] {reason}",
+        "by": "manual_override",
+    }
+    for db_name in BED_DB_NAMES:
+        try:
+            db = get_client(db_name)[db_name]
+            doc = {
+                "hisPid": hispid,
+                "task": "abx_purpose",
+                "result": result,
+                "prompt_snapshot": f"manual_override by {overridden_by}",
+                "created_at": _dt.utcnow(),
+            }
+            db[AI_CACHE_COLLECTION].update_one(
+                {"hisPid": hispid, "task": "abx_purpose"},
+                {"$set": doc},
+                upsert=True,
+            )
+            return {"success": True, "hisPid": hispid, "result": result}
+        except Exception as e:
+            continue
+    return {"success": False, "error": "Database not available"}
