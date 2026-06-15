@@ -1897,6 +1897,7 @@ def get_icu06_data(dept_codes: list, start_date: str, end_date: str) -> dict:
                     "decided_by": classification["decided_by"],
                     "reason": classification["reason"],
                     "confidence": classification.get("confidence", 1.0),
+                    "need_review": classification.get("need_review", False),
                     "inflammation": inflam.get("details", []),
                 }
 
