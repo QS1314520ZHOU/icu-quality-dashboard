@@ -568,8 +568,11 @@ def query_detail(code: str, period: str, part: str, icu_unit: str = "all"):
                 confidence = p.get("confidence", 1.0)
                 need_review = p.get("need_review", False)
                 drug = p.get("abx_drug", "")[:50] or "抗菌药"
-                # 抗菌药 + 目的徽章
-                drug_display = f"{drug} [{purpose}·{decided_by}]"
+                # 抗菌药 + 目的徽章 (仅非 rule 时标注来源)
+                if decided_by == "rule":
+                    drug_display = f"{drug} [{purpose}]"
+                else:
+                    drug_display = f"{drug} [{purpose}·{decided_by}]"
                 abx_time_str = at.strftime("%m/%d %H:%M") if hasattr(at, 'strftime') else str(at)[:16] if at else ""
                 # 低置信度标记: AI 置信度<0.6 或 fallback 或 need_review
                 is_low_conf = (
