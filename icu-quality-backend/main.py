@@ -46,7 +46,7 @@ def on_startup():
     ensure_ai_cache()
     _start_scheduler()
 
-# 简易缓存（TTL 60秒）
+# 简易缓存（TTL 60秒，支持 nocache 参数强制刷新）
 _cache = {}
 _CACHE_TTL = 60
 
@@ -55,7 +55,9 @@ def _cache_key(prefix, *args):
     return f"{prefix}:{':'.join(str(a) for a in args)}"
 
 
-def _cache_get(key):
+def _cache_get(key, nocache: bool = False):
+    if nocache:
+        return None
     entry = _cache.get(key)
     if entry and time_module.time() - entry["ts"] < _CACHE_TTL:
         return entry["val"]
@@ -64,6 +66,22 @@ def _cache_get(key):
 
 def _cache_set(key, val):
     _cache[key] = {"val": val, "ts": time_module.time()}
+
+
+# 响应头中间件：禁止浏览器缓存 API
+from starlette.middleware.base import BaseHTTPMiddleware
+from starlette.responses import Response
+
+class NoCacheMiddleware(BaseHTTPMiddleware):
+    async def dispatch(self, request, call_next):
+        response: Response = await call_next(request)
+        if request.url.path.startswith("/api/"):
+            response.headers["Cache-Control"] = "no-store, no-cache, must-revalidate, max-age=0"
+            response.headers["Pragma"] = "no-cache"
+            response.headers["Expires"] = "0"
+        return response
+
+app.add_middleware(NoCacheMiddleware)
 
 # deptCode → 科室名称映射（从 department 表读取，带缓存兜底）
 DEPT_MAP = {
@@ -907,13 +925,14 @@ def ai_analyze(payload: dict):
     return analyze(period, values_dict)
 
 @app.get("/api/indicators/list")
-def indicator_list(period: str, icu_unit: str = "all", end_period: str = ""):
+def indicator_list(period: str, icu_unit: str = "all", end_period: str = "", nocache: bool = False):
     """
     第一级：指标汇总列表。
     period=2026-06 单月, period=2026-01&end_period=2026-06 跨月汇总。
+    nocache=true 强制刷新，绕过服务器缓存。
     """
     ck = _cache_key("list", period, icu_unit, end_period)
-    cached = _cache_get(ck)
+    cached = _cache_get(ck, nocache=nocache)
     if cached is not None:
         return cached
     if end_period:
@@ -1006,13 +1025,14 @@ def indicator_trend(code: str, year: int, icu_unit: str = "all",
     }
 
 @app.get("/api/indicators/{code}/detail")
-def indicator_detail(code: str, period: str, part: str, icu_unit: str = "all", end_period: str = ""):
+def indicator_detail(code: str, period: str, part: str, icu_unit: str = "all", end_period: str = "", nocache: bool = False):
     """
     第三级：分子/分母下钻明细。
     支持 end_period 跨月聚合。
+    nocache=true 强制刷新。
     """
     ck = _cache_key("detail", code, period, part, icu_unit, end_period)
-    cached = _cache_get(ck)
+    cached = _cache_get(ck, nocache=nocache)
     if cached is not None:
         return cached
     # 跨月汇总
