@@ -1158,6 +1158,30 @@ TREATMENT_DIAG_KEYWORDS = [
     "尿路感染", "胆管炎", "脑膜炎", "蜂窝织炎", "感染性休克",
 ]
 
+# ---- 特殊使用级抗菌药关键词（A7 信号） ----
+# ⚠️ configDrug 表无抗菌药物分级字段，只能用关键词硬编码清单
+# 覆盖碳青霉烯类、糖肽类、噁唑烷酮类、环脂肽类、多黏菌素类、抗真菌类、四代头孢等
+SPECIAL_GRADE_KEYWORDS = [
+    # 碳青霉烯类
+    "亚胺培南", "美罗培南", "比阿培南", "帕尼培南", "厄他培南",
+    # 糖肽类
+    "万古霉素", "去甲万古", "替考拉宁",
+    # 噁唑烷酮类
+    "利奈唑胺",
+    # 甘氨酰环素类
+    "替加环素",
+    # 多黏菌素类
+    "多黏菌素", "多粘菌素",
+    # 抗真菌类 (三唑/棘白菌素/多烯)
+    "两性霉素", "伏立康唑", "泊沙康唑", "卡泊芬净", "米卡芬净",
+    # 环脂肽类
+    "达托霉素",
+    # 四代头孢
+    "头孢吡肟",
+    # 其他特殊级
+    "夫西地酸",
+]
+
 # ---- 病原学送检关键词（源A：VI_ICU_ZYYZ, yaoType='检验'） ----
 # ⚠️ 不含宽泛"培养"兜底，避免误命中非病原学检验
 CULTURE_KEYWORDS_FULL = [
@@ -1352,6 +1376,7 @@ def _query_exam_inflammation(db_dc, hispid: str, window_start, window_end, resul
 # ---- 三层判定：classify_abx_purpose ----
 def classify_abx_purpose(pat_doc: dict, first_dose, total_doses: int,
                          total_hours: float, drug_names: list,
+                         abx_code_count: int = 0,
                          db_sc=None, db_dc=None,
                          inflammation_signals: dict | None = None) -> dict:
     """
@@ -1363,10 +1388,12 @@ def classify_abx_purpose(pat_doc: dict, first_dose, total_doses: int,
       total_doses     - 总给药次数
       total_hours     - 总疗程跨度 (小时)
       drug_names      - 抗菌药名称列表
+      abx_code_count  - 不同抗菌药 code 去重计数 (≥2 即联合用药 A6)
       db_sc, db_dc    - SmartCare / DataCenter 数据库句柄
       inflammation_signals - 预查询的炎症指标 (避免重复查库)
 
-    返回 {purpose: "治疗性"|"预防性", decided_by: "rule"|"ai", reason: str, confidence: float}
+    返回 {purpose: "治疗性"|"预防性", decided_by: "rule"|"ai"|"fallback",
+           reason: str, confidence: float, need_review: bool}
     """
     from datetime import timedelta
 
@@ -1381,7 +1408,8 @@ def classify_abx_purpose(pat_doc: dict, first_dose, total_doses: int,
     for kw in TREATMENT_DIAG_KEYWORDS:
         if kw in diagnosis:
             return {"purpose": "治疗性", "decided_by": "rule",
-                    "reason": f"A1-诊断含「{kw}」", "confidence": 1.0}
+                    "reason": f"A1-诊断含「{kw}」", "confidence": 1.0,
+                    "need_review": False}
 
     # A2–A5: 炎症指标（预查询结果或现场查询）
     if inflammation_signals is None:
@@ -1394,29 +1422,43 @@ def classify_abx_purpose(pat_doc: dict, first_dose, total_doses: int,
     if inflam.get("fever"):
         return {"purpose": "治疗性", "decided_by": "rule",
                 "reason": f"A2-首剂±{INFLAM_WINDOW_H}h体温{inflam.get('fever_val')}℃≥{FEVER_TEMP}℃",
-                "confidence": 1.0}
+                "confidence": 1.0, "need_review": False}
 
     # A3: WBC 异常 (>10 或 <4)
     if inflam.get("wbc_high"):
         return {"purpose": "治疗性", "decided_by": "rule",
                 "reason": f"A3-WBC {inflam.get('wbc_val')}>10×10⁹/L",
-                "confidence": 1.0}
+                "confidence": 1.0, "need_review": False}
     if inflam.get("wbc_low"):
         return {"purpose": "治疗性", "decided_by": "rule",
                 "reason": f"A3-WBC {inflam.get('wbc_val')}<4×10⁹/L",
-                "confidence": 1.0}
+                "confidence": 1.0, "need_review": False}
 
     # A4: CRP 升高 >10mg/L
     if inflam.get("crp_high"):
         return {"purpose": "治疗性", "decided_by": "rule",
                 "reason": f"A4-CRP {inflam.get('crp_val')}>10mg/L",
-                "confidence": 1.0}
+                "confidence": 1.0, "need_review": False}
 
     # A5: PCT 升高 >0.5ng/mL (仅真降钙素原 PCT1)
     if inflam.get("pct_high"):
         return {"purpose": "治疗性", "decided_by": "rule",
                 "reason": f"A5-PCT {inflam.get('pct_val')}>0.5ng/mL",
-                "confidence": 1.0}
+                "confidence": 1.0, "need_review": False}
+
+    # A6: 联合用药（≥2 种不同抗菌药 code）
+    if abx_code_count >= 2:
+        return {"purpose": "治疗性", "decided_by": "rule",
+                "reason": f"A6-联合用药({abx_code_count}种)",
+                "confidence": 1.0, "need_review": False}
+
+    # A7: 特殊使用级抗菌药
+    for dname in drug_names:
+        for kw in SPECIAL_GRADE_KEYWORDS:
+            if kw in dname:
+                return {"purpose": "治疗性", "decided_by": "rule",
+                        "reason": f"A7-特殊级抗菌药:{kw}",
+                        "confidence": 1.0, "need_review": False}
 
     # ---- 第二层 B: 围术期预防 ----
     # 首剂在术前2h~术后 + 总疗程≤48h
@@ -1433,17 +1475,17 @@ def classify_abx_purpose(pat_doc: dict, first_dose, total_doses: int,
         if pre_op <= first_dose <= post_op and total_hours <= PERIOP_POST_H:
             return {"purpose": "预防性", "decided_by": "rule",
                     "reason": f"B-围术期预防(术前{PERIOP_PRE_H}h~术后,疗程{total_hours:.0f}h≤{PERIOP_POST_H}h)",
-                    "confidence": 1.0}
+                    "confidence": 1.0, "need_review": False}
 
     # ---- 第二层 C: 短疗程预防 ----
     # 无 A 信号 + 总跨度≤24h + 次数≤2
     if total_hours <= SHORT_COURSE_H and total_doses <= SHORT_COURSE_MAX_DOSES:
         return {"purpose": "预防性", "decided_by": "rule",
                 "reason": f"C-短疗程(跨度{total_hours:.0f}h≤{SHORT_COURSE_H}h, {total_doses}次≤{SHORT_COURSE_MAX_DOSES})",
-                "confidence": 1.0}
+                "confidence": 1.0, "need_review": False}
 
     # ---- 第三层: 灰区 AI ----
-    # A/B/C 均不命中 → AI 判定（结果缓存，不会重复调用）
+    # A1-A7 + B + C 均不命中 → AI 判定（结果缓存，不会重复调用）
     try:
         from ai_analyzer import classify_abx_with_ai
         diag = diagnosis[:200] if diagnosis else ""
@@ -1465,17 +1507,18 @@ def classify_abx_purpose(pat_doc: dict, first_dose, total_doses: int,
         if ai_result:
             return {
                 "purpose": ai_result.get("purpose", "治疗性"),
-                "decided_by": "ai",
+                "decided_by": ai_result.get("by", "ai"),
                 "reason": ai_result.get("reason", ""),
                 "confidence": ai_result.get("confidence", 0.5),
+                "need_review": ai_result.get("need_review", False),
             }
     except Exception:
         pass
 
-    # AI 不可用兜底：保守判治疗
-    return {"purpose": "治疗性", "decided_by": "rule",
-            "reason": "灰区-兜底(规则无法判定且AI不可用,保守归为治疗)",
-            "confidence": 0.3}
+    # AI 不可用兜底（仍进 low_confidence 人工复核）
+    return {"purpose": "治疗性", "decided_by": "fallback",
+            "reason": f"规则+AI均不可用兜底(疗程{total_hours:.0f}h/{total_doses}次/{','.join(drug_names[:2])[:30]})",
+            "confidence": 0.3, "need_review": True}
 
 
 # ---- 批量预查炎症指标（一次查询覆盖全部患者） ----
@@ -1756,7 +1799,7 @@ def get_icu06_data(dept_codes: list, start_date: str, end_date: str) -> dict:
                     continue
                 if pid not in abx_by_pid:
                     abx_by_pid[pid] = {"first_time": t, "last_time": t, "doses": 0,
-                                       "drug_names": set()}
+                                       "drug_names": set(), "drug_codes": set()}
                 entry = abx_by_pid[pid]
                 if t < entry["first_time"]:
                     entry["first_time"] = t
@@ -1766,6 +1809,7 @@ def get_icu06_data(dept_codes: list, start_date: str, end_date: str) -> dict:
                 for dl in d.get("drugList", []):
                     if dl.get("code") in abx_codes:
                         entry["drug_names"].add(dl.get("name", "")[:60])
+                        entry["drug_codes"].add(dl.get("code"))
 
             # 回溯全程首剂：对每个候选患者，查统计期前的 drugExe 找真正首剂
             for pid in list(abx_by_pid.keys()):
@@ -1781,6 +1825,7 @@ def get_icu06_data(dept_codes: list, start_date: str, end_date: str) -> dict:
                     for dl in earlier[0].get("drugList", []):
                         if dl.get("code") in abx_codes:
                             abx_by_pid[pid]["drug_names"].add(dl.get("name", "")[:60])
+                            abx_by_pid[pid]["drug_codes"].add(dl.get("code"))
 
             # ---- 4. 连接 DataCenter ----
             dc_db = None
@@ -1828,11 +1873,13 @@ def get_icu06_data(dept_codes: list, start_date: str, end_date: str) -> dict:
                 total_doses = info["doses"]
                 total_hours = (info["last_time"] - info["first_time"]).total_seconds() / 3600.0
                 drug_names = list(info["drug_names"])[:10]
+                abx_code_count = len(info.get("drug_codes", set()))
                 hispid = p.get("hisPid", "")
                 inflam = inflam_cache.get(pid, empty_inflam)
 
                 classification = classify_abx_purpose(
                     p, first_dose, total_doses, total_hours, drug_names,
+                    abx_code_count=abx_code_count,
                     db_sc=None, db_dc=None,  # 炎症已批量预查，不放句柄防逐条查库
                     inflammation_signals=inflam,
                 )
@@ -1858,9 +1905,11 @@ def get_icu06_data(dept_codes: list, start_date: str, end_date: str) -> dict:
                 else:
                     excluded_prophylaxis.append(pat_entry)
 
-                # 低置信度 AI 判定（待人工复核）
-                if (classification["decided_by"] == "ai"
-                        and classification.get("confidence", 0) < AI_CONFIDENCE_THRESHOLD):
+                # 低置信度 / fallback / need_review → 待人工复核
+                if (classification.get("need_review")
+                        or classification.get("decided_by") == "fallback"
+                        or (classification.get("decided_by") == "ai"
+                            and classification.get("confidence", 0) < AI_CONFIDENCE_THRESHOLD)):
                     low_confidence.append(pat_entry)
 
             result["den_count"] = len(den_patients)

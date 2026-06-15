@@ -566,19 +566,26 @@ def query_detail(code: str, period: str, part: str, icu_unit: str = "all"):
                 decided_by = p.get("decided_by", "rule")
                 reason = p.get("reason", "")
                 confidence = p.get("confidence", 1.0)
+                need_review = p.get("need_review", False)
                 drug = p.get("abx_drug", "")[:50] or "抗菌药"
                 # 抗菌药 + 目的徽章
                 drug_display = f"{drug} [{purpose}·{decided_by}]"
                 abx_time_str = at.strftime("%m/%d %H:%M") if hasattr(at, 'strftime') else str(at)[:16] if at else ""
+                # 低置信度标记: AI 置信度<0.6 或 fallback 或 need_review
+                is_low_conf = (
+                    need_review
+                    or decided_by == "fallback"
+                    or (decided_by == "ai" and confidence < 0.6)
+                )
                 items.append({
                     "patient_id": p.get("patient_id", p.get("mrn", "")),
                     "name": p.get("name", ""),
                     "gender": "", "age": "",
                     "bed_no": drug_display,
-                    "dept": f"c={confidence:.2f}" if decided_by == "ai" else "",
+                    "dept": f"c={confidence:.2f}" if decided_by in ("ai", "fallback") else "",
                     "admit_time": f"⏱{abx_time_str} | {reason[:60]}" if reason else abx_time_str,
                     "discharge_time": "",
-                    "admission_source": "low_confidence" if decided_by == "ai" and confidence < 0.6 else "",
+                    "admission_source": "low_confidence" if is_low_conf else "",
                     "value": p.get("total_doses", 1),
                 })
             return items
