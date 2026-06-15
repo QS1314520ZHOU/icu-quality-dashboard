@@ -599,18 +599,30 @@ def query_detail(code: str, period: str, part: str, icu_unit: str = "all"):
         if part == "numerator":
             items = []
             for p in data.get("drug_patients", []):
+                orders = p.get("matched_orders", [])
                 items.append({
-                    "patient_id": p.get("patient_id", p.get("pid", "")), "name": p.get("name", ""),
-                    "gender": "", "age": "", "bed_no": f"药物预防({p.get('order_count',0)}条)", "dept": "",
-                    "admit_time": str(p.get("matched_orders", [""])[0])[:60] if p.get("matched_orders") else "",
-                    "discharge_time": "", "admission_source": "", "value": p.get("order_count", 0),
+                    "patient_id": p.get("patient_id", p.get("pid", "")),
+                    "name": p.get("name", ""),
+                    "gender": "", "age": "",
+                    "bed_no": "药物预防",
+                    "dept": "",
+                    "admit_time": orders[0][:60] if orders else "",
+                    "discharge_time": "",
+                    "admission_source": "",
+                    "value": p.get("order_count", 0),
                 })
             for p in data.get("mech_patients", []):
+                orders = p.get("matched_orders", [])
                 items.append({
-                    "patient_id": p.get("patient_id", p.get("pid", "")), "name": p.get("name", ""),
-                    "gender": "", "age": "", "bed_no": f"机械预防({p.get('order_count',0)}条)", "dept": "",
-                    "admit_time": str(p.get("matched_orders", [""])[0])[:60] if p.get("matched_orders") else "",
-                    "discharge_time": "", "admission_source": "", "value": p.get("order_count", 0),
+                    "patient_id": p.get("patient_id", p.get("pid", "")),
+                    "name": p.get("name", ""),
+                    "gender": "", "age": "",
+                    "bed_no": "机械预防",
+                    "dept": "",
+                    "admit_time": orders[0][:60] if orders else "",
+                    "discharge_time": "",
+                    "admission_source": "",
+                    "value": p.get("order_count", 0),
                 })
             return items
         else:
