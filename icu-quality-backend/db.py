@@ -2088,6 +2088,15 @@ def get_icu09_data(dept_codes: list, start_date: str, end_date: str) -> dict:
                     if spid not in den_pids_obj:
                         continue
 
+                    # 时间窗口：评估必须在本次 ICU 住院期间
+                    p = pat_by_strpid.get(spid)
+                    at = doc.get("time")
+                    if p and at:
+                        admit = p.get("icuAdmissionTime")
+                        discharge = p.get("icuDischargeTime") or end_dt_wide
+                        if at < admit or at > discharge:
+                            continue
+
                     # 取评分值：优先 strVal，无则 history[].desc
                     score_val = (doc.get("strVal") or "").strip()
                     if not score_val:
@@ -2130,6 +2139,14 @@ def get_icu09_data(dept_codes: list, start_date: str, end_date: str) -> dict:
                         spid = doc.get("pid", "")
                         if spid not in den_pids_obj:
                             continue
+                        # 时间窗口
+                        p = pat_by_strpid.get(spid)
+                        at = doc.get("time")
+                        if p and at:
+                            admit = p.get("icuAdmissionTime")
+                            discharge = p.get("icuDischargeTime") or end_dt_wide
+                            if at < admit or at > discharge:
+                                continue
                         stype = doc.get("scoreType", "painScore")
                         if spid not in b_pids:
                             b_pids.add(spid)
@@ -2228,7 +2245,7 @@ def get_icu10_data(dept_codes: list, start_date: str, end_date: str) -> dict:
                          {"icuDischargeTime": None},
                          {"icuDischargeTime": {"$exists": False}}]},
                 {"_id": 1, "hisPid": 1, "mrn": 1, "name": 1,
-                 "icuAdmissionTime": 1},
+                 "icuAdmissionTime": 1, "icuDischargeTime": 1},
             ))
             if not patients:
                 continue
@@ -2261,6 +2278,14 @@ def get_icu10_data(dept_codes: list, start_date: str, end_date: str) -> dict:
                     spid = doc.get("pid", "")
                     if spid not in den_pids_obj:
                         continue
+                    # 时间窗口：评估必须在本次 ICU 住院期间
+                    p = pat_by_strpid.get(spid)
+                    at = doc.get("time")
+                    if p and at:
+                        admit = p.get("icuAdmissionTime")
+                        discharge = p.get("icuDischargeTime") or end_dt_wide
+                        if at < admit or at > discharge:
+                            continue
                     # RASS 值: strVal="-4"~"+4", fVal=-4.0~4.0
                     val = (doc.get("strVal") or "").strip()
                     if val and spid not in a_pids:
@@ -2291,6 +2316,14 @@ def get_icu10_data(dept_codes: list, start_date: str, end_date: str) -> dict:
                         spid = doc.get("pid", "")
                         if spid not in den_pids_obj:
                             continue
+                        # 时间窗口
+                        p = pat_by_strpid.get(spid)
+                        at = doc.get("time")
+                        if p and at:
+                            admit = p.get("icuAdmissionTime")
+                            discharge = p.get("icuDischargeTime") or end_dt_wide
+                            if at < admit or at > discharge:
+                                continue
                         if spid not in b_pids:
                             b_pids.add(spid)
                             b_detail[spid] = {
