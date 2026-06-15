@@ -18,12 +18,12 @@ call npm install
 cd ..
 
 echo [3/3] Starting frontend and backend services in parallel...
-echo Backend server will run at http://localhost:8000
+echo Backend server will run at http://localhost:8080
 echo Frontend dev server will run at http://localhost:5173
 echo.
 
 :: Start Backend
-start "FastAPI Backend" cmd /k "cd icu-quality-backend && python -m uvicorn main:app --port 8000 --reload"
+start "FastAPI Backend" cmd /k "cd icu-quality-backend && python -m uvicorn main:app --port 8080 --reload"
 
 :: Start Frontend
 start "Vite Frontend" cmd /k "cd icu-quality-dashboard && npm run dev"
