@@ -11,6 +11,25 @@
     <div v-else-if="!data.patients?.length" class="empty">暂无明细</div>
     <!-- 分母汇总 -->
     <div v-else-if="isSummary" class="den-summary">{{ data.patients[0].name }}</div>
+    <div v-else-if="isTriTube" class="tri-list">
+      <article v-for="p in data.patients" :key="p.detail_id || p.patient_id" class="tri-card">
+        <div class="tri-head">
+          <div class="tri-person">
+            <span class="mono">{{ p.patient_id }}</span>
+            <strong>{{ p.name || '—' }}</strong>
+          </div>
+          <div class="tri-metrics">
+            <span>{{ triTubeValue3(p) }}</span>
+            <span>{{ triTubeValue4(p) }}</span>
+            <span>{{ triTubeValue5(p) }}</span>
+          </div>
+        </div>
+        <div class="tri-meta" v-if="triTubeTimeText(p)">
+          {{ triTubeTimeText(p) }}
+        </div>
+        <p class="tri-basis">{{ p.basis || p.admission_source || '/' }}</p>
+      </article>
+    </div>
     <!-- 表格 -->
     <table v-else class="detail-table">
       <thead>
@@ -31,9 +50,6 @@
         </tr>
         <tr v-else-if="isICU19">
           <th>{{ col1 }}</th><th>姓名</th><th>入科时间</th><th>{{ icu19TimeCol }}</th><th>{{ icu19SourceCol }}</th><th>{{ icu19EvidenceCol }}</th><th>判定说明</th>
-        </tr>
-        <tr v-else-if="isTriTube">
-          <th>{{ col1 }}</th><th>姓名</th><th>{{ triTubeCol3 }}</th><th>{{ triTubeCol4 }}</th><th>{{ triTubeCol5 }}</th><th>依据</th>
         </tr>
         <tr v-else>
           <th>{{ col1 }}</th><th>姓名</th><th>{{ col3 }}</th><th>{{ col4 }}</th><th>{{ col5 }}</th>
@@ -83,12 +99,6 @@
             <td>{{ p.enSource || p.bed_no || '/' }}</td>
             <td>{{ icu19Evidence(p) }}</td>
             <td>{{ p.basis || '/' }}</td>
-          </template>
-          <template v-else-if="isTriTube">
-            <td>{{ triTubeValue3(p) }}</td>
-            <td>{{ triTubeValue4(p) }}</td>
-            <td>{{ triTubeValue5(p) }}</td>
-            <td>{{ p.basis || p.admission_source || '/' }}</td>
           </template>
           <template v-else>
             <td>{{ p.bed_no }}</td>
@@ -155,6 +165,14 @@ const triTubeValue4 = (p) => props.data?.part === 'numerator'
 const triTubeValue5 = (p) => {
   if (props.data?.part === 'numerator') return p.notes || p.dept || '/';
   return `${p.tube_type || p.device_value || p.dept || '/'} / ${p.tube_points || 0}`;
+};
+const triTubeTimeText = (p) => {
+  if (props.data?.part === 'numerator') return p.diagnosisTime || p.admit_time || '';
+  const parts = [];
+  if (p.device_day) parts.push(`日期：${p.device_day}`);
+  if (p.tube_start) parts.push(`开始：${p.tube_start}`);
+  if (p.tube_end) parts.push(`结束：${p.tube_end}`);
+  return parts.join('  ');
 };
 const icu19TimeCol = computed(() => props.data?.part === 'numerator' ? 'EN启动时间' : 'EN启动情况');
 const icu19SourceCol = computed(() => props.data?.part === 'numerator' ? '启动来源' : '判定来源');
@@ -226,6 +244,17 @@ const rowClass = (p) => {
 .detail-table td { padding:9px 10px; font-size:13px; color:#334155;
   border-bottom:1px solid rgba(0,0,0,0.05); }
 .mono { font-family:monospace; color:#64748b; }
+.tri-list { display:flex; flex-direction:column; gap:10px; }
+.tri-card { border:1px solid #e2e8f0; border-radius:8px; background:#fff; padding:12px 14px; }
+.tri-card:hover { border-color:#bfdbfe; background:#f8fbff; }
+.tri-head { display:flex; justify-content:space-between; gap:14px; align-items:flex-start; }
+.tri-person { display:flex; gap:10px; align-items:center; min-width:180px; }
+.tri-person strong { color:#0f172a; font-size:14px; }
+.tri-metrics { display:flex; flex-wrap:wrap; justify-content:flex-end; gap:6px; }
+.tri-metrics span { background:#eff6ff; border:1px solid #dbeafe; color:#1d4ed8;
+  border-radius:6px; padding:3px 8px; font-size:12px; font-weight:600; }
+.tri-meta { margin-top:8px; color:#64748b; font-size:12px; }
+.tri-basis { margin:8px 0 0; color:#334155; font-size:13px; line-height:1.65; }
 /* ICU-06 低置信度行：黄色背景 + 左侧警告条 */
 tr.low-confidence { background: #fff8e1; }
 tr.low-confidence:hover td { background: #ffecb3; }

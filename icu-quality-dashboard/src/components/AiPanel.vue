@@ -61,6 +61,30 @@
               </div>
               <div v-else class="empty inner">暂无可展示的线索明细</div>
             </template>
+            <template v-else-if="t.type === 'sepsis_alert'">
+              <div v-if="sepsisItems.length" class="detail-list">
+                <div v-for="item in sepsisItems" :key="`${item.patient_id}-${item.risk}-${item.qsofa}`" class="detail-row">
+                  <div class="detail-row-head">
+                    <strong>{{ item.type }}</strong>
+                    <span class="confidence-badge">{{ riskText(item.risk) }} · qSOFA {{ item.qsofa ?? 0 }}</span>
+                  </div>
+                  <span>{{ item.patient_id || '未知患者' }} {{ item.name || '' }}</span>
+                  <em>{{ item.basis }}</em>
+                  <div class="rule-text">{{ item.rule }}</div>
+                  <div v-if="item.action" class="action-text">{{ item.action }}</div>
+                  <div v-if="item.evidence?.length" class="evidence-box">
+                    <div class="evidence-title">判断条件</div>
+                    <div class="evidence-list">
+                      <span v-for="(ev, idx) in item.evidence" :key="`${item.patient_id}-sepsis-${idx}`">
+                        <b>{{ ev.type || '证据' }}</b>
+                        <template v-if="ev.value">：{{ ev.value }}</template>
+                      </span>
+                    </div>
+                  </div>
+                </div>
+              </div>
+              <div v-else class="empty inner">暂无可展示的预警明细</div>
+            </template>
             <template v-else-if="t.type === 'low_confidence_abx'">
               <div v-if="lowItems.length" class="detail-list">
                 <div v-for="item in lowItems" :key="item.hisPid" class="detail-row">
@@ -90,6 +114,7 @@ const openType = ref('');
 const hints = computed(() => props.analysis?.hints || []);
 const todos = computed(() => props.analysis?.todos || []);
 const triItems = computed(() => props.analysis?.tri_tube?.items || []);
+const sepsisItems = computed(() => props.analysis?.sepsis_alert?.items || []);
 const lowItems = computed(() => props.analysis?.low_confidence?.items || []);
 const typeSummary = computed(() => Object.entries(props.analysis?.tri_tube?.types || {})
   .map(([name, count]) => ({ name, count })));
@@ -102,16 +127,19 @@ const attentionText = computed(() => {
 
 function todoUnit(type) {
   if (type === 'tri_tube_warning') return '条线索';
+  if (type === 'sepsis_alert') return '条预警';
   if (type === 'low_confidence_abx') return '条记录';
   return '项';
 }
 function todoExplain(type) {
   if (type === 'tri_tube_warning') return '该数字是系统发现的疑似 VAP/CRBSI/CAUTI 线索数：必须同时有装置留置超过 48 小时和感染相关证据，需人工确认后才可能进入正式指标。';
+  if (type === 'sepsis_alert') return '该数字是 Sepsis-3 / qSOFA 辅助识别的质控分诊提示，只表示建议临床团队评估，不代表诊断结论。';
   if (type === 'low_confidence_abx') return '该数字是抗菌药用药目的判断信心不足的记录数，需要复核是否纳入 ICU-06 分母。';
   return '该数字表示需要质控人员进一步核查的事项数量。';
 }
 function detailButtonText(type) {
   if (type === 'tri_tube_warning') return '查看判断条件';
+  if (type === 'sepsis_alert') return '查看预警依据';
   return '查看前几条';
 }
 function toggle(type) {
@@ -120,6 +148,11 @@ function toggle(type) {
 function confidenceText(v) {
   const n = Number(v);
   return Number.isNaN(n) ? '/' : n.toFixed(2);
+}
+function riskText(v) {
+  if (v === 'high') return '高危';
+  if (v === 'medium') return '中危';
+  return '低危';
 }
 </script>
 
@@ -163,6 +196,8 @@ function confidenceText(v) {
 .detail-row em { display:block; color:#64748b; font-style:normal; font-size:12px; line-height:1.45; margin-top:3px; }
 .rule-text { margin-top:6px; color:#334155; background:#f8fafc; border-left:3px solid #60a5fa;
   padding:6px 8px; font-size:12px; line-height:1.5; }
+.action-text { margin-top:6px; color:#0f766e; background:#ecfdf5; border:1px solid #bbf7d0;
+  border-radius:6px; padding:5px 8px; font-size:12px; line-height:1.45; }
 .evidence-box { margin-top:7px; }
 .evidence-title { color:#1e293b; font-size:12px; font-weight:700; margin-bottom:5px; }
 .evidence-list { display:flex; flex-wrap:wrap; gap:6px; }

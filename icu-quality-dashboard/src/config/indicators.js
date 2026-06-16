@@ -16,7 +16,7 @@ export const INDICATORS = [
     code: 'ICU-01', name: 'ICU床位使用率', type: 'ratio', unit: '%',
     numerator: '实际占用总床日数', denominator: '实际开放总床日数',
     multiplier: 100, direction: 'range', // 床位使用率太高太低都不好
-    thresholds: { good: [75, 85], warn: [60, 95], }, // 75-85%为佳
+    thresholds: { good: [75, 90], warn: [60, 95], }, // 75-90%为常用目标区间
     meaning: '反映重症床位资源使用效率', chart: 'gauge',
   },
   {
@@ -30,7 +30,7 @@ export const INDICATORS = [
     code: 'ICU-03', name: 'ICU护士床位比', type: 'proportion', unit: ':1',
     numerator: 'ICU护士总数', denominator: '实际开放床位数',
     multiplier: 1, direction: 'higher_better',
-    thresholds: { good: [2.5, 99], warn: [2, 99] }, // ≥2.5:1
+    thresholds: { good: [3, 99], warn: [2.5, 99] }, // ≥3:1
     meaning: '反映ICU人力资源配置', chart: 'bar',
   },
   {
@@ -68,21 +68,21 @@ export const INDICATORS = [
     code: 'ICU-06', name: '抗菌药物治疗前病原学送检率', type: 'ratio', unit: '%',
     numerator: '用药前送检患者数', denominator: '治疗性用药患者总数',
     multiplier: 100, direction: 'higher_better',
-    thresholds: { good: [90, 100], warn: [50, 100] },
+    thresholds: { good: [90, 100], warn: [70, 100] },
     meaning: '反映抗菌药物使用规范性', chart: 'gauge',
   },
   {
     code: 'ICU-07', name: 'DVT预防率', type: 'ratio', unit: '%',
     numerator: '进行DVT预防患者数', denominator: '同期患者总数',
     multiplier: 100, direction: 'higher_better',
-    thresholds: { good: [85, 100], warn: [60, 100] },
+    thresholds: { good: [90, 100], warn: [70, 100] },
     meaning: '反映DVT预防情况', chart: 'gauge',
   },
   {
     code: 'ICU-08', name: '中重度ARDS俯卧位通气实施率', type: 'ratio', unit: '%',
     numerator: '实施俯卧位通气人数', denominator: '应实施人数(PEEP≥5,OI≤150)',
     multiplier: 100, direction: 'higher_better',
-    thresholds: { good: [80, 100], warn: [50, 100] },
+    thresholds: { good: [80, 100], warn: [60, 100] },
     meaning: '反映ARDS规范治疗', chart: 'gauge',
   },
   {
@@ -147,14 +147,14 @@ export const INDICATORS = [
     code: 'ICU-16', name: 'VAP发病率', type: 'permille', unit: '‰',
     numerator: 'VAP新发例次', denominator: '有创呼吸机累计使用天数',
     multiplier: 1000, direction: 'lower_better',
-    thresholds: { good: [0, 8], warn: [0, 15] },
+    thresholds: { good: [0, 8], warn: [0, 14] },
     meaning: '反映感控及机械通气管理能力', chart: 'control',
   },
   {
     code: 'ICU-17', name: 'CRBSI发病率', type: 'permille', unit: '‰',
     numerator: 'CRBSI新发例次', denominator: '血管导管累计使用天数',
     multiplier: 1000, direction: 'lower_better',
-    thresholds: { good: [0, 2], warn: [0, 5] },
+    thresholds: { good: [0, 1], warn: [0, 3.5] },
     meaning: '反映感控及导管留置管理能力', chart: 'control',
   },
   {
@@ -168,7 +168,7 @@ export const INDICATORS = [
     code: 'ICU-19', displayCode: 'ICU-20', name: '48h内肠内营养启动率', type: 'ratio', unit: '%',
     numerator: '48h内启动EN患者数', denominator: '入住>48h患者总数',
     multiplier: 100, direction: 'higher_better',
-    thresholds: { good: [80, 100], warn: [50, 100] },
+    thresholds: { good: [80, 100], warn: [60, 100] },
     meaning: '反映营养治疗规范性', chart: 'gauge',
   },
   {

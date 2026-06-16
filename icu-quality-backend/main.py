@@ -3,14 +3,31 @@ from fastapi import FastAPI, BackgroundTasks
 from pydantic import BaseModel
 from datetime import date, datetime, timedelta
 from ai_analyzer import analyze, get_all_ai_decisions, override_ai_decision, ensure_ai_cache_collection as ensure_ai_cache
-from db import get_open_bed_count, get_occupied_bed_days, get_staff_count, get_icu04_apache_data, get_bundle_data, get_icu08_data, get_icu06_data, get_icu09_data, get_icu10_data, get_icu11_data, get_icu12_data, get_icu13_data, get_icu14_data, get_icu15_data, get_icu16_data, get_icu17_data, get_icu18_data, get_icu19_data, get_cauti_data, get_tri_tube_suspected_warnings, confirm_tri_tube_warning, get_dvt_prevention_patients, get_client, BED_DB_NAMES, PROFESSION_CN
+from db import get_open_bed_count, get_occupied_bed_days, get_staff_count, get_icu04_apache_data, get_bundle_data, get_icu08_data, get_icu06_data, get_icu09_data, get_icu10_data, get_icu11_data, get_icu12_data, get_icu13_data, get_icu14_data, get_icu15_data, get_icu16_data, get_icu17_data, get_icu18_data, get_icu19_data, get_cauti_data, get_tri_tube_suspected_warnings, get_sepsis_alert_warnings, confirm_tri_tube_warning, get_dvt_prevention_patients, get_client, BED_DB_NAMES, PROFESSION_CN
 import random
+import os
+import sys
 import time as time_module
 import threading
 import uuid
 import summary as summary_module
+from pathlib import Path
+from fastapi.staticfiles import StaticFiles
+from starlette.responses import FileResponse
 
 app = FastAPI(title="ICU质控指标API")
+
+
+def _runtime_base_dir() -> Path:
+    if getattr(sys, "frozen", False):
+        return Path(sys.executable).resolve().parent
+    return Path(__file__).resolve().parent
+
+
+def _resource_base_dir() -> Path:
+    if getattr(sys, "frozen", False) and hasattr(sys, "_MEIPASS"):
+        return Path(sys._MEIPASS)
+    return _runtime_base_dir()
 
 # ---- 定时调度（后台线程，每天凌晨跑一次） ----
 _scheduler_started = False
@@ -246,16 +263,16 @@ def _resolve_dept_codes(icu_unit: str) -> list:
 
 # 19个质控指标的元数据与中文映射
 INDICATORS_CONFIG = {
-    "ICU-01": {"name": "ICU床位使用率", "unit": "%", "good": (75, 85), "warn": (60, 95), "dir": "range"},
+    "ICU-01": {"name": "ICU床位使用率", "unit": "%", "good": (75, 90), "warn": (60, 95), "dir": "range"},
     "ICU-02": {"name": "ICU医师床位比", "unit": ":1", "good": (0.8, 99), "warn": (0.5, 99), "dir": "higher"},
-    "ICU-03": {"name": "ICU护士床位比", "unit": ":1", "good": (2.5, 99), "warn": (2.0, 99), "dir": "higher"},
+    "ICU-03": {"name": "ICU护士床位比", "unit": ":1", "good": (3.0, 99), "warn": (2.5, 99), "dir": "higher"},
     "ICU-04": {"name": "APACHEⅡ≥15分收治率", "unit": "%", "good": (50, 100), "warn": (30, 100), "dir": "higher"},
     "ICU-05-1h": {"name": "感染性休克1h Bundle完成率", "unit": "%", "good": (90, 100), "warn": (70, 100), "dir": "higher"},
     "ICU-05-3h": {"name": "感染性休克3h Bundle完成率", "unit": "%", "good": (90, 100), "warn": (70, 100), "dir": "higher"},
     "ICU-05-6h": {"name": "感染性休克6h Bundle完成率", "unit": "%", "good": (90, 100), "warn": (70, 100), "dir": "higher"},
-    "ICU-06": {"name": "抗菌药物治疗前病原学送检率", "unit": "%", "good": (90, 100), "warn": (50, 100), "dir": "higher"},
-    "ICU-07": {"name": "DVT预防率", "unit": "%", "good": (85, 100), "warn": (60, 100), "dir": "higher"},
-    "ICU-08": {"name": "中重度ARDS俯卧位通气实施率", "unit": "%", "good": (80, 100), "warn": (50, 100), "dir": "higher",
+    "ICU-06": {"name": "抗菌药物治疗前病原学送检率", "unit": "%", "good": (90, 100), "warn": (70, 100), "dir": "higher"},
+    "ICU-07": {"name": "DVT预防率", "unit": "%", "good": (90, 100), "warn": (70, 100), "dir": "higher"},
+    "ICU-08": {"name": "中重度ARDS俯卧位通气实施率", "unit": "%", "good": (80, 100), "warn": (60, 100), "dir": "higher",
                "numerator_desc": "住院期间有俯卧位记录的患者数",
                "denominator_desc": "中重度ARDS患者数(P/F<150且PEEP≥5且有创氧疗途径)"},
     "ICU-09": {"name": "ICU镇痛评估率", "unit": "%", "good": (90, 100), "warn": (70, 100), "dir": "higher"},
@@ -265,10 +282,10 @@ INDICATORS_CONFIG = {
     "ICU-13": {"name": "拔管后48h再插管率", "unit": "%", "good": (0, 5), "warn": (0, 12), "dir": "lower"},
     "ICU-14": {"name": "非计划转入ICU率", "unit": "%", "good": (0, 5), "warn": (0, 10), "dir": "lower"},
     "ICU-15": {"name": "转出ICU后48h重返率", "unit": "%", "good": (0, 3), "warn": (0, 6), "dir": "lower"},
-    "ICU-16": {"name": "VAP发病率", "unit": "‰", "good": (0, 8), "warn": (0, 15), "dir": "lower"},
-    "ICU-17": {"name": "CRBSI发病率", "unit": "‰", "good": (0, 2), "warn": (0, 5), "dir": "lower"},
+    "ICU-16": {"name": "VAP发病率", "unit": "‰", "good": (0, 8), "warn": (0, 14), "dir": "lower"},
+    "ICU-17": {"name": "CRBSI发病率", "unit": "‰", "good": (0, 1), "warn": (0, 3.5), "dir": "lower"},
     "ICU-18": {"name": "急性脑损伤意识评估率", "unit": "%", "good": (90, 100), "warn": (70, 100), "dir": "higher"},
-    "ICU-19": {"name": "48h内肠内营养启动率", "unit": "%", "good": (80, 100), "warn": (50, 100), "dir": "higher"},
+    "ICU-19": {"name": "48h内肠内营养启动率", "unit": "%", "good": (80, 100), "warn": (60, 100), "dir": "higher"},
     "CAUTI": {"name": "CAUTI尿管相关感染率", "unit": "‰", "good": (0, 2), "warn": (0, 5), "dir": "lower"},
 }
 
@@ -908,7 +925,7 @@ def query_detail(code: str, period: str, part: str, icu_unit: str = "all"):
                     "patient_id": p.get("patient_id", p.get("mrn", "")),
                     "name": p.get("name", ""),
                     "gender": "", "age": "",
-                    "bed_no": "",
+                    "bed_no": p.get("hisBed", ""),
                     "dept": "",
                     "admit_time": at.strftime("%Y-%m-%d %H:%M") if hasattr(at, 'strftime') else str(at)[:16] if at else "",
                     "discharge_time": "",
@@ -944,7 +961,7 @@ def query_detail(code: str, period: str, part: str, icu_unit: str = "all"):
                     "patient_id": p.get("patient_id", p.get("mrn", "")),
                     "name": p.get("name", ""),
                     "gender": "", "age": "",
-                    "bed_no": "",
+                    "bed_no": p.get("hisBed", ""),
                     "dept": "",
                     "admit_time": at.strftime("%Y-%m-%d %H:%M") if hasattr(at, 'strftime') else str(at)[:16] if at else "",
                     "discharge_time": "",
@@ -1679,12 +1696,13 @@ def dashboard_command_center(period: str, end_period: str = "", icu_unit: str = 
     except Exception:
         ai = {"summary": "AI 分析暂不可用，请先查看异常指标与待办线索。", "abnormal": [], "hints": []}
 
+    sy, sm = [int(x) for x in periods[0].split("-")]
+    ey, em = [int(x) for x in periods[-1].split("-")]
+    start_date = f"{sy}-{sm:02d}-01"
+    end_date = f"{ey}-{em:02d}-{_month_end_day(ey, em):02d}"
+
     tri_summary = {"count": 0, "types": {}, "items": [], "notice": ""}
     try:
-        sy, sm = [int(x) for x in periods[0].split("-")]
-        ey, em = [int(x) for x in periods[-1].split("-")]
-        start_date = f"{sy}-{sm:02d}-01"
-        end_date = f"{ey}-{em:02d}-{_month_end_day(ey, em):02d}"
         tri_items = get_tri_tube_suspected_warnings(dept_codes, start_date, end_date, min_hours=48)
         type_counts = {}
         for item in tri_items:
@@ -1714,6 +1732,36 @@ def dashboard_command_center(period: str, end_period: str = "", icu_unit: str = 
     except Exception as e:
         tri_summary = {"count": 0, "types": {}, "items": [], "notice": f"三管预警读取失败：{str(e)[:80]}"}
 
+    sepsis_summary = {"count": 0, "types": {}, "items": [], "notice": ""}
+    try:
+        sepsis_items = get_sepsis_alert_warnings(dept_codes, start_date, end_date, limit=30)
+        risk_counts_by_type = {}
+        preview_items = []
+        for item in sepsis_items:
+            risk = item.get("risk") or "medium"
+            risk_counts_by_type[risk] = risk_counts_by_type.get(risk, 0) + 1
+        for item in sepsis_items[:8]:
+            preview_items.append({
+                "patient_id": item.get("patient_id") or item.get("mrn") or item.get("hisPid") or item.get("pid", ""),
+                "name": item.get("name", ""),
+                "type": item.get("type") or "脓毒症早期预警",
+                "risk": item.get("risk", "medium"),
+                "qsofa": item.get("qsofa", 0),
+                "basis": item.get("basis", ""),
+                "action": item.get("action", ""),
+                "confidence": item.get("confidence"),
+                "evidence": item.get("evidence") or [],
+                "rule": "Sepsis-3 / qSOFA 辅助识别，仅提示是否建议临床团队评估，不作为诊断或治疗建议。",
+            })
+        sepsis_summary = {
+            "count": len(sepsis_items),
+            "types": risk_counts_by_type,
+            "items": preview_items,
+            "notice": "脓毒症早期预警仅作质控分诊提示，不替代临床诊断与处置。",
+        }
+    except Exception as e:
+        sepsis_summary = {"count": 0, "types": {}, "items": [], "notice": f"脓毒症预警读取失败：{str(e)[:80]}"}
+
     low_confidence = {"count": 0, "items": []}
     try:
         decisions = get_all_ai_decisions(
@@ -1733,6 +1781,13 @@ def dashboard_command_center(period: str, end_period: str = "", icu_unit: str = 
             "title": "三管疑似感染待确认",
             "count": tri_summary["count"],
             "description": "建议感染质控人员核查疑似 VAP/CRBSI/CAUTI 线索。",
+        })
+    if sepsis_summary["count"]:
+        ai_todos.append({
+            "type": "sepsis_alert",
+            "title": "脓毒症早期预警待评估",
+            "count": sepsis_summary["count"],
+            "description": "基于 Sepsis-3 / qSOFA 的质控分诊提示，建议临床团队评估高危线索。",
         })
     if low_confidence["count"]:
         ai_todos.append({
@@ -1768,8 +1823,9 @@ def dashboard_command_center(period: str, end_period: str = "", icu_unit: str = 
             "hints": ai.get("hints", []),
             "todos": ai_todos,
             "tri_tube": tri_summary,
+            "sepsis_alert": sepsis_summary,
             "low_confidence": low_confidence,
-            "explain": "AI待办=三管疑似线索数+低置信度抗菌药判定数；三管疑似是待确认线索，不等同于已确诊感染例数。",
+            "explain": "AI待办=三管疑似线索数+脓毒症早期预警+低置信度抗菌药判定数；疑似线索不等同于已确诊事件。",
         },
         "updated_at": datetime.now().isoformat(timespec="seconds"),
     }
@@ -2466,3 +2522,31 @@ def override_ai(payload: dict):
         return {"success": False, "error": "reason is required"}
 
     return override_ai_decision(hispid, purpose, reason, overridden_by)
+
+
+def _mount_frontend():
+    dist_dir = _resource_base_dir() / "frontend_dist"
+    index_file = dist_dir / "index.html"
+    if not index_file.exists():
+        return
+
+    @app.get("/", include_in_schema=False)
+    def serve_index():
+        return FileResponse(index_file)
+
+    app.mount("/", StaticFiles(directory=dist_dir, html=True), name="frontend")
+
+
+_mount_frontend()
+
+
+def main():
+    import uvicorn
+
+    host = os.getenv("HOST", "0.0.0.0")
+    port = int(os.getenv("PORT") or os.getenv("BACKEND_PORT") or "8091")
+    uvicorn.run(app, host=host, port=port)
+
+
+if __name__ == "__main__":
+    main()
