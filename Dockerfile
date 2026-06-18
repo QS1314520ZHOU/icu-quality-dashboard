@@ -4,6 +4,10 @@ ENV PYTHON_VERSION=3.11.9 \
     NODE_MAJOR=20 \
     PIP_NO_CACHE_DIR=1
 
+# 把自编译 Python 的 bin 目录加进 PATH，
+# 这样 python3 / pip3 / pyinstaller / uvicorn 等 entry-point 全部可直接调用
+ENV PATH="/opt/python-3.11.9/bin:${PATH}"
+
 WORKDIR /build
 
 RUN dnf -y install oracle-epel-release-el8 && \
@@ -16,9 +20,7 @@ RUN wget -q https://www.python.org/ftp/python/${PYTHON_VERSION}/Python-${PYTHON_
     cd Python-${PYTHON_VERSION} && \
     ./configure --enable-optimizations --prefix=/opt/python-${PYTHON_VERSION} && \
     make -j"$(nproc)" && \
-    make install && \
-    ln -s /opt/python-${PYTHON_VERSION}/bin/python3 /usr/local/bin/python3 && \
-    ln -s /opt/python-${PYTHON_VERSION}/bin/pip3 /usr/local/bin/pip3
+    make install
 
 RUN dnf -y module reset nodejs && \
     dnf -y module enable nodejs:${NODE_MAJOR} && \
@@ -41,7 +43,7 @@ RUN mkdir -p /build/backend/frontend_dist && \
     cp -a /build/frontend/dist/. /build/backend/frontend_dist/
 
 WORKDIR /build/backend
-RUN pyinstaller \
+RUN python3 -m PyInstaller \
     --clean \
     --name icu-quality-dashboard \
     --onefile \

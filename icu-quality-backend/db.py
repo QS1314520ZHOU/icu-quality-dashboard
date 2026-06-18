@@ -1592,19 +1592,20 @@ def classify_abx_purpose(pat_doc: dict, first_dose, total_doses: int,
         })
         if ai_result:
             return {
-                "purpose": ai_result.get("purpose", "治疗性"),
+                "purpose": ai_result.get("purpose") or "未判定",
                 "decided_by": ai_result.get("by", "ai"),
                 "reason": ai_result.get("reason", ""),
-                "confidence": ai_result.get("confidence", 0.5),
+                "confidence": ai_result.get("confidence", 0.0),
+                "evaluated": ai_result.get("evaluated", ai_result.get("by") != "fallback"),
                 "need_review": ai_result.get("need_review", False),
             }
     except Exception:
         pass
 
     # AI 不可用兜底（仍进 low_confidence 人工复核）
-    return {"purpose": "治疗性", "decided_by": "fallback",
+    return {"purpose": "未判定", "decided_by": "fallback",
             "reason": f"规则+AI均不可用兜底(疗程{total_hours:.0f}h/{total_doses}次/{','.join(drug_names[:2])[:30]})",
-            "confidence": 0.3, "need_review": True}
+            "confidence": 0.0, "evaluated": False, "need_review": True}
 
 
 # ---- 批量预查炎症指标（一次查询覆盖全部患者） ----
@@ -1983,9 +1984,14 @@ def get_icu06_data(dept_codes: list, start_date: str, end_date: str) -> dict:
                     "decided_by": classification["decided_by"],
                     "reason": classification["reason"],
                     "confidence": classification.get("confidence", 1.0),
+                    "evaluated": classification.get("evaluated", classification.get("decided_by") != "fallback"),
                     "need_review": classification.get("need_review", False),
                     "inflammation": inflam.get("details", []),
                 }
+
+                if classification.get("decided_by") == "fallback":
+                    low_confidence.append(pat_entry)
+                    continue
 
                 if classification["purpose"] == "治疗性":
                     den_patients.append(pat_entry)
@@ -4585,19 +4591,24 @@ def get_sepsis_alert_warnings(dept_codes: list, start_date: str, end_date: str, 
                 if not result or result.get("risk") == "low":
                     continue
                 item = _patient_item(patient, pid)
+                qsofa = result.get("qsofa")
+                evidence = [{"type": "判定依据", "value": result.get("reason", "")}]
+                if qsofa is not None:
+                    evidence.insert(0, {"type": "qSOFA", "value": str(qsofa)})
+                else:
+                    evidence.insert(0, {"type": "qSOFA", "value": "待评估 / 解析失败，请人工复核"})
+                evidence.append({"type": "分诊建议", "value": result.get("action", "")})
                 item.update({
                     "type": "脓毒症早期预警",
-                    "risk": result.get("risk", "medium"),
-                    "qsofa": result.get("qsofa", 0),
+                    "risk": result.get("risk", "unknown"),
+                    "qsofa": qsofa,
                     "suspect_sepsis": result.get("suspect_sepsis", False),
                     "basis": result.get("reason", ""),
                     "action": result.get("action", ""),
+                    "by": result.get("by", "ai"),
+                    "evaluated": result.get("evaluated", result.get("by") != "fallback"),
                     "confidence": 0.9 if result.get("risk") == "high" else 0.7,
-                    "evidence": [
-                        {"type": "qSOFA", "value": str(result.get("qsofa", 0))},
-                        {"type": "判定依据", "value": result.get("reason", "")},
-                        {"type": "分诊建议", "value": result.get("action", "")},
-                    ],
+                    "evidence": evidence,
                 })
                 warnings.append(item)
             break

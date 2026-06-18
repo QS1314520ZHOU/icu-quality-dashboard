@@ -867,7 +867,7 @@ def query_detail(code: str, period: str, part: str, icu_unit: str = "all"):
             items = []
             for p in data.get("den_patients", []):
                 at = p.get("abx_time")
-                purpose = p.get("purpose", "治疗性")
+                purpose = p.get("purpose") or "未判定"
                 decided_by = p.get("decided_by", "rule")
                 reason = p.get("reason", "")
                 confidence = p.get("confidence", 1.0)
@@ -1738,17 +1738,19 @@ def dashboard_command_center(period: str, end_period: str = "", icu_unit: str = 
         risk_counts_by_type = {}
         preview_items = []
         for item in sepsis_items:
-            risk = item.get("risk") or "medium"
+            risk = item.get("risk") or "unknown"
             risk_counts_by_type[risk] = risk_counts_by_type.get(risk, 0) + 1
         for item in sepsis_items[:8]:
             preview_items.append({
                 "patient_id": item.get("patient_id") or item.get("mrn") or item.get("hisPid") or item.get("pid", ""),
                 "name": item.get("name", ""),
                 "type": item.get("type") or "脓毒症早期预警",
-                "risk": item.get("risk", "medium"),
-                "qsofa": item.get("qsofa", 0),
+                "risk": item.get("risk", "unknown"),
+                "qsofa": item.get("qsofa"),
                 "basis": item.get("basis", ""),
                 "action": item.get("action", ""),
+                "by": item.get("by", "ai"),
+                "evaluated": item.get("evaluated", item.get("by") != "fallback"),
                 "confidence": item.get("confidence"),
                 "evidence": item.get("evidence") or [],
                 "rule": "Sepsis-3 / qSOFA 辅助识别，仅提示是否建议临床团队评估，不作为诊断或治疗建议。",

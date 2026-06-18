@@ -391,12 +391,13 @@ WBC={ctx.get('wbc', '?')} PCT={ctx.get('pct', '?')} CRP={ctx.get('crp', '?')} �
 
 def _fallback_sepsis_alert(ctx: dict, reason: str) -> dict:
     return {
-        "risk": "medium",
-        "qsofa": 0,
+        "risk": "unknown",
+        "qsofa": None,
         "suspect_sepsis": False,
         "reason": reason[:60],
         "action": "建议加强监测与复查",
         "by": "fallback",
+        "evaluated": False,
         "need_review": True,
     }
 
@@ -468,6 +469,7 @@ def classify_sepsis_alert_with_ai(ctx: dict) -> dict | None:
                 "reason": str(llm_result.get("reason", ""))[:60],
                 "action": action,
                 "by": "ai",
+                "evaluated": True,
                 "need_review": risk in {"high", "medium"},
             }
 
@@ -513,8 +515,9 @@ def classify_abx_with_ai(ctx: dict) -> dict | None:
     # Step 2: 调 LLM（并发控制）
     acquired = _AI_SEMAPHORE.acquire(timeout=30)
     if not acquired:
-        return {"purpose": "治疗性", "confidence": 0.3,
-                "reason": "AI并发已满,保守归为治疗", "by": "fallback",
+        return {"purpose": "未判定", "confidence": 0.0,
+                "reason": "AI并发已满,需人工复核", "by": "fallback",
+                "evaluated": False,
                 "need_review": True}
 
     try:
@@ -536,9 +539,9 @@ def classify_abx_with_ai(ctx: dict) -> dict | None:
 
         if not llm_result:
             result = {
-                "purpose": "治疗性", "confidence": 0.3,
+                "purpose": "未判定", "confidence": 0.0,
                 "reason": f"AI解析失败兜底(疗程{course_hours:.0f}h/{dose_count}次/{antibiotics[:30]})",
-                "by": "fallback", "need_review": True,
+                "by": "fallback", "evaluated": False, "need_review": True,
             }
         else:
             purpose_raw = str(llm_result.get("purpose", "治疗性"))
@@ -559,6 +562,7 @@ def classify_abx_with_ai(ctx: dict) -> dict | None:
                 "confidence": conf,
                 "reason": reason,
                 "by": "ai",
+                "evaluated": True,
                 "need_review": conf < 0.6,
             }
 
@@ -571,9 +575,9 @@ def classify_abx_with_ai(ctx: dict) -> dict | None:
         course_hours = ctx.get("course_hours", 0)
         dose_count = ctx.get("dose_count", 0)
         antibiotics = ctx.get("antibiotics", "")
-        return {"purpose": "治疗性", "confidence": 0.3,
+        return {"purpose": "未判定", "confidence": 0.0,
                 "reason": f"AI调用异常兜底(疗程{course_hours:.0f}h/{dose_count}次/{antibiotics[:30]})",
-                "by": "fallback", "need_review": True}
+                "by": "fallback", "evaluated": False, "need_review": True}
     finally:
         _AI_SEMAPHORE.release()
 
