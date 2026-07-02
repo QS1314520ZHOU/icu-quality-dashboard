@@ -89,7 +89,9 @@
     </div>
 
     <Modal v-if="trendData" :title="`${trendData.name} · ${year}年趋势`" @close="trendData=null"><TrendModal :data="trendData" /></Modal>
-    <Modal v-if="detailData" :title="detailTitle" @close="detailData=null"><DetailModal :data="detailData" /></Modal>
+    <Modal v-if="detailData" :title="detailTitle" @close="detailData=null">
+      <DetailModal :data="detailData" :period="period" :end-period="isMultiMonth ? periodEnd : ''" :unit="unit" :unit-name="deptName" />
+    </Modal>
     <Modal v-if="guideVisible" title="指标口径说明" @close="guideVisible=false"><IndicatorGuideModal /></Modal>
 
     <!-- Toast 通知 -->
