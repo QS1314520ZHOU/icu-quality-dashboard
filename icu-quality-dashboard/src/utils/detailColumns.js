@@ -13,6 +13,8 @@
 
 export function fmtDate(v) {
   if (v === null || v === undefined || v === '') return ''
+  // 后端已格式化的 "YYYY-MM-DD HH:mm" 字符串直接返回，避免 new Date() 的浏览器差异与时区偏移
+  if (typeof v === 'string' && /^\d{4}-\d{2}-\d{2} \d{2}:\d{2}/.test(v)) return v.slice(0, 16)
   const d = v instanceof Date ? v : new Date(v)
   if (isNaN(d.getTime())) return String(v) // 非日期：原样返回，不猜
   const p = (n) => String(n).padStart(2, '0')
@@ -165,7 +167,7 @@ function resolveTriTubeCols(code, part) {
     col4Get: (p) =>
       part === 'numerator'
         ? fmtText(p.diagnosisTime || p.admit_time || '/')
-        : (p.device_days ? `${p.device_days}天` : p.admit_time ? `${p.admit_time}天` : '/'),
+        : (p.device_days != null ? `${p.device_days}天` : '/'),
     col5Header,
     col5Get: (p) => {
       if (part === 'numerator') return fmtText(p.notes || p.dept || '/')
@@ -223,7 +225,7 @@ export function getDetailColumns(code, part) {
     return [
       COL_PATIENT_ID,
       COL_NAME,
-      { header: '转入类型',    get: (p) => fmtText(p.admissionType || p.bed_no) },
+      { header: '转入类型',    get: (p) => fmtText(p.admissionType || p.bed_no || '/') },
       { header: '转入计划',    get: (p) => fmtText(p.admissionPlan || p.admission_source || '/') },
       { header: '手术名称',    get: (p) => fmtText(p.operation_name || p.dept || '/') },
       { header: '转入ICU时间', get: (p) => fmtText(p.icuAdmissionTime || p.admit_time) },

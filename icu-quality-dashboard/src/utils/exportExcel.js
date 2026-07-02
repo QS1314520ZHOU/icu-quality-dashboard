@@ -51,6 +51,7 @@ export async function exportDetailExcel(opts) {
 
   // ── 2. 全量数据拉取 ──
   let allRows = [...firstPage];
+  let truncated = false;
 
   if (hasMore && firstPage.length > 0) {
     let offset = firstPage.length;
@@ -75,7 +76,7 @@ export async function exportDetailExcel(opts) {
       allRows = allRows.concat(batch);
 
       if (allRows.length >= MAX_ROWS) {
-        console.warn(`[exportExcel] 达到上限 ${MAX_ROWS} 条，截断导出`);
+        truncated = true;
         break;
       }
       if (!resp.has_more || batch.length === 0) break;
@@ -132,5 +133,5 @@ export async function exportDetailExcel(opts) {
   const filename = sanitizeFilename(`${code}_${name}_${unitName || unit}_${startStr}_${endStr}`) + '.xlsx';
   XLSX.writeFile(wb, filename);
 
-  return { rows: allRows.length, filename };
+  return { rows: allRows.length, filename, truncated };
 }
