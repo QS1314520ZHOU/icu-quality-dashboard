@@ -2972,7 +2972,7 @@ def _icu15_patient_item(patient: dict, pid: str, discharge_time, source: str) ->
         "icu_admit": patient.get("icuAdmissionTime"),
         "icu_discharge": discharge_time,
         "source": source,
-        "basis": "patient ICU discharge in period" if source == "patient" else "patInIcuHistoryList ICU discharge in period",
+        "basis": "同期转出ICU；依据：Patient记录" if source == "patient" else "同期转出ICU；依据：patInIcuHistoryList",
     }
 
 
@@ -3023,7 +3023,6 @@ def get_icu15_data(dept_codes: list, start_date: str, end_date: str) -> dict:
     start_dt = dt.fromisoformat(start_date)
     end_dt = dt.fromisoformat(end_date)
     end_dt_wide = dt(end_dt.year, end_dt.month, end_dt.day, 23, 59, 59)
-    lookahead_end = end_dt_wide + timedelta(hours=48)
 
     result = {
         "den_count": 0,
@@ -3058,60 +3057,6 @@ def get_icu15_data(dept_codes: list, start_date: str, end_date: str) -> dict:
 
             if not scoped_patients:
                 continue
-
-            his_pids = [p.get("hisPid") for p in scoped_patients if p.get("hisPid")]
-            mrns = [p.get("mrn") for p in scoped_patients if p.get("mrn")]
-            patient_ids = [p.get("patientId") for p in scoped_patients if p.get("patientId")]
-            identities = {
-                _icu15_patient_identity(p, str(p.get("_id", "")))
-                for p in scoped_patients
-            }
-
-            identity_query = []
-            if his_pids:
-                identity_query.append({"hisPid": {"$in": list(set(his_pids))}})
-            if mrns:
-                identity_query.append({"mrn": {"$in": list(set(mrns))}})
-            if patient_ids:
-                identity_query.append({"patientId": {"$in": list(set(patient_ids))}})
-
-            related_patients = scoped_patients
-            if identity_query:
-                related_patients = list(db.patient.find(
-                    {
-                        "status": {"$ne": "invalid"},
-                        "$or": identity_query,
-                        "icuAdmissionTime": {"$lte": lookahead_end},
-                    },
-                    projection,
-                ).sort("icuAdmissionTime", 1).max_time_ms(20000).limit(300000))
-
-            admissions_by_identity = defaultdict(list)
-            for patient in related_patients:
-                pid = str(patient.get("_id", ""))
-                identity = _icu15_patient_identity(patient, pid)
-                if identity not in identities:
-                    continue
-                admit_time = patient.get("icuAdmissionTime")
-                if admit_time:
-                    admissions_by_identity[identity].append({
-                        "time": admit_time,
-                        "pid": pid,
-                        "dept_code": patient.get("deptCode", ""),
-                        "source": "patient",
-                    })
-                for hist in patient.get("patInIcuHistoryList") or []:
-                    re_time = hist.get("reIcuAdmissionTime")
-                    if re_time:
-                        admissions_by_identity[identity].append({
-                            "time": re_time,
-                            "pid": pid,
-                            "dept_code": patient.get("deptCode", ""),
-                            "source": "patInIcuHistoryList",
-                        })
-
-            for admits in admissions_by_identity.values():
-                admits.sort(key=lambda x: x["time"])
 
             events = {}
             for patient in scoped_patients:
@@ -3151,17 +3096,11 @@ def get_icu15_data(dept_codes: list, start_date: str, end_date: str) -> dict:
                         "dept_code": item.get("dept_code", ""),
                         "source": "patInIcuHistoryList",
                     }
-                if not readmit:
-                    for admit in admissions_by_identity.get(identity, []):
-                        at = admit.get("time")
-                        if at and discharge_time < at <= discharge_time + timedelta(hours=48):
-                            readmit = admit
-                            break
                 item["re_icu_admit"] = readmit.get("time") if readmit else None
                 item["re_admit_dept_code"] = readmit.get("dept_code", "") if readmit else ""
                 item["re_admit_source"] = readmit.get("source", "") if readmit else ""
                 item["basis"] = (
-                    "ICU discharge followed by ICU readmission within 48h"
+                    "出科后48小时内重返ICU；依据：合并历史"
                     if readmit else item.get("basis", "")
                 )
                 den_patients.append(item)
