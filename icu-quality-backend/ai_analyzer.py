@@ -324,16 +324,16 @@ def ensure_ai_cache_collection():
             continue
 
 
-def get_ai_cache(hispid: str, task: str = "abx_purpose") -> dict | None:
-    """读取 AI 判定缓存。返回 result 子文档或 None。"""
+def get_ai_cache(hispid: str, task: str = "abx_purpose", key: str = "") -> dict | None:
+    """读取 AI 判定缓存。返回 result 子文档或 None。key 用于区分同 task 下的不同实体。"""
     from db import BED_DB_NAMES, get_client
+    query = {"hisPid": hispid, "task": task}
+    if key:
+        query["key"] = key
     for db_name in BED_DB_NAMES:
         try:
             db = get_client(db_name)[db_name]
-            doc = db[AI_CACHE_COLLECTION].find_one(
-                {"hisPid": hispid, "task": task},
-                {"result": 1, "_id": 0},
-            )
+            doc = db[AI_CACHE_COLLECTION].find_one(query, {"result": 1, "_id": 0})
             if doc:
                 return doc.get("result")
         except Exception:
@@ -341,9 +341,12 @@ def get_ai_cache(hispid: str, task: str = "abx_purpose") -> dict | None:
     return None
 
 
-def set_ai_cache(hispid: str, task: str, result: dict, prompt_snapshot: str):
+def set_ai_cache(hispid: str, task: str, result: dict, prompt_snapshot: str, key: str = ""):
     """写入 AI 判定缓存。幂等 upsert，缓存命中时直接返回不重调。"""
     from db import BED_DB_NAMES, get_client
+    query = {"hisPid": hispid, "task": task}
+    if key:
+        query["key"] = key
     for db_name in BED_DB_NAMES:
         try:
             db = get_client(db_name)[db_name]
@@ -354,11 +357,9 @@ def set_ai_cache(hispid: str, task: str, result: dict, prompt_snapshot: str):
                 "prompt_snapshot": prompt_snapshot,
                 "created_at": _dt.utcnow(),
             }
-            db[AI_CACHE_COLLECTION].update_one(
-                {"hisPid": hispid, "task": task},
-                {"$set": doc},
-                upsert=True,
-            )
+            if key:
+                doc["key"] = key
+            db[AI_CACHE_COLLECTION].update_one(query, {"$set": doc}, upsert=True)
             break
         except Exception:
             continue
@@ -628,36 +629,685 @@ def get_all_ai_decisions(dept_codes: list = None, period_start: str = None,
     } for d in results]
 
 
-def override_ai_decision(hispid: str, purpose: str, reason: str,
-                         overridden_by: str = "主任") -> dict:
+def override_ai_decision(hispid: str, purpose: str = "", reason: str = "",
+                         overridden_by: str = "主任",
+                         task: str = "abx_purpose", key: str = "",
+                         result: dict | None = None) -> dict:
     """
     人工推翻 AI 判定。
-    写回 ai_decision_cache，标记 by='manual_override'。
-    返回更新后的文档。
+    写回 ai_decision_cache，标记 source='override'。
+    - abx_purpose 用法（向后兼容）：override_ai_decision(hispid, "治疗性", "理由")
+    - 通用用法：override_ai_decision(hispid, task="septic_shock_confirm", key=diseaseId, result={...})
     """
     from db import BED_DB_NAMES, get_client
-    result = {
-        "purpose": purpose,
-        "confidence": 1.0,
-        "reason": f"[人工推翻({overridden_by})] {reason}",
-        "by": "manual_override",
-    }
+    if result is None:
+        # 向后兼容：abx_purpose 的旧签名
+        result = {
+            "purpose": purpose,
+            "confidence": 1.0,
+            "reason": f"[人工推翻({overridden_by})] {reason}",
+            "source": "override",
+        }
+    query = {"hisPid": hispid, "task": task}
+    if key:
+        query["key"] = key
     for db_name in BED_DB_NAMES:
         try:
             db = get_client(db_name)[db_name]
             doc = {
                 "hisPid": hispid,
-                "task": "abx_purpose",
+                "task": task,
                 "result": result,
                 "prompt_snapshot": f"manual_override by {overridden_by}",
                 "created_at": _dt.utcnow(),
             }
-            db[AI_CACHE_COLLECTION].update_one(
-                {"hisPid": hispid, "task": "abx_purpose"},
-                {"$set": doc},
-                upsert=True,
-            )
+            if key:
+                doc["key"] = key
+            db[AI_CACHE_COLLECTION].update_one(query, {"$set": doc}, upsert=True)
             return {"success": True, "hisPid": hispid, "result": result}
-        except Exception as e:
+        except Exception:
             continue
     return {"success": False, "error": "Database not available"}
+
+
+# ============================================================
+# 脓毒性休克确认（Sepsis-3）
+# ============================================================
+
+AI_CONF_THRESHOLD = 0.6
+
+
+def _safe_float(value):
+    """安全转 float，失败返回 None。"""
+    if value is None:
+        return None
+    try:
+        return float(value)
+    except (ValueError, TypeError):
+        return None
+
+SEPTIC_SHOCK_CONFIRM_SYSTEM_PROMPT = """你是重症医学科(ICU)质控 AI。你的任务是：依据 Sepsis-3 标准，判断某例患者是否构成【脓毒症】与【脓毒性休克】，确定该次事件的时间零点 T0，并输出 SOFA 评分明细。你只依据我在用户消息中提供的结构化指标数据进行判断，不得编造或假设任何未提供的数据。
+
+═══════════════ 一、权威定义（Sepsis-3, 2016 JAMA）═══════════════
+1. 脓毒症 (Sepsis) = 感染（确诊或高度怀疑）+ 因感染导致的 SOFA 评分较基线急性升高 ≥2 分。
+   · 既往无器官功能障碍者，基线 SOFA 记为 0。
+2. 脓毒性休克 (Septic Shock) = 在脓毒症基础上，经【充分液体复苏】后仍需【血管活性药物】维持 MAP ≥ 65 mmHg，且【血乳酸 > 2 mmol/L】。三项须同时满足。
+
+═══════════════ 二、SOFA 六系统评分规则（每系统 0–4 分）═══════════════
+· 呼吸  PaO2/FiO2 (mmHg)：<400=1；<300=2；<200 且机械通气=3；<100 且机械通气=4
+· 凝血  血小板 (×10^9/L)：<150=1；<100=2；<50=3；<20=4
+· 肝    总胆红素 (mg/dL)：≥1.2=1；≥2.0=2；≥6.0=3；≥12.0=4
+· 中枢  GCS：<15=1；<13=2；<10=3；<6=4
+· 肾    肌酐 (mg/dL)：≥1.2=1；≥2.0=2；≥3.5=3；≥5.0=4  或  尿量：<500 ml/d=3；<200 ml/d=4（取较高分）
+· 心血管：MAP<70未用升压药=1；多巴胺≤5或多巴酚丁胺=2；多巴胺>5或去甲≤0.1或肾上腺素≤0.1=3；多巴胺>15或去甲>0.1或肾上腺素>0.1=4
+
+═══════════════ 三、T0 判定 ═══════════════
+T0 = 在感染背景下，SOFA 相对基线首次急性升高达到 ≥2 分的时间点。依据各指标采样时间，取"促成 SOFA 达标的关键指标最早满足的时间"。
+
+═══════════════ 四、重要判定原则 ═══════════════
+· qSOFA 仅作床旁筛查提示，不能作为确认依据。
+· "充分液体复苏"若数据未提供，标注 "unknown"。
+· 任一指标缺失时须据实标注缺失，不得以默认值凑分。
+· 升压药须为"当前正在泵注"。
+
+═══════════════ 五、输出：严格 JSON ═══════════════
+{
+  "confirm": true/false,
+  "is_sepsis": true/false,
+  "is_septic_shock": true/false,
+  "sofa_baseline": 数字,
+  "sofa_current": 数字,
+  "sofa_delta": 数字,
+  "sofa_breakdown": {"resp":n,"coag":n,"liver":n,"cardio":n,"cns":n,"renal":n},
+  "t0": "ISO8601 或 null",
+  "t0_basis": "字符串",
+  "qsofa": 数字,
+  "lactate": 数字或null,
+  "on_vasopressor": true/false,
+  "adequate_fluid": "yes/no/unknown",
+  "confidence": 0.0-1.0,
+  "reason": "字符串"
+}"""
+
+
+def _bili_mgdl(val):
+    """µmol/L → mg/dL"""
+    v = _safe_float(val)
+    return round(v / 17.1, 2) if v is not None else None
+
+
+def _crea_mgdl(val):
+    """µmol/L → mg/dL"""
+    v = _safe_float(val)
+    return round(v / 88.4, 2) if v is not None else None
+
+
+def _s_resp(pf, on_vent):
+    if pf is None:
+        return 0
+    if pf < 100 and on_vent:
+        return 4
+    if pf < 200 and on_vent:
+        return 3
+    if pf < 300:
+        return 2
+    if pf < 400:
+        return 1
+    return 0
+
+
+def _s_coag(plt):
+    v = _safe_float(plt)
+    if v is None:
+        return 0
+    if v < 20: return 4
+    if v < 50: return 3
+    if v < 100: return 2
+    if v < 150: return 1
+    return 0
+
+
+def _s_liver(tbil_mgdl):
+    v = _safe_float(tbil_mgdl)
+    if v is None:
+        return 0
+    if v >= 12.0: return 4
+    if v >= 6.0: return 3
+    if v >= 2.0: return 2
+    if v >= 1.2: return 1
+    return 0
+
+
+def _s_cns(gcs):
+    v = _safe_float(gcs)
+    if v is None:
+        return 0
+    if v < 6: return 4
+    if v < 10: return 3
+    if v < 13: return 2
+    if v < 15: return 1
+    return 0
+
+
+def _s_renal(crea_mgdl, urine_ml_d):
+    c = _safe_float(crea_mgdl)
+    u = _safe_float(urine_ml_d)
+    score = 0
+    if c is not None:
+        if c >= 5.0: score = 4
+        elif c >= 3.5: score = 3
+        elif c >= 2.0: score = 2
+        elif c >= 1.2: score = 1
+    if u is not None:
+        if u < 200: score = max(score, 4)
+        elif u < 500: score = max(score, 3)
+    return score
+
+
+def _sofa_cardio(map_val, vasos):
+    """心血管 SOFA。vasos = [{drug, rate_ugkgmin}]"""
+    if vasos:
+        scores = []
+        for v in vasos:
+            drug = (v.get("drug") or "").lower()
+            r = _safe_float(v.get("rate_ugkgmin"))
+            if "norepinephrine" in drug or "去甲" in drug:
+                scores.append(4 if r is not None and r > 0.1 else 3)
+            elif "epinephrine" in drug and "norepinephrine" not in drug:
+                scores.append(4 if r is not None and r > 0.1 else 3)
+            elif "dopamine" in drug or "多巴胺" in drug:
+                if r is None:
+                    scores.append(3)
+                elif r > 15:
+                    scores.append(4)
+                elif r > 5:
+                    scores.append(3)
+                else:
+                    scores.append(2)
+            elif "dobutamine" in drug or "多巴酚丁胺" in drug:
+                scores.append(2)
+            else:
+                scores.append(3)  # 加压素/去氧肾/间羟胺：在用即≥3
+        return max(scores) if scores else 0
+    mv = _safe_float(map_val)
+    if mv is not None and mv < 70:
+        return 1
+    return 0
+
+
+def compute_sofa_t0(items, baseline=0):
+    """启发式 T0：按各阳性子项采样时间累计，首次达到 baseline+2 的时间。"""
+    contrib = sorted(
+        [it for it in items if it.get("score", 0) > 0 and it.get("time")],
+        key=lambda x: x["time"]
+    )
+    running = 0
+    hit = []
+    for it in contrib:
+        running += it["score"]
+        hit.append(f'{it["key"]}={it["score"]}@{it["time"]}')
+        if running - baseline >= 2:
+            return it["time"], "；".join(hit)
+    return None, "SOFA 急升未达 2 分或关键指标缺时间"
+
+
+def extract_sofa_qsofa(pid, his_pid, before=None):
+    """
+    从 bGATemp + bedside 提取 SOFA 六组件 + qSOFA。
+    返回 dict，缺失项为 None。
+    """
+    from db import BED_DB_NAMES, get_client, get_datacenter_client
+    from datetime import timedelta
+    from bson import ObjectId
+
+    weight = None
+    sofa_data = {
+        "pid": pid, "his_pid": his_pid, "weight": None,
+        "sofa_baseline": 0, "sofa_current": None, "sofa_breakdown": {},
+        "sofa_items": {},
+        "rr": None, "on_ventilator": False, "sbp": None, "gcs": None, "qsofa": None,
+        "map": None, "map_time": None,
+        "vasopressors": [], "lactate": None, "lactate_time": None,
+        "t0": None, "t0_basis": "",
+        "infection_evidence": None, "fluid_resuscitation": "unknown",
+    }
+
+    for db_name in BED_DB_NAMES:
+        try:
+            db = get_client(db_name)[db_name]
+
+            # 患者体重
+            pat = db.patient.find_one({"_id": ObjectId(pid)}, {"weight": 1})
+            if pat:
+                w = pat.get("weight")
+                if w and isinstance(w, (int, float)) and w > 0:
+                    weight = w
+                    sofa_data["weight"] = w
+
+            # 时间窗口（默认最近 24h）
+            end_dt = before or _dt.utcnow()
+            start_dt = end_dt - timedelta(hours=24)
+
+            # bGATemp: P/F, FiO2, Lac, MAP, RR
+            coll = "BGATemp" if "BGATemp" in db.list_collection_names() else "bGATemp"
+            if coll in db.list_collection_names():
+                for doc in db[coll].find(
+                    {"eventExe.pid": pid, "eventExe.startTime": {"$gte": start_dt, "$lte": end_dt}},
+                    {"eventExe": 1, "bedsides": 1},
+                ).sort("eventExe.startTime", -1).max_time_ms(20000).limit(500):
+                    bs = doc.get("bedsides") or []
+                    evt = doc.get("eventExe") or {}
+                    evt_time = evt.get("startTime")
+                    for b in bs:
+                        code = b.get("code", "")
+                        fval = _safe_float(b.get("strVal") or b.get("fVal"))
+                        if code == "param_bg_P/Fratio" and fval is not None and "pf" not in sofa_data["sofa_items"]:
+                            sofa_data["sofa_items"]["pf"] = {"val": fval, "time": evt_time}
+                        if code == "param_bg_FiO2" and fval is not None and "fio2" not in sofa_data["sofa_items"]:
+                            sofa_data["sofa_items"]["fio2"] = {"val": fval, "time": evt_time}
+                        if code == "param_bg_Lac" and fval is not None and sofa_data["lactate"] is None:
+                            sofa_data["lactate"] = round(fval, 2)
+                            sofa_data["lactate_time"] = evt_time
+                        if code in ("param_bg_pAO2",) and fval is not None and "pao2" not in sofa_data["sofa_items"]:
+                            sofa_data["sofa_items"]["pao2"] = {"val": fval, "time": evt_time}
+
+            # bedside: GCS, MAP(ibp_m/nibp_m), 尿量, RR, SBP
+            bedside_codes = {
+                "gcs": ["param_score_gcs_obs"],
+                "map": ["param_ibp_m", "param_nibp_m"],
+                "urine": ["param_niaoLiang"],
+                "rr": ["param_HuXiPinLv"],
+                "sbp": ["param_ibp_s", "param_nibp_s"],
+            }
+            for key, codes in bedside_codes.items():
+                for doc in db.bedside.find(
+                    {"pid": pid, "code": {"$in": codes}, "time": {"$gte": start_dt, "$lte": end_dt}},
+                    {"code": 1, "strVal": 1, "time": 1},
+                ).sort("time", -1).max_time_ms(10000).limit(100):
+                    val = _safe_float(doc.get("strVal"))
+                    if val is None:
+                        continue
+                    t = doc.get("time")
+                    if key == "gcs" and sofa_data["gcs"] is None:
+                        sofa_data["gcs"] = int(val)
+                        sofa_data["sofa_items"]["gcs"] = {"val": int(val), "time": t}
+                    elif key == "map" and sofa_data["map"] is None:
+                        sofa_data["map"] = round(val, 1)
+                        sofa_data["map_time"] = t
+                        sofa_data["sofa_items"]["map"] = {"val": round(val, 1), "time": t}
+                    elif key == "urine" and "urine" not in sofa_data["sofa_items"]:
+                        sofa_data["sofa_items"]["urine"] = {"val": round(val, 1), "time": t}
+                    elif key == "rr" and sofa_data["rr"] is None:
+                        sofa_data["rr"] = int(val)
+                    elif key == "sbp" and sofa_data["sbp"] is None:
+                        sofa_data["sbp"] = int(val)
+                    break  # 每类取最新一条
+
+            # 机械通气判断
+            if "vent_resp" not in sofa_data["sofa_items"]:
+                for doc in db.bedside.find(
+                    {"pid": pid, "code": {"$in": ["param_vent_resp", "param_vent_peep"]},
+                     "time": {"$gte": start_dt, "$lte": end_dt}},
+                    {"code": 1, "_id": 0}
+                ).max_time_ms(5000).limit(5):
+                    sofa_data["on_ventilator"] = True
+                    break
+
+            # 升压药：drugExe.drugList.name 嵌套查询，末动作非 stop/pause 才算"在泵"
+            VASO_KEYWORDS = "去甲肾上腺素|肾上腺素|多巴胺|多巴酚丁胺"
+            if "drugExe" in db.list_collection_names():
+                for doc in db.drugExe.find(
+                    {"pid": pid, "drugList.name": {"$regex": VASO_KEYWORDS}},
+                    {"drugList": 1, "drugActionList": 1, "weight": 1}
+                ).max_time_ms(10000).limit(200):
+                    actions = doc.get("drugActionList") or []
+                    last_action = actions[-1].get("action", "") if actions else ""
+                    if last_action in ("stop", "pause"):
+                        continue  # 已停/暂停，不算"在泵"
+                    # 提取药名和泵速
+                    for drug in doc.get("drugList") or []:
+                        name = drug.get("name", "")
+                        if not any(kw in name for kw in ["去甲", "肾上腺素", "多巴胺", "多巴酚丁胺"]):
+                            continue
+                        speed = 0
+                        if actions:
+                            last = actions[-1]
+                            speed = _safe_float(last.get("dripSpeed")) or 0
+                        # 换算 µg/kg/min（简化：有体重才精确，否则标记）
+                        w = doc.get("weight") or weight
+                        rate = None
+                        if w and speed > 0:
+                            # dripSpeed 单位通常是 ml/h，需要浓度换算
+                            # 暂不精确换算，标记为"在用"
+                            rate = None
+                        sofa_data["vasopressors"].append({
+                            "drug": name, "rate_ugkgmin": rate,
+                            "speed": speed, "action": last_action,
+                        })
+
+            # 检验：PLT, TBIL, sCr (VI_ICU_EXAM_ITEM)
+            # 注意：脓毒性休克队列的检验数据目前未同步到 DataCenter（VI_ICU_EXAM=0）
+            # 保留代码以便数据修复后自动生效
+            try:
+                db_dc = get_datacenter_client()["DataCenter"]
+                lab_map = {
+                    "plt": ("coag_plt", ["PLT"]),
+                    "tbil": ("liver_tbil", ["TBIL"]),
+                    "sCr": ("renal_crea", ["sCr"]),
+                }
+                for lab_key, (item_key, codes) in lab_map.items():
+                    item = db_dc["VI_ICU_EXAM_ITEM"].find_one(
+                        {"hisPid": his_pid, "itemCode": {"$in": codes}},
+                        {"result": 1, "authTime": 1}
+                    )
+                    if item:
+                        raw = _safe_float(item.get("result"))
+                        if raw is not None:
+                            if lab_key == "tbil":
+                                sofa_data["sofa_items"][item_key] = {"val": _bili_mgdl(raw), "raw": raw, "time": item.get("authTime")}
+                            elif lab_key == "sCr":
+                                sofa_data["sofa_items"][item_key] = {"val": _crea_mgdl(raw), "raw": raw, "time": item.get("authTime")}
+                            else:
+                                sofa_data["sofa_items"][item_key] = {"val": raw, "time": item.get("authTime")}
+            except Exception:
+                pass
+
+            break  # 找到数据库就退出
+        except Exception:
+            continue
+
+    # SOFA 评分
+    items = sofa_data["sofa_items"]
+    pf_val = items.get("pf", {}).get("val")
+    on_vent = sofa_data["on_ventilator"]
+    s = {
+        "resp": _s_resp(pf_val, on_vent),
+        "coag": _s_coag(items.get("coag_plt", {}).get("val")),
+        "liver": _s_liver(items.get("liver_tbil", {}).get("val")),
+        "cns": _s_cns(sofa_data["gcs"]),
+        "renal": _s_renal(items.get("renal_crea", {}).get("val"), items.get("urine", {}).get("val")),
+        "cardio": _sofa_cardio(sofa_data["map"], sofa_data["vasopressors"]),
+    }
+
+    # 缺失域追踪：缺失域不计分，sofa_current 是真实值的下界
+    measured = {
+        "resp": pf_val is not None,
+        "coag": items.get("coag_plt", {}).get("val") is not None,
+        "liver": items.get("liver_tbil", {}).get("val") is not None,
+        "cns": sofa_data["gcs"] is not None,
+        "renal": items.get("renal_crea", {}).get("val") is not None or items.get("urine", {}).get("val") is not None,
+        "cardio": sofa_data["map"] is not None or bool(sofa_data["vasopressors"]),
+    }
+    missing_domains = [k for k, ok in measured.items() if not ok]
+    sofa_data["measured"] = measured
+    sofa_data["missing_domains"] = missing_domains
+    sofa_data["sofa_is_lower_bound"] = bool(missing_domains)
+
+    sofa_data["sofa_breakdown"] = s
+    # 缺失域不计 0 分 — 只对已测域求和
+    sofa_data["sofa_current"] = sum(v for k, v in s.items() if measured[k])
+
+    # qSOFA
+    q = 0
+    if sofa_data["rr"] is not None and sofa_data["rr"] >= 22:
+        q += 1
+    if sofa_data["sbp"] is not None and sofa_data["sbp"] <= 100:
+        q += 1
+    if sofa_data["gcs"] is not None and sofa_data["gcs"] < 15:
+        q += 1
+    sofa_data["qsofa"] = q
+
+    # T0（仅用已测域）
+    t0_items = [
+        {"key": "resp", "score": s["resp"], "time": items.get("pf", {}).get("time")},
+        {"key": "coag", "score": s["coag"], "time": items.get("coag_plt", {}).get("time")},
+        {"key": "liver", "score": s["liver"], "time": items.get("liver_tbil", {}).get("time")},
+        {"key": "cns", "score": s["cns"], "time": items.get("gcs", {}).get("time")},
+        {"key": "renal", "score": s["renal"], "time": items.get("renal_crea", {}).get("time") or items.get("urine", {}).get("time")},
+        {"key": "cardio", "score": s["cardio"], "time": sofa_data["map_time"]},
+    ]
+    # 排除缺失域（score=0 且未测量）的 T0 贡献
+    t0_items = [it for it in t0_items if measured.get(it["key"], True)]
+    t0, t0_basis = compute_sofa_t0(t0_items, sofa_data["sofa_baseline"])
+    sofa_data["t0"] = t0
+    sofa_data["t0_basis"] = t0_basis
+
+    return sofa_data
+
+
+def get_infection_evidence(pid, his_pid, before=None):
+    """四路合并：诊断 + 抗菌药 + 病原学 + 炎症指标"""
+    from db import BED_DB_NAMES, get_client, get_datacenter_client
+    from datetime import timedelta
+    from bson import ObjectId
+
+    evidence = {"diagnosis": [], "antibiotics": [], "culture": [], "inflammation": {}}
+    end_dt = before or _dt.utcnow()
+    start_dt = end_dt - timedelta(hours=72)
+
+    for db_name in BED_DB_NAMES:
+        try:
+            db = get_client(db_name)[db_name]
+
+            # 诊断
+            pat = db.patient.find_one({"_id": ObjectId(pid)})
+            if pat:
+                for key in ("clinicalDiagnosis", "diagnosis", "admissionDiagnosis"):
+                    val = pat.get(key)
+                    if val:
+                        evidence["diagnosis"].append(str(val))
+                for item in pat.get("diagnosisHistoryList") or []:
+                    if isinstance(item, dict):
+                        evidence["diagnosis"].append(str(item.get("diagnosis") or item.get("name") or ""))
+
+            # 抗菌药
+            if "drugExe" in db.list_collection_names():
+                for doc in db.drugExe.find(
+                    {"pid": pid, "drugCategory": {"$regex": "抗感染|抗菌|抗生素"}},
+                    {"drugName": 1, "startTime": 1, "_id": 0}
+                ).max_time_ms(10000).limit(50):
+                    evidence["antibiotics"].append(doc.get("drugName", ""))
+
+            break
+        except Exception:
+            continue
+
+    return evidence
+
+
+def _build_septic_shock_prompt(d):
+    """d = extract_sofa_qsofa() 的输出"""
+    import json
+    missing = d.get("missing_domains") or []
+    payload = {
+        "感染证据": d.get("infection_evidence"),
+        "SOFA基线": d.get("sofa_baseline", 0),
+        "SOFA各项(含采样时间)": d.get("sofa_items"),
+        "SOFA当前总分(仅已测域)": d.get("sofa_current"),
+        "SOFA是否下界": d.get("sofa_is_lower_bound", False),
+        "缺失域(missing_domains)": missing if missing else "无，六域齐全",
+        "qSOFA": {"RR": d.get("rr"), "on_ventilator": d.get("on_ventilator"),
+                  "SBP": d.get("sbp"), "GCS": d.get("gcs"), "score": d.get("qsofa")},
+        "升压药(当前泵注)": d.get("vasopressors"),
+        "乳酸": {"value": d.get("lactate"), "time": str(d.get("lactate_time", ""))},
+        "MAP": {"value": d.get("map"), "time": str(d.get("map_time", ""))},
+        "液体复苏": d.get("fluid_resuscitation", "unknown"),
+    }
+    note = ""
+    if missing:
+        note = (f"\n\n⚠️ 注意：以下域缺失数据，SOFA 总分 {d.get('sofa_current')} 仅为下界，"
+                f"真实值可能更高。缺失域：{missing}。请在 confidence 中反映这一不确定性。")
+    return ("请依据以下该患者的结构化指标数据判定，并严格按系统提示的 JSON 格式输出：\n"
+            + json.dumps(payload, ensure_ascii=False, indent=2, default=str) + note)
+
+
+def _rule_confirm_septic_shock(data):
+    """
+    规则初判：决定性场景直接出结论，边界交 AI。
+    缺失域守卫：delta<2 且有缺失域时不能判"非脓毒症"（真实值可能更高）。
+    """
+    infection = bool(data.get("infection_evidence"))
+    base = data.get("sofa_baseline", 0) or 0
+    cur = data.get("sofa_current")
+    delta = None if cur is None else cur - base
+    vasos = data.get("vasopressors") or []
+    on_vaso = len(vasos) > 0
+    lac = data.get("lactate")
+    fluid = data.get("fluid_resuscitation", "unknown")
+    missing = data.get("missing_domains") or []
+    is_lower_bound = bool(data.get("sofa_is_lower_bound"))
+
+    # is_sepsis：已测域下界≥2 → 脓毒症成立（缺失域只会更高，向上确认安全）
+    is_sepsis = bool(infection and delta is not None and delta >= 2)
+
+    res = {
+        "source": "rule", "is_sepsis": is_sepsis,
+        "sofa_baseline": base, "sofa_current": cur, "sofa_delta": delta,
+        "sofa_breakdown": data.get("sofa_breakdown"), "qsofa": data.get("qsofa"),
+        "lactate": lac, "on_vasopressor": on_vaso, "adequate_fluid": fluid,
+        "t0": data.get("t0"), "t0_basis": data.get("t0_basis"),
+        "missing_domains": missing, "sofa_is_lower_bound": is_lower_bound,
+    }
+
+    # A. 六域齐全 + delta<2 → 明确非脓毒症
+    if infection and delta is not None and delta < 2 and not missing:
+        res.update(confirm=False, is_septic_shock=False, decisive=True, confidence=0.9,
+                   reason=f"SOFA 六域齐全，急升 {delta} 分(<2)，不构成脓毒症。")
+        return res
+    # A'. delta<2 但有缺失域 → 不能定，交 AI
+    if infection and delta is not None and delta < 2 and missing:
+        res.update(decisive=False, confidence=0.3,
+                   reason=f"已测域急升 {delta} 分，但 {missing} 缺失，真实值可能更高，交 AI 结合病程判定。")
+        return res
+    # B. 脓毒症(下界≥2) + 在泵升压药 + 乳酸>2 + 已充分复苏 → 明确脓毒性休克
+    if is_sepsis and on_vaso and lac is not None and lac > 2 and fluid == "yes":
+        res.update(confirm=True, is_septic_shock=True, decisive=True, confidence=0.95,
+                   reason=(f"感染 + SOFA 急升 {delta} 分构成脓毒症；充分复苏后仍需升压药"
+                           f"维持 MAP≥65 且乳酸 {lac}>2 mmol/L，符合脓毒性休克。"))
+        return res
+    # B'. 脓毒症 + 在泵升压药 + 乳酸>2，但复苏状态未知 → 交 AI
+    if is_sepsis and on_vaso and lac is not None and lac > 2 and fluid != "yes":
+        res.update(decisive=False,
+                   reason="疑似脓毒性休克，但液体复苏是否充分未记录，交 AI 结合病程判定。")
+        return res
+    # C. 脓毒症成立、乳酸明确≤2 且未用升压药 → 明确非休克
+    if is_sepsis and (not on_vaso) and lac is not None and lac <= 2:
+        res.update(confirm=False, is_septic_shock=False, decisive=True, confidence=0.85,
+                   reason=f"构成脓毒症(SOFA急升{delta})，但未用升压药且乳酸{lac}≤2，非脓毒性休克。")
+        return res
+    # D. 其余(乳酸缺失/复苏未知/剂量边界/缺失域) → 交 AI
+    res.update(decisive=False)
+    return res
+
+
+def _fallback_septic_shock(data):
+    """AI 不可用时的兜底判定。"""
+    base = data.get("sofa_baseline", 0) or 0
+    cur = data.get("sofa_current")
+    delta = None if cur is None else cur - base
+    vasos = data.get("vasopressors") or []
+    lac = data.get("lactate")
+    is_sepsis = bool(data.get("infection_evidence") and delta is not None and delta >= 2)
+    is_shock = bool(is_sepsis and vasos and lac is not None and lac > 2)
+    return {
+        "source": "fallback", "confirm": is_shock,
+        "is_sepsis": is_sepsis, "is_septic_shock": is_shock,
+        "sofa_baseline": base, "sofa_current": cur, "sofa_delta": delta,
+        "sofa_breakdown": data.get("sofa_breakdown"), "qsofa": data.get("qsofa"),
+        "lactate": lac, "on_vasopressor": bool(vasos),
+        "adequate_fluid": data.get("fluid_resuscitation", "unknown"),
+        "t0": data.get("t0"), "t0_basis": data.get("t0_basis"),
+        "confidence": 0.4, "low_confidence": True, "needs_review": True,
+        "missing_domains": data.get("missing_domains") or [],
+        "sofa_is_lower_bound": bool(data.get("sofa_is_lower_bound")),
+        "reason": "AI 判定不可用，按规则兜底，建议人工复核。",
+    }
+
+
+def _normalize_septic_shock_result(res, data):
+    """AI 结果校验：客观指标以本地值为准，逻辑一致性兜底。缺失域强制低置信。"""
+    if not isinstance(res, dict):
+        return _fallback_septic_shock(data)
+    base = data.get("sofa_baseline", 0) or 0
+    cur = data.get("sofa_current")
+    missing = data.get("missing_domains") or []
+    res["sofa_baseline"] = base
+    res["sofa_current"] = cur
+    res["sofa_delta"] = None if cur is None else cur - base
+    res["missing_domains"] = missing
+    res["sofa_is_lower_bound"] = bool(missing)
+    res.setdefault("sofa_breakdown", data.get("sofa_breakdown"))
+    res.setdefault("qsofa", data.get("qsofa"))
+    res.setdefault("lactate", data.get("lactate"))
+    res.setdefault("on_vasopressor", bool(data.get("vasopressors")))
+    res.setdefault("t0", data.get("t0"))
+    res.setdefault("t0_basis", data.get("t0_basis"))
+    if res.get("is_septic_shock"):
+        res["is_sepsis"] = True
+    res["confirm"] = bool(res.get("is_septic_shock"))
+    try:
+        res["confidence"] = float(res.get("confidence", 0.5))
+    except (TypeError, ValueError):
+        res["confidence"] = 0.5
+    # 缺失域一律低置信（数据不全不给高置信）
+    if missing:
+        res["confidence"] = min(res["confidence"], 0.5)
+        res["low_confidence"] = True
+    else:
+        res["low_confidence"] = res["confidence"] < AI_CONF_THRESHOLD
+    res.setdefault("source", "ai")
+    return res
+
+
+def classify_septic_shock_with_ai(disease_id, his_pid, data):
+    """
+    脓毒性休克确认主函数。
+    优先级：人工覆盖 > 缓存 > 规则决定性 > AI > 兜底
+    """
+    # 1) 人工覆盖
+    ov = get_ai_cache(his_pid, task="septic_shock_confirm", key=disease_id)
+    if ov and ov.get("source") == "override":
+        return ov
+
+    # 2) 缓存
+    cached = get_ai_cache(his_pid, task="septic_shock_confirm", key=disease_id)
+    if cached:
+        return cached
+
+    # 3) 规则初判
+    rule = _rule_confirm_septic_shock(data)
+    if rule.get("decisive"):
+        rule["low_confidence"] = rule.get("confidence", 1.0) < AI_CONF_THRESHOLD
+        set_ai_cache(his_pid, "septic_shock_confirm", rule, "rule", key=disease_id)
+        return rule
+
+    # 4) AI 判定
+    try:
+        with _AI_SEMAPHORE:
+            raw = call_llm_json_with_system(
+                SEPTIC_SHOCK_CONFIRM_SYSTEM_PROMPT,
+                _build_septic_shock_prompt(data),
+                max_tokens=1200)
+        res = _normalize_septic_shock_result(parse_llm_json(raw), data)
+    except Exception as e:
+        res = _fallback_septic_shock(data)
+        res["error"] = str(e)
+
+    set_ai_cache(his_pid, "septic_shock_confirm", res, "ai", key=disease_id)
+    return res
+
+
+def override_septic_shock_decision(his_pid, disease_id, decision, operator=None, note=None):
+    """人工覆盖脓毒性休克判定。"""
+    payload = {
+        "is_septic_shock": bool(decision.get("is_septic_shock")),
+        "is_sepsis": bool(decision.get("is_sepsis", decision.get("is_septic_shock"))),
+        "confirm": bool(decision.get("is_septic_shock")),
+        "reason": decision.get("reason", "人工复核判定"),
+        "operator": operator, "note": note,
+        "source": "override", "confidence": 1.0, "low_confidence": False,
+    }
+    return override_ai_decision(
+        his_pid, task="septic_shock_confirm", key=disease_id,
+        result=payload, overridden_by=operator or "主任"
+    )

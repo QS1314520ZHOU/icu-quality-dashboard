@@ -528,11 +528,40 @@ def get_bundle_data(dept_codes: list, start_date: str, end_date: str) -> dict:
                     diag_by_id[str(d["_id"])] = d
                     den_list.append(d)
             result["total"] = len(den_list)
-            result["den_patients"] = [
-                {"_id": d["pid"], "mrn": d.get("mrn", ""), "name": d.get("patientName", ""),
-                 "hisBed": "", "diagnosisTime": d.get("diagnosisTime")}
-                for d in den_list
-            ]
+
+            # AI 确认（附加字段，不阻断分母）
+            try:
+                from ai_analyzer import classify_septic_shock_with_ai, extract_sofa_qsofa
+            except ImportError:
+                classify_septic_shock_with_ai = None
+
+            den_items = []
+            for d in den_list:
+                item = {"_id": d["pid"], "mrn": d.get("mrn", ""), "name": d.get("patientName", ""),
+                        "hisBed": "", "diagnosisTime": d.get("diagnosisTime"),
+                        "diseaseId": str(d["_id"])}
+                p = pat_map.get(d["pid"])
+                if p:
+                    item["mrn"] = item["mrn"] or p.get("hisPid", "")
+                    item["hisBed"] = p.get("hisBed", "")
+                    item["hisPid"] = str(p.get("hisPid", ""))
+                # AI 确认
+                if classify_septic_shock_with_ai and item.get("hisPid"):
+                    try:
+                        sofa_data = extract_sofa_qsofa(d["pid"], item["hisPid"])
+                        sofa_data["infection_evidence"] = {"diagnosis": [d.get("patientName", "")]}
+                        verdict = classify_septic_shock_with_ai(
+                            str(d["_id"]), item["hisPid"], sofa_data)
+                        item["ai_confirm"] = verdict.get("confirm", False)
+                        item["ai_reason"] = verdict.get("reason", "")
+                        item["low_confidence"] = verdict.get("low_confidence", False)
+                        item["qc_t0"] = verdict.get("t0")
+                        item["sofa_delta"] = verdict.get("sofa_delta")
+                    except Exception:
+                        item["ai_confirm"] = None
+                        item["ai_reason"] = "AI 判定异常"
+                den_items.append(item)
+            result["den_patients"] = den_items
 
             if not den_list:
                 continue
