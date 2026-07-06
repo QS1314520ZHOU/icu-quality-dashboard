@@ -545,16 +545,17 @@ def get_bundle_data(dept_codes: list, start_date: str, end_date: str) -> dict:
                     item["mrn"] = item["mrn"] or p.get("hisPid", "")
                     item["hisBed"] = p.get("hisBed", "")
                     item["hisPid"] = str(p.get("hisPid", ""))
-                # AI 确认
+                # AI 确认（before=诊断时间，回顾性提取 SOFA）
                 if classify_septic_shock_with_ai and item.get("hisPid"):
                     try:
-                        sofa_data = extract_sofa_qsofa(d["pid"], item["hisPid"])
-                        sofa_data["infection_evidence"] = {"diagnosis": [d.get("patientName", "")]}
+                        sofa = extract_sofa_qsofa(d["pid"], item["hisPid"],
+                                                  before=d.get("diagnosisTime"))
                         verdict = classify_septic_shock_with_ai(
-                            str(d["_id"]), item["hisPid"], sofa_data)
-                        item["ai_confirm"] = verdict.get("confirm", False)
+                            disease_id=str(d["_id"]),
+                            his_pid=item["hisPid"], data=sofa)
+                        item["ai_confirm"] = bool(verdict.get("confirm"))
                         item["ai_reason"] = verdict.get("reason", "")
-                        item["low_confidence"] = verdict.get("low_confidence", False)
+                        item["low_confidence"] = bool(verdict.get("low_confidence"))
                         item["qc_t0"] = verdict.get("t0")
                         item["sofa_delta"] = verdict.get("sofa_delta")
                     except Exception:
