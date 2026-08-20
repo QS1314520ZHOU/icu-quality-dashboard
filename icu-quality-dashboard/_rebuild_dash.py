@@ -1,42 +1,62 @@
-<template>
+# -*- coding: utf-8 -*-
+"""Rewrite Dashboard.vue - dark theme + all 3 files."""
+import pathlib, re
+
+BASE = pathlib.Path(r"D:\icu-quality-dashboard\icu-quality-dashboard\src")
+
+def read(name):
+    return (BASE / name).read_text(encoding="utf-8")
+
+def write(name, text):
+    (BASE / name).write_text(text, encoding="utf-8")
+    print(f"  Wrote {name}: {len(text)} chars")
+
+# ── Dashboard.vue ──
+# Strategy: keep script section, replace template and style
+dash = read("views/Dashboard.vue")
+# Extract script
+m = re.search(r'(<script setup>.*?</script>)', dash, re.DOTALL)
+script_section = m.group(1)
+
+new_template = '''<template>
   <div class="dashboard" data-theme="dark">
     <header class="db-header">
       <div class="db-header-left">
         <div class="db-brand">
-          <span class="brand-cross">✚</span>
+          <span class="brand-cross">\u271a</span>
           <div>
-            <span class="brand-name">ICU 医疗质量控制中心</span>
-            <span class="brand-sub">实时大屏看板</span>
+            <span class="brand-name">ICU \u533b\u7597\u8d28\u91cf\u63a7\u5236\u4e2d\u5fc3</span>
+            <span class="brand-sub">\u5b9e\u65f6\u5927\u5c4f\u770b\u677f</span>
           </div>
         </div>
       </div>
       <div class="db-header-right">
         <div class="filters">
           <select v-model.number="year" @change="loadData">
-            <option v-for="y in years" :key="y" :value="y">{{ y }}年</option>
+            <option v-for="y in years" :key="y" :value="y">{{ y }}\u5e74</option>
           </select>
           <select v-model.number="sMonth" @change="loadData">
-            <option v-for="m in 12" :key="m" :value="m">{{ m }}月</option>
+            <option v-for="m in 12" :key="m" :value="m">{{ m }}\u6708</option>
           </select>
           <select v-model.number="eMonth" @change="loadData">
-            <option v-for="m in 12" :key="m" :value="m">{{ m }}月</option>
+            <option v-for="m in 12" :key="m" :value="m">{{ m }}\u6708</option>
           </select>
           <select v-model="dept" @change="loadData">
-            <option value="all">全部ICU</option>
+            <option value="all">\u5168\u90e8ICU</option>
             <option v-for="d in departments" :key="d.code" :value="d.code">{{ d.name }}</option>
           </select>
         </div>
         <div class="header-actions">
-          <button class="action-pill" @click="guideVisible=true">指标说明</button>
-          <span class="status-pill" :class="risk.overall_status">状态{{ overallText }}</span>
-          <button class="action-pill icon-only" @click="loadData(true)" :disabled="loading">🔄</button>
-          <span v-if="updatedAt" class="meta-update">最后更新: {{ updatedAt }}</span>
+          <button class="action-pill" @click="guideVisible=true">\u6307\u6807\u8bf4\u660e</button>
+          <span class="status-pill" :class="risk.overall_status">\u72b6\u6001{{ overallText }}</span>
+          <button class="action-pill icon-only" @click="loadData(true)" :disabled="loading">\U0001f504</button>
+          <span v-if="updatedAt" class="meta-update">\u6700\u540e\u66f4\u65b0: {{ updatedAt }}</span>
         </div>
       </div>
     </header>
 
     <div v-if="error" class="state error">{{ error }}</div>
-    <div v-else-if="loading" class="state">正在读取预聚合质控数据...</div>
+    <div v-else-if="loading" class="state">\u6b63\u5728\u8bfb\u53d6\u9884\u805a\u5408\u8d28\u63a7\u6570\u636e...</div>
 
     <!-- 6 KPI Stat Cards -->
     <section class="kpi-stats">
@@ -44,79 +64,79 @@
         <div class="kpi-card-left" :class="risk.overall_status"></div>
         <div class="kpi-card-body">
           <div class="kpi-card-top">
-            <span class="kpi-card-label">异常风险</span>
-            <span class="kpi-card-icon">⚠️</span>
+            <span class="kpi-card-label">\u5f02\u5e38\u98ce\u9669</span>
+            <span class="kpi-card-icon">\u26a0\ufe0f</span>
           </div>
           <strong class="kpi-card-big" :class="risk.overall_status">{{ overallText }}</strong>
-          <div class="kpi-card-delta">较昨日 <em :class="risk.counts?.danger > 0 ? 'up' : 'flat'">{{ risk.counts?.danger > 0 ? '↑ ' + (risk.counts?.danger || 0) : '— 0' }}</em></div>
-          <span class="kpi-card-desc">{{ risk.headline || '异常事件需关注，建议及时处理' }}</span>
+          <div class="kpi-card-delta">\u8f83\u6628\u65e5 <em :class="risk.counts?.danger > 0 ? \'up\' : \'flat\'">{{ risk.counts?.danger > 0 ? \'\u2191 \' + (risk.counts?.danger || 0) : '\u2014 0' }}</em></div>
+          <span class="kpi-card-desc">{{ risk.headline || '\u5f02\u5e38\u4e8b\u4ef6\u9700\u5173\u6ce8\uff0c\u5efa\u8bae\u53ca\u65f6\u5904\u7406' }}</span>
         </div>
       </div>
       <div class="kpi-stat-card">
         <div class="kpi-card-left danger-accent"></div>
         <div class="kpi-card-body">
           <div class="kpi-card-top">
-            <span class="kpi-card-label">严重异常指标</span>
-            <span class="kpi-card-icon">🔴</span>
+            <span class="kpi-card-label">\u4e25\u91cd\u5f02\u5e38\u6307\u6807</span>
+            <span class="kpi-card-icon">\U0001f534</span>
           </div>
           <strong class="kpi-card-big">{{ risk.counts?.danger || 0 }}</strong>
-          <div class="kpi-card-delta">较昨日 <em :class="(risk.counts?.danger||0)>0 ? 'up' : 'flat'">{{ (risk.counts?.danger||0)>0 ? '↑ ' + risk.counts.danger : '— 0' }}</em></div>
-          <span class="kpi-card-desc">涉及 ICU 床医比、ICU 护士床比</span>
+          <div class="kpi-card-delta">\u8f83\u6628\u65e5 <em :class="(risk.counts?.danger||0)>0 ? \'up\' : \'flat\'">{{ (risk.counts?.danger||0)>0 ? \'\u2191 \' + risk.counts.danger : '\u2014 0' }}</em></div>
+          <span class="kpi-card-desc">\u6d89\u53ca ICU \u5e8a\u533b\u6bd4\u3001ICU \u62a4\u58eb\u5e8a\u6bd4</span>
         </div>
       </div>
       <div class="kpi-stat-card">
         <div class="kpi-card-left warn-accent"></div>
         <div class="kpi-card-body">
           <div class="kpi-card-top">
-            <span class="kpi-card-label">预警指标</span>
-            <span class="kpi-card-icon">🔔</span>
+            <span class="kpi-card-label">\u9884\u8b66\u6307\u6807</span>
+            <span class="kpi-card-icon">\U0001f514</span>
           </div>
           <strong class="kpi-card-big">{{ risk.counts?.warn || 0 }}</strong>
-          <div class="kpi-card-delta">较昨日 <em class="flat">— 0</em></div>
-          <span class="kpi-card-desc">暂无预警指标</span>
+          <div class="kpi-card-delta">\u8f83\u6628\u65e5 <em class="flat">\u2014 0</em></div>
+          <span class="kpi-card-desc">\u6682\u65e0\u9884\u8b66\u6307\u6807</span>
         </div>
       </div>
       <div class="kpi-stat-card">
         <div class="kpi-card-left ai-accent"></div>
         <div class="kpi-card-body">
           <div class="kpi-card-top">
-            <span class="kpi-card-label">AI 总结</span>
-            <span class="kpi-card-icon">🤖</span>
+            <span class="kpi-card-label">AI \u603b\u7ed3</span>
+            <span class="kpi-card-icon">\U0001f916</span>
           </div>
           <strong class="kpi-card-big">{{ aiTodoCount }}</strong>
-          <div class="kpi-card-delta">较昨日 <em class="flat">— 0</em></div>
-          <span class="kpi-card-desc">AI未识别到需重点关注问题</span>
+          <div class="kpi-card-delta">\u8f83\u6628\u65e5 <em class="flat">\u2014 0</em></div>
+          <span class="kpi-card-desc">AI\u672a\u8bc6\u522b\u5230\u9700\u91cd\u70b9\u5173\u6ce8\u95ee\u9898</span>
         </div>
       </div>
       <div class="kpi-stat-card">
         <div class="kpi-card-left sentinel-accent"></div>
         <div class="kpi-card-body">
           <div class="kpi-card-top">
-            <span class="kpi-card-label">哨兵事件</span>
-            <span class="kpi-card-icon">🛡️</span>
+            <span class="kpi-card-label">\u54e8\u5175\u4e8b\u4ef6</span>
+            <span class="kpi-card-icon">\U0001f6e1\ufe0f</span>
           </div>
           <strong class="kpi-card-big">0</strong>
-          <div class="kpi-card-delta">较昨日 <em class="flat">— 0</em></div>
-          <span class="kpi-card-desc">暂无哨兵事件报告</span>
+          <div class="kpi-card-delta">\u8f83\u6628\u65e5 <em class="flat">\u2014 0</em></div>
+          <span class="kpi-card-desc">\u6682\u65e0\u54e8\u5175\u4e8b\u4ef6\u62a5\u544a</span>
         </div>
       </div>
       <div class="kpi-stat-card">
         <div class="kpi-card-left low-accent"></div>
         <div class="kpi-card-body">
           <div class="kpi-card-top">
-            <span class="kpi-card-label">低价值评估</span>
-            <span class="kpi-card-icon">📊</span>
+            <span class="kpi-card-label">\u4f4e\u4ef7\u503c\u8bc4\u4f30</span>
+            <span class="kpi-card-icon">\U0001f4ca</span>
           </div>
           <strong class="kpi-card-big">{{ ai.low_confidence?.count || 0 }}</strong>
-          <div class="kpi-card-delta">较昨日 <em class="flat">— 0</em></div>
-          <span class="kpi-card-desc">暂无低价值评估项目</span>
+          <div class="kpi-card-delta">\u8f83\u6628\u65e5 <em class="flat">\u2014 0</em></div>
+          <span class="kpi-card-desc">\u6682\u65e0\u4f4e\u4ef7\u503c\u8bc4\u4f30\u9879\u76ee</span>
         </div>
       </div>
     </section>
 
     <div class="explain-bar">
-      <span class="explain-main">{{ risk.explain || '异常和预警均按状态配置中的阈值判定。' }}</span>
-      <span class="explain-sub">{{ ai.explain || 'AI待办仅作质控线索提示。' }}</span>
+      <span class="explain-main">{{ risk.explain || '\u5f02\u5e38\u548c\u9884\u8b66\u5747\u6309\u72b6\u6001\u914d\u7f6e\u4e2d\u7684\u9608\u503c\u5224\u5b9a\u3002' }}</span>
+      <span class="explain-sub">{{ ai.explain || 'AI\u5f85\u529e\u4ec5\u4f5c\u8d28\u63a7\u7ebf\u7d22\u63d0\u793a\u3002' }}</span>
     </div>
 
     <section class="kpi-row">
@@ -130,37 +150,37 @@
         <div class="kpi-value">
           <span>{{ fmtValue(c.value) }}</span><small>{{ c.unit }}</small>
         </div>
-        <div class="kpi-sub">分子 {{ fmtCount(c.numerator) }} / 分母 {{ fmtCount(c.denominator) }}</div>
-        <button class="kpi-guide" @click="guideVisible=true">口径说明</button>
+        <div class="kpi-sub">\u5206\u5b50 {{ fmtCount(c.numerator) }} / \u5206\u6bcd {{ fmtCount(c.denominator) }}</div>
+        <button class="kpi-guide" @click="guideVisible=true">\u53e3\u5f84\u8bf4\u660e</button>
       </div>
     </section>
 
-    <!-- 患者动态 KPI 卡 -->
+    <!-- \u60a3\u8005\u52a8\u6001 KPI \u5361 -->
     <section v-if="censusData" class="census-strip">
       <div class="census-kpi">
-        <span class="c-label">原有患者</span>
+        <span class="c-label">\u539f\u6709\u60a3\u8005</span>
         <strong>{{ censusData.carry_in }}</strong>
-        <p>期初 0 点已在科</p>
+        <p>\u671f\u521d 0 \u70b9\u5df2\u5728\u79d1</p>
       </div>
       <div class="census-kpi">
-        <span class="c-label">新入患者</span>
+        <span class="c-label">\u65b0\u5165\u60a3\u8005</span>
         <strong>{{ censusData.new_admit }}</strong>
-        <p>统计期内新入</p>
+        <p>\u7edf\u8ba1\u671f\u5185\u65b0\u5165</p>
       </div>
       <div class="census-kpi">
-        <span class="c-label">出科患者</span>
+        <span class="c-label">\u51fa\u79d1\u60a3\u8005</span>
         <strong>{{ censusData.discharge }}</strong>
-        <p>统计期内出科</p>
+        <p>\u7edf\u8ba1\u671f\u5185\u51fa\u79d1</p>
       </div>
       <div class="census-kpi">
-        <span class="c-label">期末在科</span>
+        <span class="c-label">\u671f\u672b\u5728\u79d1</span>
         <strong>{{ censusData.carry_out }}</strong>
-        <p>原有 + 新入 - 出科</p>
+        <p>\u539f\u6709 + \u65b0\u5165 - \u51fa\u79d1</p>
       </div>
       <div class="census-kpi">
-        <span class="c-label">同期总数</span>
+        <span class="c-label">\u540c\u671f\u603b\u6570</span>
         <strong>{{ censusData.total }}</strong>
-        <p>原有 + 新入</p>
+        <p>\u539f\u6709 + \u65b0\u5165</p>
       </div>
       <div class="census-kpi chart-kpi">
         <CensusStackChart :trend="censusTrend" />
@@ -169,7 +189,7 @@
 
     <section class="main-grid">
       <div class="panel abnormal-panel">
-        <div class="panel-title"><span class="panel-icon">☰</span> 异常指标清单</div>
+        <div class="panel-title"><span class="panel-icon">\u2630</span> \u5f02\u5e38\u6307\u6807\u6e05\u5355</div>
         <div v-if="abnormalList.length" class="abnormal-list">
           <div v-for="a in abnormalList" :key="a.code" class="abnormal-item" :class="a.status">
             <div class="ab-main">
@@ -178,13 +198,13 @@
               <span class="ab-status">{{ statusText(a.status) }}</span>
             </div>
             <div class="ab-meta">
-              当前 {{ fmtValue(a.value) }}{{ a.unit }} · 分子 {{ a.numerator ?? '/' }} / 分母 {{ a.denominator ?? '/' }}
-              <span v-if="a.delta != null"> · 区间变化 {{ a.delta > 0 ? '+' : '' }}{{ a.delta }}</span>
+              \u5f53\u524d {{ fmtValue(a.value) }}{{ a.unit }} \u00b7 \u5206\u5b50 {{ a.numerator ?? '/' }} / \u5206\u6bcd {{ a.denominator ?? '/' }}
+              <span v-if="a.delta != null"> \u00b7 \u533a\u95f4\u53d8\u5316 {{ a.delta > 0 ? '+' : '' }}{{ a.delta }}</span>
             </div>
             <div class="ab-hint">{{ a.hint }}</div>
           </div>
         </div>
-        <div v-else class="empty">当前范围内暂无异常或预警指标。</div>
+        <div v-else class="empty">\u5f53\u524d\u8303\u56f4\u5185\u6682\u65e0\u5f02\u5e38\u6216\u9884\u8b66\u6307\u6807\u3002</div>
       </div>
 
       <div class="panel ai-panel-wrap">
@@ -192,14 +212,14 @@
       </div>
 
       <div class="panel">
-        <div class="panel-title"><span class="panel-icon">📈</span> 感染发病率监测</div>
-        <ControlChart name="VAP" :data="trendData['ICU-16']" :months="months" :ucl="15" unit="‰" />
-        <ControlChart name="CRBSI" :data="trendData['ICU-17']" :months="months" :ucl="5" unit="‰" />
-        <ControlChart name="CAUTI" :data="trendData['CAUTI']" :months="months" :ucl="5" unit="‰" />
+        <div class="panel-title"><span class="panel-icon">\U0001f4c8</span> \u611f\u67d3\u53d1\u75c5\u7387\u76d1\u6d4b</div>
+        <ControlChart name="VAP" :data="trendData[\'ICU-16\']" :months="months" :ucl="15" unit="\u2030" />
+        <ControlChart name="CRBSI" :data="trendData[\'ICU-17\']" :months="months" :ucl="5" unit="\u2030" />
+        <ControlChart name="CAUTI" :data="trendData[\'CAUTI\']" :months="months" :ucl="5" unit="\u2030" />
       </div>
 
       <div class="panel">
-        <div class="panel-title"><span class="panel-icon">⏱</span> 感染性休克 Bundle</div>
+        <div class="panel-title"><span class="panel-icon">\u23f1</span> \u611f\u67d3\u6027\u4f11\u514b Bundle</div>
         <div class="bundle-row">
           <div v-for="b in bundleItems" :key="b.code" class="bundle-item" :class="b.status">
             <span>{{ b.label }}</span>
@@ -209,7 +229,7 @@
       </div>
 
       <div class="panel">
-        <div class="panel-title"><span class="panel-icon">◉</span> 重点流程达标率</div>
+        <div class="panel-title"><span class="panel-icon">\u25c9</span> \u91cd\u70b9\u6d41\u7a0b\u8fbe\u6807\u7387</div>
         <div class="gauge-grid">
           <GaugeChart v-for="g in processGauges" :key="g.code"
             :name="g.shortName" :value="g.value" :unit="g.unit" :status="g.status" />
@@ -217,196 +237,31 @@
       </div>
 
       <div class="panel">
-        <div class="panel-title"><span class="panel-icon">👥</span> 人力配置与 SMR</div>
+        <div class="panel-title"><span class="panel-icon">\U0001f465</span> \u4eba\u529b\u914d\u7f6e\u4e0e SMR</div>
         <BarTargetChart :items="ratioItems" />
         <SmrChart :current="smrCurrent" :history="smrHistory" :months="months" />
       </div>
     </section>
 
-    <!-- 底部免责声明 -->
+    <!-- \u5e95\u90e8\u514d\u8d23\u58f0\u660e -->
     <footer class="db-footer">
       <div class="footer-left">
-        <span class="footer-icon">ℹ️</span>
-        数据来源：医院信息系统（HIS）| ICU质量管理系统（ICU-QMS）
+        <span class="footer-icon">\u2139\ufe0f</span>
+        \u6570\u636e\u6765\u6e90\uff1a\u533b\u9662\u4fe1\u606f\u7cfb\u7edf\uff08HIS\uff09| ICU\u8d28\u91cf\u7ba1\u7406\u7cfb\u7edf\uff08ICU-QMS\uff09
       </div>
       <div class="footer-right">
-        <span class="footer-icon">ℹ️</span>
-        本看板数据仅供医疗质量管理参考，不作为临床决策依据
+        <span class="footer-icon">\u2139\ufe0f</span>
+        \u672c\u770b\u677f\u6570\u636e\u4ec5\u4f9b\u533b\u7597\u8d28\u91cf\u7ba1\u7406\u53c2\u8003\uff0c\u4e0d\u4f5c\u4e3a\u4e34\u5e8a\u51b3\u7b56\u4f9d\u636e
       </div>
     </footer>
 
-    <Modal v-if="guideVisible" title="指标口径说明" @close="guideVisible=false">
+    <Modal v-if="guideVisible" title="\u6307\u6807\u53e3\u5f84\u8bf4\u660e" @close="guideVisible=false">
       <IndicatorGuideModal />
     </Modal>
   </div>
-</template>
+</template>'''
 
-<script setup>
-import { ref, computed, onMounted, watch } from 'vue';
-import { INDICATORS, getStatusConfig, statusText as getStatusLabel } from '../config/indicators.js';
-import { fetchCommandCenter, fetchDepartments } from '../api/index.js';
-import GaugeChart from '../components/GaugeChart.vue';
-import ControlChart from '../components/ControlChart.vue';
-import AiPanel from '../components/AiPanel.vue';
-import CensusStackChart from '../components/CensusStackChart.vue';
-import BarTargetChart from '../components/BarTargetChart.vue';
-import SmrChart from '../components/SmrChart.vue';
-import Modal from '../components/Modal.vue';
-import IndicatorGuideModal from '../components/IndicatorGuideModal.vue';
-
-const year = ref(2026);
-const sMonth = ref(6);
-const eMonth = ref(6);
-const dept = ref('all');
-const years = [2024, 2025, 2026];
-const departments = ref([]);
-const rows = ref([]);
-const rowsByCode = ref({});
-const values = ref({});
-const trendData = ref({});
-const months = ref([]);
-const risk = ref({ overall_status: 'unknown', counts: {} });
-const abnormal = ref([]);
-const ai = ref({ summary: '', hints: [], todos: [], tri_tube: {}, low_confidence: {} });
-const loading = ref(false);
-const error = ref('');
-const updatedAt = ref('');
-const statusConfig = ref(getStatusConfig());
-const guideVisible = ref(false);
-const censusData = ref(null);
-const censusTrend = ref([]);
-
-const ps = computed(() => `${year.value}-${String(sMonth.value).padStart(2, '0')}`);
-const pe = computed(() => `${year.value}-${String(eMonth.value).padStart(2, '0')}`);
-const endPeriodParam = computed(() => sMonth.value === eMonth.value ? '' : pe.value);
-
-function displayCode(code) {
-  return INDICATORS.find(i => i.code === code)?.displayCode || code;
-}
-function statusText(status) {
-  return getStatusLabel(status, statusConfig.value);
-}
-function fmtValue(v) {
-  return v == null || Number.isNaN(Number(v)) ? '/' : v;
-}
-function fmtCount(v) {
-  if (v == null || Number.isNaN(Number(v))) return '/';
-  const n = Number(v);
-  return Number.isInteger(n) ? n : Number(n.toFixed(3));
-}
-function thresholdHint(code) {
-  const ind = INDICATORS.find(i => i.code === code);
-  const cfg = statusConfig.value.thresholds?.[code];
-  const thresholds = cfg?.thresholds || ind?.thresholds;
-  const direction = cfg?.direction || ind?.direction;
-  if (!thresholds?.good || !thresholds?.warn) return '按状态配置阈值判定';
-  const good = thresholds.good;
-  const warn = thresholds.warn;
-  if (direction === 'lower_better') {
-    return `达标 <=${good[1]}，预警 <=${warn[1]}，超过为异常`;
-  }
-  if (direction === 'higher_better') {
-    return `达标 >=${good[0]}，预警 >=${warn[0]}，低于为异常`;
-  }
-  return `达标 ${good[0]}-${good[1]}，预警 ${warn[0]}-${warn[1]}，超出为异常`;
-}
-function rowItem(code, shortName = '') {
-  const row = rowsByCode.value[code];
-  if (!row || row.value == null) return null;
-  return { ...row, shortName: shortName || row.name };
-}
-
-const kpiCodes = ['ICU-01', 'ICU-04', 'ICU-06', 'ICU-11', 'ICU-16', 'ICU-17', 'CAUTI', 'ICU-19'];
-const kpiList = computed(() => kpiCodes.map(code => rowItem(code)).filter(Boolean));
-const aiTodoCount = computed(() => (ai.value.todos || []).reduce((sum, item) => sum + (item.count || 0), 0));
-const overallText = computed(() => {
-  if (risk.value.overall_status === 'danger') return '异常';
-  if (risk.value.overall_status === 'warn') return '预警';
-  if (risk.value.overall_status === 'good') return '平稳';
-  return '待刷新';
-});
-const abnormalList = computed(() => (abnormal.value || []).filter(i => {
-    if (i.status === 'unknown') return false;
-    const ind = INDICATORS.find(x => x.code === i.code);
-    return !ind?.excludeFromAlert;
-  }).slice(0, 8));
-const bundleItems = computed(() => ['ICU-05-1h', 'ICU-05-3h', 'ICU-05-6h'].map(code => {
-  const row = rowsByCode.value[code] || {};
-  return { code, label: code.replace('ICU-05-', ''), value: row.value, status: row.status || 'unknown' };
-}));
-const processGauges = computed(() => [
-  rowItem('ICU-06', '送检率'),
-  rowItem('ICU-07', 'DVT预防'),
-  rowItem('ICU-09', '镇痛评估'),
-  rowItem('ICU-10', '镇静评估'),
-  rowItem('ICU-18', '意识评估'),
-  rowItem('ICU-19', 'EN启动'),
-].filter(Boolean));
-const ratioItems = computed(() => [
-  { name: '医生床位比', value: values.value['ICU-02'] ?? 0, target: 0.8 },
-  { name: '护士床位比', value: values.value['ICU-03'] ?? 0, target: 2.5 },
-]);
-const smrCurrent = computed(() => values.value['ICU-11'] ?? 1);
-const smrHistory = computed(() => trendData.value['ICU-11'] ?? []);
-
-async function loadData(nocache = false) {
-  if (eMonth.value < sMonth.value) eMonth.value = sMonth.value;
-  loading.value = true;
-  error.value = '';
-  try {
-    const res = await fetchCommandCenter(ps.value, endPeriodParam.value, dept.value, nocache);
-    rows.value = res.rows || [];
-    rowsByCode.value = Object.fromEntries(rows.value.map(r => [r.code, r]));
-    values.value = res.values || {};
-    trendData.value = res.trend || {};
-    months.value = res.months || [];
-    risk.value = res.risk || { overall_status: 'unknown', counts: {} };
-    abnormal.value = res.abnormal || [];
-    ai.value = res.ai || { summary: '', hints: [], todos: [] };
-    updatedAt.value = res.updated_at ? res.updated_at.replace('T', ' ') : '';
-    censusData.value = res.census || null;
-    censusTrend.value = res.census_trend || [];
-  } catch (e) {
-    error.value = e.message || '大屏数据读取失败';
-    rows.value = [];
-    rowsByCode.value = {};
-    values.value = {};
-    trendData.value = {};
-    abnormal.value = [];
-  } finally {
-    loading.value = false;
-  }
-}
-
-function syncFromURL() {
-  const p = new URLSearchParams(window.location.search);
-  const dc = p.get('deptCode');
-  if (dc) dept.value = dc;
-  const y = p.get('year'); if (y) year.value = +y;
-  const sm = p.get('sMonth'); if (sm) sMonth.value = +sm;
-  const em = p.get('eMonth'); if (em) eMonth.value = +em;
-}
-function syncToURL() {
-  const u = new URL(window.location);
-  dept.value === 'all' ? u.searchParams.delete('deptCode') : u.searchParams.set('deptCode', dept.value);
-  u.searchParams.set('year', year.value);
-  u.searchParams.set('sMonth', sMonth.value);
-  u.searchParams.set('eMonth', eMonth.value);
-  window.history.replaceState({}, '', u);
-}
-watch([dept, year, sMonth, eMonth], syncToURL);
-
-onMounted(async () => {
-  window.addEventListener('status-config-updated', () => {
-    statusConfig.value = getStatusConfig();
-  });
-  syncFromURL();
-  try { departments.value = await fetchDepartments(); } catch { departments.value = []; }
-  await loadData();
-});
-</script>
-
-<style scoped>
+new_style = '''<style scoped>
 .dashboard {
   padding: 18px 24px 0;
   min-height: 100vh;
@@ -593,4 +448,13 @@ onMounted(async () => {
   .db-header { flex-direction: column; }
   .db-header-right { width: 100%; }
 }
-</style>
+</style>'''
+
+# Reassemble
+m_style = re.search(r'(<style scoped>.*?</style>)', dash, re.DOTALL)
+m_tmpl = re.search(r'(<template>.*?</template>)', dash, re.DOTALL)
+
+dash_new = dash[:m_tmpl.start()] + new_template + '\n\n' + script_section + '\n\n' + new_style + '\n'
+write("views/Dashboard.vue", dash_new)
+print("Dashboard.vue done")
+

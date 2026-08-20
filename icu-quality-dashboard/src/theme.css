@@ -1,4 +1,4 @@
-/* theme.css — ICU 质控大屏专业主题 */
+/* theme.css — ICU 质控专业主题 */
 
 :root {
   --bg-body: #f7f8fa;
@@ -13,14 +13,38 @@
   --border: #eaecef;
   --border-light: #f0f2f5;
 
-  --brand: #3b6fde;
-  --good: #15966b;
-  --warn: #c97a16;
-  --danger: #cf4040;
+  --brand: #2C8E89;
+  --brand-light: rgba(44,142,137,0.08);
+  --good: #2C8E89;
+  --warn: #E8A53D;
+  --danger: #D9534F;
+  --trend-normal: #A0A6AD;
 
   --shadow-sm: 0 1px 2px rgba(17,24,39,0.04);
   --shadow-md: 0 1px 3px rgba(17,24,39,0.06), 0 4px 12px rgba(17,24,39,0.04);
   --radius: 12px;
+
+  /* Sidebar */
+  --sidebar-width: 220px;
+  --sidebar-collapsed: 60px;
+  --sidebar-bg: #0f1a2e;
+  --sidebar-text: #94a3b8;
+  --sidebar-active: #2C8E89;
+  --sidebar-hover: rgba(44,142,137,0.15);
+}
+
+[data-theme="dark"] {
+  --bg-body: #0b1120;
+  --bg-card: #131c31;
+  --bg-hover: #1a2540;
+  --bg-header: #111827;
+  --text-main: #e2e8f0;
+  --text-sub: #94a3b8;
+  --text-faint: #64748b;
+  --border: #1e293b;
+  --border-light: #1e293b;
+  --shadow-sm: 0 1px 2px rgba(0,0,0,0.2);
+  --shadow-md: 0 2px 8px rgba(0,0,0,0.3);
 }
 
 * { margin:0; padding:0; box-sizing:border-box; }

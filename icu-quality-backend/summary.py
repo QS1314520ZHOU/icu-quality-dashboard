@@ -20,6 +20,7 @@ from db import (
     get_icu11_data, get_icu12_data, get_icu13_data, get_icu14_data, get_icu15_data,
     get_icu16_data, get_icu17_data, get_icu18_data, get_icu19_data, get_cauti_data,
     get_dvt_prevention_patients, get_icu08_data,
+    get_patient_census, get_patient_census_detail,
 )
 
 # ============================================================
@@ -217,30 +218,36 @@ def _compute_cauti(dept_codes, start, end):
 
 
 def _count_icu_patients(dept_codes, start, end):
-    """辅助：统计期内在科患者数"""
+    """辅助：统计期内在科患者数（原有 + 新入）"""
     try:
-        start_dt = datetime.fromisoformat(start)
-        end_dt = datetime.fromisoformat(end)
-        end_wide = datetime(end_dt.year, end_dt.month, end_dt.day, 23, 59, 59)
-        for db_name in BED_DB_NAMES:
-            try:
-                db = get_client(db_name)[db_name]
-                return db.patient.count_documents({
-                    "deptCode": {"$in": dept_codes}, "status": {"$ne": "invalid"},
-                    "icuAdmissionTime": {"$lte": end_wide},
-                    "$or": [{"icuDischargeTime": {"$gte": start_dt}}, {"icuDischargeTime": None},
-                            {"icuDischargeTime": {"$exists": False}}],
-                })
-            except Exception: continue
-    except Exception: pass
-    return 0
+        c = get_patient_census(dept_codes, start, end, distinct_by="admission")
+        return c["total"]
+    except Exception:
+        return 0
 
 
 # ============================================================
 # 2. 指标映射表：indicator_code → compute_function
 # ============================================================
 
+def _compute_census(dept_codes, start, end):
+    """ICU-00: 患者动态（原有/新入/出科/期末）"""
+    c = get_patient_census(dept_codes, start, end)
+    carry_in = c["carry_in"]
+    total = c["total"]
+    val = round(carry_in / total * 100, 1) if total > 0 else 0.0
+    return {
+        "num": carry_in, "den": total, "val": val, "val_type": "percent",
+        "census": {
+            "carry_in": c["carry_in"], "new_admit": c["new_admit"],
+            "discharge": c["discharge"], "carry_out": c["carry_out"],
+            "total": c["total"],
+        },
+    }
+
+
 INDICATOR_COMPUTERS = {
+    "ICU-00": _compute_census,
     "ICU-01": _compute_icu01,
     "ICU-02": _compute_icu02,
     "ICU-03": _compute_icu03,
@@ -340,14 +347,16 @@ def rebuild_summary(dept_codes: list, periods: list, indicators: list = None,
         _emit_progress(period, indicator, "started")
         year, month = period.split("-")
         start = f"{year}-{month}-01"
-        end_day = 31 if int(month) in [1,3,5,7,8,10,12] else (30 if int(month) != 2 else 28)
+        import calendar
+        end_day = calendar.monthrange(int(year), int(month))[1]
         end = f"{year}-{month}-{end_day:02d}"
         t0 = time.time()
         if indicator not in INDICATOR_COMPUTERS:
             raise ValueError(f"Unknown indicator: {indicator}")
         result = INDICATOR_COMPUTERS[indicator](dept_codes, start, end)
         elapsed = int((time.time() - t0) * 1000)
-        return {
+        census_data = result.pop("census", None)
+        doc = {
             "dept_code": ",".join(dept_codes) if len(dept_codes) > 1 else dept_codes[0],
             "period": period,
             "indicator": indicator,
@@ -358,9 +367,12 @@ def rebuild_summary(dept_codes: list, periods: list, indicators: list = None,
             "updated_at": datetime.utcnow(),
             "calc_duration_ms": elapsed,
         }
+        if census_data:
+            doc["census"] = census_data
+        return doc
 
     light_first = {
-        "ICU-01": 10, "ICU-02": 10, "ICU-03": 10,
+        "ICU-00": 10, "ICU-01": 10, "ICU-02": 10, "ICU-03": 10,
         "ICU-04": 20, "ICU-05-1h": 20, "ICU-05-3h": 20, "ICU-05-6h": 20,
         "ICU-07": 20, "ICU-08": 20, "ICU-09": 30, "ICU-10": 30,
         "ICU-12": 30, "ICU-13": 30, "ICU-14": 30, "ICU-15": 30,

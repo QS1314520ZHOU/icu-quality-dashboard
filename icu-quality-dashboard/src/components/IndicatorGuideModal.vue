@@ -22,12 +22,17 @@
       </div>
 
       <div class="formula-card">
-        <div class="fraction">
-          <div>{{ active.numerator }}</div>
-          <span></span>
-          <div>{{ active.denominator }}</div>
-        </div>
-        <strong>{{ multiplierText(active.code) }}</strong>
+        <template v-if="active.formula">
+          <div class="formula-text">{{ active.formula }}</div>
+        </template>
+        <template v-else>
+          <div class="fraction">
+            <div>{{ active.numerator }}</div>
+            <span></span>
+            <div>{{ active.denominator }}</div>
+          </div>
+          <strong>{{ multiplierText(active.code) }}</strong>
+        </template>
       </div>
 
       <div class="info-grid">
@@ -119,29 +124,30 @@ function multiplierText(code) {
 .guide-nav button { width:100%; display:flex; gap:8px; align-items:center; text-align:left;
   background:#fff; border:1px solid transparent; border-radius:8px; padding:9px 10px; cursor:pointer;
   color:#334155; margin-bottom:5px; }
-.guide-nav button:hover { background:#f8fafc; border-color:#dbeafe; }
-.guide-nav button.active { background:#eff6ff; border-color:#93c5fd; color:#1d4ed8; }
-.guide-nav span { flex-shrink:0; width:54px; font-size:12px; font-weight:800; color:#2563eb; }
+.guide-nav button:hover { background:rgba(44,142,137,0.05); border-color:rgba(44,142,137,0.2); }
+.guide-nav button.active { background:rgba(44,142,137,0.1); border-color:var(--brand); color:var(--brand); }
+.guide-nav span { flex-shrink:0; width:54px; font-size:12px; font-weight:800; color:var(--brand); }
 .guide-nav strong { min-width:0; font-size:13px; font-weight:600; white-space:nowrap; overflow:hidden; text-overflow:ellipsis; }
 .guide-body { overflow:auto; max-height:68vh; padding-right:4px; }
-.hero { display:flex; gap:14px; align-items:flex-start; background:linear-gradient(180deg,#f8fbff,#eef6ff);
-  border:1px solid #dbeafe; border-radius:10px; padding:16px; margin-bottom:14px; }
-.code { flex-shrink:0; background:#2563eb; color:#fff; border-radius:8px; padding:7px 10px;
+.hero { display:flex; gap:14px; align-items:flex-start; background:linear-gradient(180deg,#f0f9f8,#e6f4f3);
+  border:1px solid #b2dfdb; border-radius:10px; padding:16px; margin-bottom:14px; }
+.code { flex-shrink:0; background:var(--brand); color:#fff; border-radius:8px; padding:7px 10px;
   font-size:13px; font-weight:800; }
 h2 { margin:0 0 6px; font-size:20px; color:#0f172a; letter-spacing:0; }
 .hero p { margin:0; color:#475569; font-size:13px; line-height:1.7; }
 .formula-card { display:flex; align-items:center; justify-content:center; gap:18px; background:#fff;
   border:1px solid #e2e8f0; border-radius:10px; padding:18px; margin-bottom:14px; }
 .fraction { min-width:min(460px,100%); text-align:center; color:#1e293b; font-size:14px; line-height:1.6; }
+.formula-text { font-size:15px; color:#0f172a; font-weight:600; text-align:center; padding:6px 0; }
 .fraction span { display:block; height:1px; background:#334155; margin:7px 0; }
-.formula-card strong { color:#2563eb; font-size:18px; }
+.formula-card strong { color:var(--brand); font-size:18px; }
 .info-grid { display:grid; grid-template-columns:1fr 1fr; gap:12px; }
 article { background:#fff; border:1px solid #e2e8f0; border-radius:10px; padding:13px 14px; }
 article.wide { grid-column:1 / -1; }
-label { display:block; color:#2563eb; font-size:12px; font-weight:800; margin-bottom:7px; }
+label { display:block; color:var(--brand); font-size:12px; font-weight:800; margin-bottom:7px; }
 article p { margin:0; color:#334155; font-size:13px; line-height:1.75; }
 .detail-section { margin-top:14px; background:#fff; border:1px solid #e2e8f0; border-radius:10px; padding:14px 16px; }
-.detail-section h3 { margin:0 0 10px; color:#1d4ed8; font-size:14px; }
+.detail-section h3 { margin:0 0 10px; color:var(--brand); font-size:14px; }
 .branch-grid { display:grid; grid-template-columns:1fr 1fr; gap:10px; }
 .branch-card { background:#f8fafc; border:1px solid #dbe4ef; border-radius:8px; padding:11px 12px; }
 .branch-card strong { display:block; color:#0f172a; font-size:13px; margin-bottom:5px; }

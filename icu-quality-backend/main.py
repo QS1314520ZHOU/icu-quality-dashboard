@@ -3,7 +3,7 @@ from fastapi import FastAPI, BackgroundTasks
 from pydantic import BaseModel
 from datetime import date, datetime, timedelta
 from ai_analyzer import analyze, get_all_ai_decisions, override_ai_decision, ensure_ai_cache_collection as ensure_ai_cache
-from db import get_open_bed_count, get_occupied_bed_days, get_staff_count, get_icu04_apache_data, get_bundle_data, get_icu08_data, get_icu06_data, get_icu09_data, get_icu10_data, get_icu11_data, get_icu12_data, get_icu13_data, get_icu14_data, get_icu15_data, get_icu16_data, get_icu17_data, get_icu18_data, get_icu19_data, get_cauti_data, get_tri_tube_suspected_warnings, get_sepsis_alert_warnings, confirm_tri_tube_warning, get_dvt_prevention_patients, get_client, BED_DB_NAMES, PROFESSION_CN
+from db import get_open_bed_count, get_occupied_bed_days, get_staff_count, get_icu04_apache_data, get_bundle_data, get_icu08_data, get_icu06_data, get_icu09_data, get_icu10_data, get_icu11_data, get_icu12_data, get_icu13_data, get_icu14_data, get_icu15_data, get_icu16_data, get_icu17_data, get_icu18_data, get_icu19_data, get_cauti_data, get_tri_tube_suspected_warnings, get_sepsis_alert_warnings, confirm_tri_tube_warning, get_dvt_prevention_patients, get_client, BED_DB_NAMES, PROFESSION_CN, get_patient_census, get_patient_census_detail
 import random
 import os
 import sys
@@ -187,8 +187,9 @@ def rebuild_detail_cache(dept_codes: list, periods: list, indicators: list = Non
                          icu_unit: str = "all", progress_callback=None) -> dict:
     indicators = indicators or list(summary_module.INDICATOR_COMPUTERS.keys())
     stats = {"total": 0, "success": 0, "failed": 0, "errors": []}
+    census_parts = ("carry_in", "new_admit", "discharge")
     tasks = [(p, c, part) for p in periods if _is_historical_period(p)
-             for c in indicators for part in ("numerator", "denominator")]
+             for c in indicators for part in (("numerator", "denominator") if c != "ICU-00" else census_parts)]
     for period, code, part in tasks:
         try:
             if progress_callback:
@@ -354,7 +355,7 @@ def _summary_row_to_api(r: dict) -> dict:
         numerator = None
         denominator = None
         value = None
-    return {
+    result_row = {
         "code": code,
         "name": NAME_MAP.get(code, code),
         "numerator": numerator,
@@ -363,6 +364,10 @@ def _summary_row_to_api(r: dict) -> dict:
         "unit": UNIT_MAP.get(code, ""),
         "status": "unknown" if value is None else eval_status(code, value),
     }
+    census = r.get("census")
+    if census:
+        result_row["census"] = census
+    return result_row
 
 
 def _calc_value(code: str, numerator: float, denominator: float) -> float:
@@ -746,6 +751,27 @@ def query_detail(code: str, period: str, part: str, icu_unit: str = "all"):
             "admission_source": "",
             "value": total_beds * days,
         }]
+
+    # ---- ICU-00：患者动态明细 ----
+    if code == "ICU-00":
+        from db import get_patient_census_detail as _census_detail
+        items = _census_detail(dept_codes, start_date, end_date, part)
+        return [{
+            "patient_id": p.get("patient_id", ""),
+            "name": p.get("name", ""),
+            "gender": "",
+            "age": "",
+            "bed_no": p.get("hisBed", ""),
+            "dept": "",
+            "admit_time": str(p.get("icuAdmissionTime", ""))[:16],
+            "discharge_time": str(p.get("icuDischargeTime", ""))[:16],
+            "admission_source": "",
+            "value": 1,
+            "detail_id": p.get("patient_id", ""),
+            "mrn": p.get("mrn", ""),
+            "patient_type": p.get("patient_type", ""),
+            "los_days": p.get("los_days"),
+        } for p in items]
 
     # ---- ICU-08：ARDS俯卧位实施率明细 ----
     if code == "ICU-08":
@@ -1799,6 +1825,20 @@ def dashboard_command_center(period: str, end_period: str = "", icu_unit: str = 
             "description": "建议复核 ICU-06 分母中低置信度治疗/预防用药判定。",
         })
 
+    # Census data
+    census = {}
+    census_trend = []
+    try:
+        for p in periods:
+            sy, sm = [int(x) for x in p.split("-")]
+            c = get_patient_census(dept_codes, f"{sy}-{sm:02d}-01",
+                                    f"{sy}-{sm:02d}-{_month_end_day(sy, sm):02d}")
+            census_trend.append({"period": p, **c})
+        if census_trend:
+            census = census_trend[-1]
+    except Exception:
+        census = {"carry_in": 0, "new_admit": 0, "discharge": 0, "carry_out": 0, "total": 0}
+
     return {
         "period": period,
         "end_period": end_period or period,
@@ -1829,6 +1869,8 @@ def dashboard_command_center(period: str, end_period: str = "", icu_unit: str = 
             "low_confidence": low_confidence,
             "explain": "AI待办=三管疑似线索数+脓毒症早期预警+低置信度抗菌药判定数；疑似线索不等同于已确诊事件。",
         },
+        "census": census if "census" in dir() else {},
+        "census_trend": census_trend if "census_trend" in dir() else [],
         "updated_at": datetime.now().isoformat(timespec="seconds"),
     }
 
@@ -2071,6 +2113,9 @@ def indicator_detail(code: str, period: str, part: str, icu_unit: str = "all", e
             if part == "numerator"
             else "分母：同期入住ICU时间超过48小时的患者；EN禁忌证仅标注留痕，不自动剔除"
         )
+    elif code == "ICU-00":
+        part_labels = {"carry_in": "原有患者（期初在科）", "new_admit": "新入患者", "discharge": "出科患者"}
+        source_desc = part_labels.get(part, "患者动态明细")
     else:
         desc_info = SOURCE_DESC.get(code, {"numerator": "分子明细", "denominator": "分母明细"})
         source_desc = desc_info.get(part, "明细")

@@ -13,6 +13,15 @@ export const DEFAULT_STATUS_META = {
 
 export const INDICATORS = [
   {
+    code: 'ICU-00', name: '患者动态（原有/新入）', type: 'ratio', unit: '%',
+    numerator: '期初原有患者数', denominator: '同期患者总数（原有+新入）',
+    multiplier: 100, direction: 'range',
+    thresholds: { good: [0, 100], warn: [0, 100] }, // 结构指标，不做达标判定
+    excludeFromAlert: true,                          // 不计入大屏 danger/warn 计数
+    excludeFromStatusConfig: true,                   // 不在状态配置页出现
+    meaning: '反映 ICU 患者流转结构与分母构成，是各率类指标分母的拆解口径',
+    chart: 'stack',
+  },  {
     code: 'ICU-01', name: 'ICU床位使用率', type: 'ratio', unit: '%',
     numerator: '实际占用总床日数', denominator: '实际开放总床日数',
     multiplier: 100, direction: 'range', // 床位使用率太高太低都不好
@@ -213,6 +222,7 @@ export function saveStatusConfig(config) {
 
 // 阈值判定 -> 返回 'good' | 'warn' | 'danger'
 export function evalStatus(indicator, value, statusConfig = getStatusConfig()) {
+  if (indicator.excludeFromAlert) return 'unknown';
   if (value == null || Number.isNaN(Number(value))) return 'unknown';
   const cfg = statusConfig.thresholds?.[indicator.code] || indicator;
   const { good, warn } = cfg.thresholds || indicator.thresholds;

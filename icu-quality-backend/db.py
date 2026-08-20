@@ -4748,6 +4748,110 @@ def confirm_tri_tube_warning(pid: str, suspect_type: str, diagnosis_time, user_i
 # ============================================================
 # 连接测试
 # ============================================================
+def get_patient_census(dept_codes: list, start_date: str, end_date: str,
+                       distinct_by: str = "admission") -> dict:
+    """
+    carry_in (原有) : icuAdmissionTime <  期初0点 且 (未出科 或 icuDischargeTime >= 期初0点)
+    new_admit(新入) : 期初0点 <= icuAdmissionTime <= 期末23:59:59
+    discharge(出科) : 期初0点 <= icuDischargeTime  <= 期末23:59:59
+    carry_out(期末在科) = carry_in + new_admit - discharge
+    total(同期患者总数) = carry_in + new_admit
+    distinct_by: "admission"=按住院次(patient文档) / "patient"=按 mrn 去重
+    """
+    start_dt = datetime.fromisoformat(start_date)
+    end_dt = datetime.fromisoformat(end_date)
+    end_wide = datetime(end_dt.year, end_dt.month, end_dt.day, 23, 59, 59)
+    base = {"deptCode": {"$in": dept_codes}, "status": {"$ne": "invalid"}}
+    open_ = [{"icuDischargeTime": None}, {"icuDischargeTime": {"$exists": False}}]
+
+    q_carry_in = {**base, "icuAdmissionTime": {"$lt": start_dt},
+                  "$or": open_ + [{"icuDischargeTime": {"$gte": start_dt}}]}
+    q_new      = {**base, "icuAdmissionTime": {"$gte": start_dt, "$lte": end_wide}}
+    q_out      = {**base, "icuDischargeTime": {"$gte": start_dt, "$lte": end_wide}}
+
+    for db_name in BED_DB_NAMES:
+        try:
+            db = get_client(db_name)[db_name]
+            if distinct_by == "patient":
+                cnt = lambda q: len(db.patient.distinct("mrn", q))
+            else:
+                cnt = lambda q: db.patient.count_documents(q)
+            carry_in, new_admit, discharge = cnt(q_carry_in), cnt(q_new), cnt(q_out)
+            return {"carry_in": carry_in, "new_admit": new_admit,
+                    "discharge": discharge,
+                    "carry_out": carry_in + new_admit - discharge,
+                    "total": carry_in + new_admit}
+        except Exception:
+            continue
+    return {"carry_in": 0, "new_admit": 0, "discharge": 0, "carry_out": 0, "total": 0}
+
+
+def get_patient_census_detail(dept_codes: list, start_date: str, end_date: str,
+                               part: str = "carry_in") -> list:
+    """
+    返回指定 part 的患者明细列表。
+    part: carry_in / new_admit / discharge / carry_out (carry_out = carry_in + new_admit - discharge 中仍在科的)
+    """
+    start_dt = datetime.fromisoformat(start_date)
+    end_dt = datetime.fromisoformat(end_date)
+    end_wide = datetime(end_dt.year, end_dt.month, end_dt.day, 23, 59, 59)
+    base = {"deptCode": {"$in": dept_codes}, "status": {"$ne": "invalid"}}
+    open_ = [{"icuDischargeTime": None}, {"icuDischargeTime": {"$exists": False}}]
+
+    q_carry_in = {**base, "icuAdmissionTime": {"$lt": start_dt},
+                  "$or": open_ + [{"icuDischargeTime": {"$gte": start_dt}}]}
+    q_new      = {**base, "icuAdmissionTime": {"$gte": start_dt, "$lte": end_wide}}
+    q_out      = {**base, "icuDischargeTime": {"$gte": start_dt, "$lte": end_wide}}
+
+    for db_name in BED_DB_NAMES:
+        try:
+            db = get_client(db_name)[db_name]
+            if part == "carry_in":
+                q = q_carry_in
+                patient_type = "原有"
+            elif part == "new_admit":
+                q = q_new
+                patient_type = "新入"
+            elif part == "discharge":
+                q = q_out
+                patient_type = "出科"
+            elif part == "carry_out":
+                q = q_carry_in
+                patient_type = None  # 需要排除出科的
+            else:
+                return []
+
+            fields = {"_id": 1, "mrn": 1, "name": 1, "hisBed": 1,
+                      "icuAdmissionTime": 1, "icuDischargeTime": 1}
+            docs = list(db.patient.find(q, fields))
+            if part == "carry_out":
+                docs = [d for d in docs
+                        if not d.get("icuDischargeTime") or d["icuDischargeTime"] >= start_dt]
+
+            results = []
+            for d in docs:
+                admit = d.get("icuAdmissionTime")
+                discharge = d.get("icuDischargeTime")
+                los = None
+                if admit:
+                    ref = discharge or datetime.utcnow()
+                    los = (ref - admit).days
+                results.append({
+                    "patient_id": str(d.get("_id", "")),
+                    "mrn": d.get("mrn", ""),
+                    "name": d.get("name", ""),
+                    "hisBed": d.get("hisBed", ""),
+                    "icuAdmissionTime": admit.isoformat() if admit else "",
+                    "icuDischargeTime": discharge.isoformat() if discharge else "",
+                    "patient_type": patient_type or ("原有" if part == "carry_out" else ""),
+                    "los_days": los,
+                })
+            return results
+        except Exception:
+            continue
+    return []
+
+
 def test_connections() -> dict:
     """测试所有数据库连接，返回状态"""
     results = {}

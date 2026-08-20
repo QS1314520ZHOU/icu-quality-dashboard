@@ -21,6 +21,26 @@
       </div>
     </div>
 
+    <!-- 患者动态摘要条 -->
+    <div v-if="census" class="census-bar">
+      <span class="census-label">患者动态</span>
+      <span class="census-item">
+        <small>原有</small> <b>{{ census.carry_in }}</b>
+      </span>
+      <span class="census-item">
+        <small>新入</small> <b>{{ census.new_admit }}</b>
+      </span>
+      <span class="census-item">
+        <small>出科</small> <b>{{ census.discharge }}</b>
+      </span>
+      <span class="census-item">
+        <small>期末在科</small> <b>{{ census.carry_out }}</b>
+      </span>
+      <span class="census-item total">
+        <small>同期总数</small> <b>{{ census.total }}</b>
+      </span>
+    </div>
+
     <div class="table-wrap" :class="{ 'multi-month': isMultiMonth }">
       <table class="indi-table">
         <colgroup>
@@ -53,7 +73,7 @@
               <span class="formula-icon">ƒ</span>
             </td>
             <td class="num t-right link" @click="drillDetail(row,'numerator')">{{ fmtCell(row.numerator) }}</td>
-            <td class="num t-right link" @click="drillDetail(row,'denominator')">{{ fmtCell(row.denominator) }}</td>
+            <td class="num t-right link" @click="drillDetail(row,'denominator')" :title="census ? '= 原有 ' + census.carry_in + ' + 新入 ' + census.new_admit : ''">{{ fmtCell(row.denominator) }}</td>
             <td class="t-right sep link" @click="drillTrend(row)"><b class="val">{{ fmtValue(row) }}</b></td>
             <td v-for="m in monthCols" :key="row.code+m" class="t-right month-cell" :class="cellLevel(row, m)">
               {{ fmtMonth(row, m) }}
@@ -98,6 +118,8 @@
     <Transition name="toast-fade">
       <div v-if="toast.show" class="toast" :class="toast.type">{{ toast.message }}</div>
     </Transition>
+    <div class="copyright-bar">© 2026 ICU医疗质量控制中心 版权所有</div>
+    <div class="copyright-bar">© 2026 ICU医疗质量控制中心 版权所有</div>
   </div>
 </template>
 
@@ -113,6 +135,7 @@ import { fetchDepartments, fetchIndicatorList, fetchTrend as apiFetchTrend, fetc
 const year = ref(2026), startMonth = ref(6), endMonth = ref(6), unit = ref('all');
 const years = [2024, 2025, 2026];
 const rows = ref([]); const trendData = ref(null); const detailData = ref(null);
+const census = ref(null);
 const guideVisible = ref(false);
 const departments = ref([]); const deptName = ref('全部ICU');
 const refreshing = ref(false);
@@ -193,7 +216,8 @@ async function reloadRange(startPeriod, endPeriod = '', nocache = false) {
       const ind = INDICATORS.find(i => i.code === r.code);
       return ind && r.value != null ? { ...r, status: evalStatus(ind, r.value, statusConfig.value) } : r;
     });
-  } catch { rows.value = []; }
+    census.value = data.census || null;
+  } catch { rows.value = []; census.value = null; }
 }
 
 async function drillTrend(row) {
@@ -389,7 +413,7 @@ window.addEventListener('status-config-updated', () => {
   padding:7px 16px; cursor:pointer; font-size:13px; font-weight:500; }
 .guide-btn { background:#f8fafc; color:#1e3a5f; border:1px solid #cbd5e1; border-radius:7px;
   padding:7px 14px; cursor:pointer; font-size:13px; font-weight:500; }
-.guide-btn:hover { background:#eff6ff; border-color:#93c5fd; color:#1d4ed8; }
+.guide-btn:hover { background:#eff6ff; border-color:#93c5fd; color:var(--brand); }
 
 /* Toast 通知 */
 .toast { position:fixed; bottom:32px; right:32px; z-index:999;
@@ -448,7 +472,7 @@ window.addEventListener('status-config-updated', () => {
 .month-cell.alert { color: var(--warn); font-weight:500; }
 
 .formula-icon { margin-left:5px; font-style:italic; font-size:11px; color:var(--brand);
-  background:rgba(59,111,222,0.08); border-radius:3px; padding:0 4px; opacity:.5; }
+  background:var(--brand-light); border-radius:3px; padding:0 4px; opacity:.5; }
 .name:hover .formula-icon { opacity:1; }
 
 /* 状态徽章:圆点+文字 */
@@ -475,4 +499,14 @@ window.addEventListener('status-config-updated', () => {
 .tip-special .special-line { font-size:12px; line-height:1.8; color:var(--text-main); }
 .tip-note { font-size:12px; line-height:1.6; color:var(--text-main); margin-bottom:8px; }
 .tip-meaning { font-size:11px; color:var(--text-sub); padding-top:8px; border-top:1px dashed var(--border); }
+.census-bar { display:flex; align-items:center; gap:18px; padding:10px 16px; margin-bottom:10px;
+  background:linear-gradient(90deg,#f0f9ff,#f8fafc); border:1px solid #e2e8f0; border-radius:8px; }
+.census-label { font-size:12px; font-weight:700; color:var(--brand); white-space:nowrap;
+  padding-right:12px; border-right:1px solid #cbd5e1; }
+.census-item { display:flex; flex-direction:column; align-items:center; gap:2px; }
+.census-item small { font-size:11px; color:#64748b; }
+.census-item b { font-size:15px; color:#0f172a; font-family:'Cascadia Code','Consolas',monospace; }
+.census-item.total b { color:var(--brand); }
+.copyright-bar { text-align:center; padding:14px 0 6px; font-size:12px; color:var(--text-faint); }
+.copyright-bar { text-align:center; padding:14px 0 6px; font-size:12px; color:var(--text-faint); }
 </style>
