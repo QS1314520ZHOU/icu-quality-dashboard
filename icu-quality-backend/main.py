@@ -3,7 +3,7 @@ from fastapi import FastAPI, BackgroundTasks
 from pydantic import BaseModel
 from datetime import date, datetime, timedelta
 from ai_analyzer import analyze, get_all_ai_decisions, override_ai_decision, ensure_ai_cache_collection as ensure_ai_cache
-from db import get_open_bed_count, get_occupied_bed_days, get_staff_count, get_icu04_apache_data, get_bundle_data, get_icu08_data, get_icu06_data, get_icu09_data, get_icu10_data, get_icu11_data, get_icu12_data, get_icu13_data, get_icu14_data, get_icu15_data, get_icu16_data, get_icu17_data, get_icu18_data, get_icu19_data, get_cauti_data, get_tri_tube_suspected_warnings, get_sepsis_alert_warnings, confirm_tri_tube_warning, get_dvt_prevention_patients, get_client, BED_DB_NAMES, PROFESSION_CN, get_patient_census, get_patient_census_detail
+from db import assert_db_ready, get_open_bed_count, get_occupied_bed_days, get_staff_count, get_icu04_apache_data, get_bundle_data, get_icu08_data, get_icu06_data, get_icu09_data, get_icu10_data, get_icu11_data, get_icu12_data, get_icu13_data, get_icu14_data, get_icu15_data, get_icu16_data, get_icu17_data, get_icu18_data, get_icu19_data, get_cauti_data, get_tri_tube_suspected_warnings, get_sepsis_alert_warnings, confirm_tri_tube_warning, get_dvt_prevention_patients, get_client, BED_DB_NAMES, PROFESSION_CN, get_patient_census, get_patient_census_detail
 import random
 import os
 import sys
@@ -61,6 +61,11 @@ def _start_scheduler():
 
 @app.on_event("startup")
 def on_startup():
+    try:
+        available_dbs = assert_db_ready()
+        print(f"[startup] Available bed DBs: {available_dbs}")
+    except RuntimeError as e:
+        print(f"[startup] WARNING: {e}")
     summary_module.ensure_summary_collection()
     ensure_detail_cache_collection()
     ensure_ai_cache()

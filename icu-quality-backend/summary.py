@@ -9,12 +9,15 @@
   4. 幂等 upsert，可重复执行
 """
 import time
+import logging
+
+logger = logging.getLogger("summary")
 from concurrent.futures import ThreadPoolExecutor, as_completed
 from datetime import datetime, timedelta
 from typing import Optional
 from pymongo import MongoClient, ASCENDING
 from db import (
-    get_client, get_datacenter_client, BED_DB_NAMES,
+    get_client, get_datacenter_client, BED_DB_NAMES, iter_bed_dbs,
     get_open_bed_count, get_occupied_bed_days, get_staff_count,
     get_icu04_apache_data, get_bundle_data, get_icu06_data, get_icu09_data, get_icu10_data,
     get_icu11_data, get_icu12_data, get_icu13_data, get_icu14_data, get_icu15_data,
@@ -316,7 +319,7 @@ def rebuild_summary(dept_codes: list, periods: list, indicators: list = None,
     if indicators is None:
         indicators = list(INDICATOR_COMPUTERS.keys()) + MOCK_INDICATORS
 
-    stats = {"total": 0, "success": 0, "failed": 0, "errors": []}
+    stats = {"total": 0, "success": 0, "failed": 0, "skipped": 0, "errors": []}
 
     for db_name in BED_DB_NAMES:
         try:
@@ -356,6 +359,7 @@ def rebuild_summary(dept_codes: list, periods: list, indicators: list = None,
         result = INDICATOR_COMPUTERS[indicator](dept_codes, start, end)
         elapsed = int((time.time() - t0) * 1000)
         census_data = result.pop("census", None)
+        data_available = result.pop("data_available", True)
         doc = {
             "dept_code": ",".join(dept_codes) if len(dept_codes) > 1 else dept_codes[0],
             "period": period,
@@ -366,6 +370,7 @@ def rebuild_summary(dept_codes: list, periods: list, indicators: list = None,
             "value_type": result.get("val_type", "percent"),
             "updated_at": datetime.utcnow(),
             "calc_duration_ms": elapsed,
+            "data_available": data_available,
         }
         if census_data:
             doc["census"] = census_data
@@ -390,11 +395,14 @@ def rebuild_summary(dept_codes: list, periods: list, indicators: list = None,
             period, indicator = futures[future]
             try:
                 doc = future.result()
-                coll.update_one(
-                    {"dept_code": doc["dept_code"], "period": period, "indicator": indicator},
-                    {"$set": doc},
-                    upsert=True,
-                )
+                if not doc.get("data_available", True):
+                    stats["skipped"] = stats.get("skipped", 0) + 1
+                else:
+                    coll.update_one(
+                        {"dept_code": doc["dept_code"], "period": period, "indicator": indicator},
+                        {"$set": doc},
+                        upsert=True,
+                    )
                 stats["success"] += 1
 
             except Exception as e:

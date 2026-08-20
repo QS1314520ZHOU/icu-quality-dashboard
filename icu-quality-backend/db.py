@@ -7,6 +7,9 @@ from typing import Optional
 from collections import defaultdict
 import re
 from dotenv import load_dotenv
+import logging
+
+logger = logging.getLogger("db")
 
 # 加载 .env 文件。打包成二进制后，优先读取可执行文件同目录的 .env。
 import sys
@@ -19,12 +22,17 @@ if getattr(sys, "frozen", False):
 else:
     env_candidates = [
         Path(__file__).parent / ".env",
+        Path(__file__).resolve().parent.parent / ".env",
         Path.cwd() / ".env",
     ]
+_env_loaded = False
 for env_path in env_candidates:
     if env_path.exists():
         load_dotenv(env_path)
+        _env_loaded = True
         break
+if not _env_loaded:
+    print("[db] WARNING: no .env file found in any candidate path", file=sys.stderr)
 
 
 def _env(key: str, default: str = "") -> str:
@@ -50,11 +58,57 @@ DATACENTER_CFG = DBConfig("DATACENTER")
 
 # bedRecord / configBed / patient 所在的数据库，按优先级排列
 # 优先使用 .env 中 SMARTCARE_DB_AUTH 指定的库，其 _4y 变体作为兜底
-_smartcare_auth = SMARTCARE_CFG.auth_db  # e.g. "SmartCare" or "SmartCare_4y"
+_smartcare_auth = SMARTCARE_CFG.auth_db or "SmartCare"  # e.g. "SmartCare" or "SmartCare_4y"
 if _smartcare_auth.endswith("_4y"):
-    BED_DB_NAMES = [_smartcare_auth, _smartcare_auth.replace("_4y", "")]
+    BED_DB_NAMES = [_smartcare_auth, _smartcare_auth[:-3]]  # strip trailing _4y
 else:
     BED_DB_NAMES = [_smartcare_auth, _smartcare_auth + "_4y"]
+# 去空白、去重，保序
+BED_DB_NAMES = list(dict.fromkeys(name.strip() for name in BED_DB_NAMES if name.strip()))
+if not BED_DB_NAMES:
+    raise RuntimeError("BED_DB_NAMES is empty — check SMARTCARE_DB_AUTH in .env")
+
+def iter_bed_dbs():
+    """Yield (db_name, db) for each valid bed database, skipping empty names.
+    Logs a warning on connection/query errors but does not propagate them."""
+    for db_name in BED_DB_NAMES:
+        if not db_name:
+            continue
+        try:
+            db = get_client(db_name)[db_name]
+            yield db_name, db
+        except Exception as exc:
+            logger.warning("iter_bed_dbs: skipping %s — %s: %s",
+                           db_name, type(exc).__name__, exc)
+            continue
+
+
+def assert_db_ready():
+    """Validate each BED_DB_NAMES entry: non-empty, reachable, and patient collection exists.
+    Returns list of actually-available db names."""
+    available = []
+    for db_name in BED_DB_NAMES:
+        if not db_name:
+            logger.warning("assert_db_ready: skipping empty db_name")
+            continue
+        try:
+            db = get_client(db_name)[db_name]
+            db.command("ping")
+            coll_names = db.list_collection_names()
+            count = db.patient.count_documents({}, limit=1) if "patient" in coll_names else 0
+            logger.info("assert_db_ready: %s OK (patient docs: %s)", db_name, count)
+            available.append(db_name)
+        except Exception as exc:
+            logger.warning("assert_db_ready: %s FAILED — %s: %s",
+                           db_name, type(exc).__name__, exc)
+    if not available:
+        raise RuntimeError(
+            "assert_db_ready: none of the configured BED_DB_NAMES are reachable. "
+            "Check SMARTCARE_DB_AUTH and network in .env."
+        )
+    logger.info("assert_db_ready: available DBs = %s", available)
+    return available
+
 
 # ============================================================
 # 连接缓存
@@ -117,7 +171,8 @@ def get_smartcare_client() -> MongoClient:
 
 def get_datacenter_client() -> MongoClient:
     """获取 DataCenter 库的连接"""
-    return get_client(DATACENTER_CFG.auth_db or "DataCenter")
+    dc_name = DATACENTER_CFG.auth_db or "DataCenter"
+    return get_client(dc_name)
 
 
 def get_datacenter_db():
@@ -181,10 +236,8 @@ def get_open_bed_count(dept_code: str, start_date: str, end_date: str) -> int:
     except ValueError:
         return 0
 
-    for db_name in BED_DB_NAMES:
+    for db_name, db in iter_bed_dbs():
         try:
-            client = get_client(db_name)
-            db = client[db_name]
 
             # ---- Priority 1: bedRecord ----
             # deptCode 可能是逗号分隔的多科室字段，如 "JJL000283,0801,JJL000282"
@@ -202,8 +255,9 @@ def get_open_bed_count(dept_code: str, start_date: str, end_date: str) -> int:
             if config_count > 0:
                 return config_count
 
-        except Exception:
-            continue  # 当前库不可用，尝试下一个
+        except Exception as _exc:
+            logger.warning("DB %s failed in get_open_bed_count: %s", db_name, _exc)
+            continue
 
     return 0
 
@@ -250,10 +304,8 @@ def get_occupied_bed_days(dept_code: str, start_date: str, end_date: str) -> int
 
     total = 0
 
-    for db_name in BED_DB_NAMES:
+    for db_name, db in iter_bed_dbs():
         try:
-            client = get_client(db_name)
-            db = client[db_name]
 
             # 查询符合条件的患者（只取需要的字段）
             patients = list(db.patient.find(
@@ -303,7 +355,8 @@ def get_occupied_bed_days(dept_code: str, start_date: str, end_date: str) -> int
 
             break  # 有数据就不再查下一个库
 
-        except Exception:
+        except Exception as _exc:
+            logger.warning("DB %s failed in get_occupied_bed_days: %s", db_name, _exc)
             continue
 
     return total
@@ -354,9 +407,8 @@ def get_staff_count(dept_code: str, role: str) -> int:
     """
     professions = DOCTOR_PROFESSIONS if role == "doctor" else NURSE_PROFESSIONS
 
-    for db_name in BED_DB_NAMES:
+    for db_name, db in iter_bed_dbs():
         try:
-            db = get_client(db_name)[db_name]
             count = db.account.count_documents({
                 "valid": "valid",
                 "departmentCode": {"$regex": dept_code},
@@ -364,7 +416,8 @@ def get_staff_count(dept_code: str, role: str) -> int:
             })
             if count > 0:
                 return count
-        except Exception:
+        except Exception as _exc:
+            logger.warning("DB %s failed in get_staff_count: %s", db_name, _exc)
             continue
     return 0
 
@@ -388,9 +441,8 @@ def get_icu04_apache_data(dept_codes: list, start_date: str, end_date: str) -> d
 
     result = {"den_count": 0, "num_count": 0, "num_patients": [], "den_patients": []}
 
-    for db_name in BED_DB_NAMES:
+    for db_name, db in iter_bed_dbs():
         try:
-            db = get_client(db_name)[db_name]
 
             # 分母：在科患者
             den_patients = list(db.patient.find(
@@ -454,7 +506,8 @@ def get_icu04_apache_data(dept_codes: list, start_date: str, end_date: str) -> d
             result["num_patients"] = num_patients
             break
 
-        except Exception:
+        except Exception as _exc:
+            logger.warning("DB %s failed in get_icu04_apache_data: %s", db_name, _exc)
             continue
 
     return result
@@ -479,9 +532,8 @@ def get_bundle_data(dept_codes: list, start_date: str, end_date: str) -> dict:
     result = {"total": 0, "h1_num": 0, "h3_num": 0, "h6_num": 0,
               "h1_patients": [], "h3_patients": [], "h6_patients": [], "den_patients": []}
 
-    for db_name in BED_DB_NAMES:
+    for db_name, db in iter_bed_dbs():
         try:
-            db = get_client(db_name)[db_name]
 
             # 分母：diseaseDiagnosis 表 脓毒性休克
             diagnoses = list(db.diseaseDiagnosis.find(
@@ -608,7 +660,8 @@ def get_bundle_data(dept_codes: list, start_date: str, end_date: str) -> dict:
                     result["h6_patients"].append(info)
 
             break
-        except Exception:
+        except Exception as _exc:
+            logger.warning("DB %s failed in get_bundle_data: %s", db_name, _exc)
             continue
 
     return result
@@ -744,9 +797,8 @@ def get_ards_denominator(dept_codes: list, start_date: str, end_date: str,
     result = {"total": 0, "patients": []}
     seen_pids = set()
 
-    for db_name in BED_DB_NAMES:
+    for db_name, db in iter_bed_dbs():
         try:
-            db = get_client(db_name)[db_name]
 
             # Step 1: 取统计期内的血气 P/F ratio (bGATemp + bGATemp1)
             all_bga = []
@@ -772,7 +824,8 @@ def get_ards_denominator(dept_codes: list, start_date: str, end_date: str,
                         },
                     ).sort("eventExe.startTime", 1))
                     all_bga.extend(bgas)
-                except Exception:
+                except Exception as _exc:
+                    logger.warning("DB %s failed in get_ards_denominator: %s", db_name, _exc)
                     continue
 
             if not all_bga:
@@ -865,7 +918,8 @@ def get_ards_denominator(dept_codes: list, start_date: str, end_date: str,
             result["total"] = len(result["patients"])
             break
 
-        except Exception:
+        except Exception as _exc:
+            logger.warning("DB %s failed in get_ards_denominator: %s", db_name, _exc)
             continue
 
     return result
@@ -885,9 +939,8 @@ def get_ards_prone_numerator(den_patients: list, dept_codes: list) -> dict:
 
     result = {"num_count": 0, "num_patients": []}
 
-    for db_name in BED_DB_NAMES:
+    for db_name, db in iter_bed_dbs():
         try:
-            db = get_client(db_name)[db_name]
 
             for p in den_patients:
                 pid = p.get("pid", "")
@@ -900,7 +953,8 @@ def get_ards_prone_numerator(den_patients: list, dept_codes: list) -> dict:
                         {"_id": ObjectId(pid)},
                         {"icuAdmissionTime": 1, "icuDischargeTime": 1},
                     )
-                except Exception:
+                except Exception as _exc:
+                    logger.warning("DB %s failed in get_ards_prone_numerator: %s", db_name, _exc)
                     continue
 
                 if not pat or not pat.get("icuAdmissionTime"):
@@ -932,7 +986,8 @@ def get_ards_prone_numerator(den_patients: list, dept_codes: list) -> dict:
                     })
 
             break
-        except Exception:
+        except Exception as _exc:
+            logger.warning("DB %s failed in get_ards_prone_numerator: %s", db_name, _exc)
             continue
 
     return result
@@ -970,9 +1025,8 @@ def get_icu08_data(dept_codes: list, start_date: str, end_date: str,
     den_patients = []
     seen_pids = set()
 
-    for db_name in BED_DB_NAMES:
+    for db_name, db in iter_bed_dbs():
         try:
-            db = get_client(db_name)[db_name]
 
             # Step 1: 取血气 P/F
             all_bga = []
@@ -985,7 +1039,8 @@ def get_icu08_data(dept_codes: list, start_date: str, end_date: str,
                         {"eventExe.pid": 1, "eventExe.startTime": 1, "bedsides": 1, "mrn": 1},
                     ).sort("eventExe.startTime", 1))
                     all_bga.extend(bgas)
-                except Exception:
+                except Exception as _exc:
+                    logger.warning("DB %s failed in get_icu08_data: %s", db_name, _exc)
                     continue
 
             for bga in all_bga:
@@ -1067,7 +1122,8 @@ def get_icu08_data(dept_codes: list, start_date: str, end_date: str,
                 })
 
             break
-        except Exception:
+        except Exception as _exc:
+            logger.warning("DB %s failed in get_icu08_data: %s", db_name, _exc)
             continue
 
     # 分子：住院期间俯卧位
@@ -1210,10 +1266,9 @@ def get_dvt_prevention_patients(dept_codes: list, start_date: str, end_date: str
         # 通过 mrn 桥接 SmartCare patient 表，取 hisPid 和 name
         dc_mrns = [zybr_by_pid[pid].get("mrn", "") for pid in all_pids if zybr_by_pid.get(pid, {}).get("mrn")]
         smart_pat_map = {}  # mrn → {hisPid, name}
-        for db_name in BED_DB_NAMES:
+        for db_name, db in iter_bed_dbs():
             try:
-                smart_db = get_client(db_name)[db_name]
-                docs = list(smart_db.patient.find(
+                docs = list(db.patient.find(
                     {"mrn": {"$in": dc_mrns}},
                     {"mrn": 1, "hisPid": 1, "name": 1, "_id": 0},
                 ))
@@ -1221,7 +1276,8 @@ def get_dvt_prevention_patients(dept_codes: list, start_date: str, end_date: str
                     smart_pat_map[d["mrn"]] = {"hisPid": d.get("hisPid", ""), "name": d.get("name", "")}
                 if smart_pat_map:
                     break
-            except Exception:
+            except Exception as _exc:
+                logger.warning("DB %s failed in get_dvt_prevention_patients: %s", db_name, _exc)
                 continue
 
         def build_list(by_pid):
@@ -1871,9 +1927,8 @@ def get_icu06_data(dept_codes: list, start_date: str, end_date: str) -> dict:
         "low_confidence": [],
     }
 
-    for db_name in BED_DB_NAMES:
+    for db_name, db in iter_bed_dbs():
         try:
-            db = get_client(db_name)[db_name]
 
             # ---- 1. 取抗生素 drug codes (configDrug.classification='抗生素') ----
             abx_codes = [d["code"] for d in db.configDrug.find(
@@ -2199,9 +2254,8 @@ def get_icu09_data(dept_codes: list, start_date: str, end_date: str) -> dict:
     result = {"den_count": 0, "num_count": 0,
               "den_patients": [], "num_patients": []}
 
-    for db_name in BED_DB_NAMES:
+    for db_name, db in iter_bed_dbs():
         try:
-            db = get_client(db_name)[db_name]
 
             # ---- 1. 分母：在科患者 ----
             patients = list(db.patient.find(
@@ -2401,9 +2455,8 @@ def get_icu10_data(dept_codes: list, start_date: str, end_date: str) -> dict:
     result = {"den_count": 0, "num_count": 0,
               "den_patients": [], "num_patients": []}
 
-    for db_name in BED_DB_NAMES:
+    for db_name, db in iter_bed_dbs():
         try:
-            db = get_client(db_name)[db_name]
 
             # ---- 1. 分母 ----
             patients = list(db.patient.find(
@@ -2592,9 +2645,8 @@ def get_icu11_data(dept_codes: list, start_date: str, end_date: str) -> dict:
     death_types = {"死亡", "非医嘱离院"}
     closed_types = {"出院", *death_types}
 
-    for db_name in BED_DB_NAMES:
+    for db_name, db in iter_bed_dbs():
         try:
-            db = get_client(db_name)[db_name]
 
             patients = list(db.patient.find(
                 {
@@ -2738,9 +2790,8 @@ def _get_airway_tube_data(dept_codes: list, start_date: str, end_date: str) -> d
         "icu13_num_patients": [],
     }
 
-    for db_name in BED_DB_NAMES:
+    for db_name, db in iter_bed_dbs():
         try:
-            db = get_client(db_name)[db_name]
 
             patients = list(db.patient.find(
                 {"deptCode": {"$in": dept_codes}, "status": {"$ne": "invalid"}},
@@ -2899,9 +2950,8 @@ def get_icu14_data(dept_codes: list, start_date: str, end_date: str) -> dict:
         "num_patients": [],
     }
 
-    for db_name in BED_DB_NAMES:
+    for db_name, db in iter_bed_dbs():
         try:
-            db = get_client(db_name)[db_name]
             query = {
                 "deptCode": {"$in": dept_codes},
                 "status": {"$ne": "invalid"},
@@ -3063,9 +3113,8 @@ def get_icu15_data(dept_codes: list, start_date: str, end_date: str) -> dict:
         "num_patients": [],
     }
 
-    for db_name in BED_DB_NAMES:
+    for db_name, db in iter_bed_dbs():
         try:
-            db = get_client(db_name)[db_name]
             projection = {
                 "_id": 1, "hisPid": 1, "mrn": 1, "patientId": 1, "inHospitalNo": 1,
                 "name": 1, "deptCode": 1, "icuAdmissionTime": 1, "icuDischargeTime": 1,
@@ -3393,9 +3442,8 @@ def get_icu18_data(dept_codes: list, start_date: str, end_date: str) -> dict:
         "note": "",
     }
 
-    for db_name in BED_DB_NAMES:
+    for db_name, db in iter_bed_dbs():
         try:
-            db = get_client(db_name)[db_name]
             patients = list(db.patient.find(
                 {
                     "deptCode": {"$in": dept_codes},
@@ -3696,9 +3744,8 @@ def get_icu19_data(dept_codes: list, start_date: str, end_date: str) -> dict:
     end_dt_wide = dt(end_dt.year, end_dt.month, end_dt.day, 23, 59, 59)
     result = {"den_count": 0, "num_count": 0, "den_patients": [], "num_patients": []}
 
-    for db_name in BED_DB_NAMES:
+    for db_name, db in iter_bed_dbs():
         try:
-            db = get_client(db_name)[db_name]
             patients = list(db.patient.find(
                 {
                     "deptCode": {"$in": dept_codes},
@@ -4141,9 +4188,8 @@ def get_tri_tube_infection_data(code: str, dept_codes: list, start_date: str, en
         "note": "",
     }
 
-    for db_name in BED_DB_NAMES:
+    for db_name, db in iter_bed_dbs():
         try:
-            db = get_client(db_name)[db_name]
             pat_by_pid = _tri_tube_patient_scope(db, dept_codes, start_dt, end_dt_wide)
             if not pat_by_pid:
                 continue
@@ -4503,9 +4549,8 @@ def get_sepsis_alert_warnings(dept_codes: list, start_date: str, end_date: str, 
     end_dt_wide = dt(end_dt.year, end_dt.month, end_dt.day, 23, 59, 59)
     warnings = []
 
-    for db_name in BED_DB_NAMES:
+    for db_name, db in iter_bed_dbs():
         try:
-            db = get_client(db_name)[db_name]
             pat_by_pid = _tri_tube_patient_scope(db, dept_codes, start_dt, end_dt_wide)
             if not pat_by_pid:
                 continue
@@ -4658,9 +4703,8 @@ def get_tri_tube_suspected_warnings(dept_codes: list, start_date: str, end_date:
     end_dt_wide = dt(end_dt.year, end_dt.month, end_dt.day, 23, 59, 59)
     warnings = []
 
-    for db_name in BED_DB_NAMES:
+    for db_name, db in iter_bed_dbs():
         try:
-            db = get_client(db_name)[db_name]
             pat_by_pid = _tri_tube_patient_scope(db, dept_codes, start_dt, end_dt_wide)
             if not pat_by_pid:
                 continue
@@ -4719,8 +4763,7 @@ def confirm_tri_tube_warning(pid: str, suspect_type: str, diagnosis_time, user_i
     if not cfg:
         raise ValueError("unsupported suspect_type")
     from bson import ObjectId
-    for db_name in BED_DB_NAMES:
-        db = get_client(db_name)[db_name]
+    for db_name, db in iter_bed_dbs():
         patient = None
         if len(pid) == 24:
             try:
@@ -4769,9 +4812,8 @@ def get_patient_census(dept_codes: list, start_date: str, end_date: str,
     q_new      = {**base, "icuAdmissionTime": {"$gte": start_dt, "$lte": end_wide}}
     q_out      = {**base, "icuDischargeTime": {"$gte": start_dt, "$lte": end_wide}}
 
-    for db_name in BED_DB_NAMES:
+    for db_name, db in iter_bed_dbs():
         try:
-            db = get_client(db_name)[db_name]
             if distinct_by == "patient":
                 cnt = lambda q: len(db.patient.distinct("mrn", q))
             else:
@@ -4781,7 +4823,8 @@ def get_patient_census(dept_codes: list, start_date: str, end_date: str,
                     "discharge": discharge,
                     "carry_out": carry_in + new_admit - discharge,
                     "total": carry_in + new_admit}
-        except Exception:
+        except Exception as _exc:
+            logger.warning("DB %s failed in get_patient_census: %s", db_name, _exc)
             continue
     return {"carry_in": 0, "new_admit": 0, "discharge": 0, "carry_out": 0, "total": 0}
 
@@ -4803,9 +4846,8 @@ def get_patient_census_detail(dept_codes: list, start_date: str, end_date: str,
     q_new      = {**base, "icuAdmissionTime": {"$gte": start_dt, "$lte": end_wide}}
     q_out      = {**base, "icuDischargeTime": {"$gte": start_dt, "$lte": end_wide}}
 
-    for db_name in BED_DB_NAMES:
+    for db_name, db in iter_bed_dbs():
         try:
-            db = get_client(db_name)[db_name]
             if part == "carry_in":
                 q = q_carry_in
                 patient_type = "原有"
@@ -4847,7 +4889,8 @@ def get_patient_census_detail(dept_codes: list, start_date: str, end_date: str,
                     "los_days": los,
                 })
             return results
-        except Exception:
+        except Exception as _exc:
+            logger.warning("DB %s failed in get_patient_census_detail: %s", db_name, _exc)
             continue
     return []
 
