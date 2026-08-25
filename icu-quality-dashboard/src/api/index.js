@@ -137,3 +137,25 @@ export async function getRefreshStatus(taskId) {
   const res = await fetch(`${BASE}/refresh/${encodeURIComponent(taskId)}`);
   return res.json();
 }
+
+// ---- 人工排除 ----
+export async function fetchExclusions(code, period, icuUnit = 'all') {
+  const resp = await fetch(`${BASE}/indicators/${code}/exclusions?period=${period}&icu_unit=` + encodeURIComponent(icuUnit));
+  return resp.json();
+}
+
+export async function addExclusion(code, body) {
+  const resp = await fetch(`${BASE}/indicators/${code}/exclusions`, {
+    method: 'POST',
+    headers: { 'Content-Type': 'application/json' },
+    body: JSON.stringify(body),
+  });
+  return resp.json();
+}
+
+export async function removeExclusion(code, exclusionKey, period, icuUnit = 'all') {
+  const resp = await fetch(`${BASE}/indicators/${code}/exclusions/${encodeURIComponent(exclusionKey)}?period=${period}&icu_unit=` + encodeURIComponent(icuUnit), {
+    method: 'DELETE',
+  });
+  return resp.json();
+}

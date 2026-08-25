@@ -109,8 +109,20 @@ export async function exportDetailExcel(opts) {
     [],  // 空行
   ];
 
-  const headerRow = cols.map(c => c.header);
-  const dataRows = allRows.map(row => cols.map(c => c.get(row)));
+  const isExclusionSupported = code === 'ICU-08';
+  const EXCL_REASON_MAP = {
+    non_ards: '\u975eARDS\u539f\u56e0\u4f4e\u6c27', unstable_gas: '\u6c27\u5408\u6570\u636e\u975e\u7a33\u5b9a\u72b6\u6001',
+    contraindic: '\u5b58\u5728\u4fef\u5367\u4f4d\u7981\u5fcc\u75c7', terminal: '\u7ec8\u672b\u671f\u6216\u5bb6\u5c5e\u653e\u5f03\u79ef\u6781\u6cbb\u7597',
+    data_error: 'PEEP\u6216\u6c27\u7597\u9014\u5f84\u8bb0\u5f55\u9519\u8bef', other: '\u5176\u4ed6',
+  };
+  const exclHeaders = isExclusionSupported ? ['\u662f\u5426\u6392\u9664', '\u6392\u9664\u539f\u56e0', '\u64cd\u4f5c\u4eba', '\u6392\u9664\u65f6\u95f4'] : [];
+  const headerRow = [...cols.map(c => c.header), ...exclHeaders];
+  const dataRows = allRows.map(row => [...cols.map(c => c.get(row)), ...(isExclusionSupported ? [
+    row.excluded ? '\u662f' : '\u5426',
+    row.excluded ? (EXCL_REASON_MAP[row.reason_code] || row.reason_code || '') : '',
+    row.excluded ? (row.operator || '') : '',
+    row.excluded ? (row.excluded_at || '') : '',
+  ] : [])]);
 
   const aoa = [...metaRows, headerRow, ...dataRows];
   const ws = XLSX.utils.aoa_to_sheet(aoa);

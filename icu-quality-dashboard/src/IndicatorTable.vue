@@ -70,6 +70,7 @@
             <td class="code t-left">{{ displayCode(row.code) }}</td>
             <td class="name t-left" @mouseenter="showTip($event, row.code)" @mouseleave="hideTip">
               <span class="name-txt">{{ row.name }}</span>
+              <span v-if="row.excluded_den > 0" class="excl-badge" :title="`原始分母  例，人工排除  例，实际计入  例`">口径已调整</span>
               <span class="formula-icon">ƒ</span>
             </td>
             <td class="num t-right link" @click="drillDetail(row,'numerator')">{{ fmtCell(row.numerator) }}</td>
@@ -509,4 +510,5 @@ window.addEventListener('status-config-updated', () => {
 .census-item.total b { color:var(--brand); }
 .copyright-bar { text-align:center; padding:14px 0 6px; font-size:12px; color:var(--text-faint); }
 .copyright-bar { text-align:center; padding:14px 0 6px; font-size:12px; color:var(--text-faint); }
+.excl-badge { display: inline-block; margin-left: 6px; font-size: 10px; color: #E8A53D; background: rgba(232,165,61,0.1); border: 1px solid rgba(232,165,61,0.3); border-radius: 4px; padding: 1px 6px; font-weight: 600; vertical-align: middle; }
 </style>

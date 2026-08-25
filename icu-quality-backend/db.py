@@ -39,6 +39,17 @@ def _env(key: str, default: str = "") -> str:
     return os.getenv(key, default).strip()
 
 
+
+def build_exclusion_key(pid: str, event_time) -> str:
+    # type: (str, object) -> str
+    """生成稳定的排除键: pid|YYYYMMDDHHMM"""
+    if isinstance(event_time, datetime):
+        ts = event_time.strftime("%Y%m%d%H%M")
+    else:
+        ts = str(event_time)[:16].replace("-", "").replace(" ", "").replace(":", "")
+    return pid + "|" + ts
+
+
 # ============================================================
 # 数据库连接配置
 # ============================================================
@@ -983,6 +994,7 @@ def get_ards_prone_numerator(den_patients: list, dept_codes: list) -> dict:
                         "name": p.get("name", ""),
                         "prone_times": [r["time"] for r in prone_records[:10]],
                         "prone_count": len(prone_records),
+                        "exclusion_key": p.get("exclusion_key", ""),
                     })
 
             break
@@ -1119,6 +1131,7 @@ def get_icu08_data(dept_codes: list, start_date: str, end_date: str,
                     "pf_ratio": pf_ratio, "peep": peep_val,
                     "o2_route": o2_raw, "arm": arm, "flow_val": flow_val if arm == "高流量" else None,
                     "pf_time": pf_time,
+                    "exclusion_key": build_exclusion_key(pid, pf_time),
                 })
 
             break

@@ -68,6 +68,7 @@ def on_startup():
         print(f"[startup] WARNING: {e}")
     summary_module.ensure_summary_collection()
     ensure_detail_cache_collection()
+    ensure_exclusion_collection()
     ensure_ai_cache()
     _start_scheduler()
 
@@ -108,6 +109,66 @@ def _get_detail_cache_collection():
         except Exception:
             continue
     return None
+
+
+EXCLUSION_COLLECTION = "icu_indicator_exclusion"
+
+
+def _get_exclusion_collection():
+    for db_name in BED_DB_NAMES:
+        try:
+            db = get_client(db_name)[db_name]
+            return db[EXCLUSION_COLLECTION]
+        except Exception:
+            continue
+    return None
+
+
+def ensure_exclusion_collection():
+    coll = _get_exclusion_collection()
+    if coll is None:
+        return
+    try:
+        coll.create_index(
+            [("dept_code", 1), ("period", 1), ("code", 1), ("exclusion_key", 1)],
+            unique=True, background=True,
+        )
+        coll.create_index([("code", 1), ("period", 1)], background=True)
+    except Exception as e:
+        print(f"[exclusion] ensure index failed: {e}")
+
+
+def _invalidate_detail_cache(dept_codes, period, code):
+    coll = _get_detail_cache_collection()
+    if coll is None:
+        return
+    try:
+        coll.delete_many({"dept_code": _dept_cache_key(dept_codes), "period": period, "code": code})
+    except Exception:
+        pass
+
+
+def _trigger_summary_rebuild(dept_codes, periods, indicators=None):
+    try:
+        summary_module.rebuild_summary(dept_codes, periods, indicators=indicators)
+    except Exception:
+        pass
+
+
+def _get_exclusion_map(dept_codes, period, code):
+    dept_key = _dept_cache_key(dept_codes)
+    for db_name in BED_DB_NAMES:
+        try:
+            db = get_client(db_name)[db_name]
+            coll = db[EXCLUSION_COLLECTION]
+            docs = list(coll.find(
+                {"dept_code": dept_key, "period": period, "code": code, "excluded": True},
+                {"exclusion_key": 1, "reason_code": 1, "reason_text": 1, "operator": 1, "_id": 0}
+            ))
+            return {d["exclusion_key"]: d for d in docs}
+        except Exception:
+            continue
+    return {}
 
 
 def ensure_detail_cache_collection():
@@ -782,6 +843,7 @@ def query_detail(code: str, period: str, part: str, icu_unit: str = "all"):
     if code == "ICU-08":
         data = get_icu08_data(dept_codes, start_date, end_date)
         if part == "numerator":
+            _ek_map = {p.get("pid"): p.get("exclusion_key", "") for p in data.get("den_patients", [])}
             items = []
             for p in data.get("num_patients", []):
                 items.append({
@@ -794,9 +856,23 @@ def query_detail(code: str, period: str, part: str, icu_unit: str = "all"):
                     "discharge_time": "",
                     "admission_source": "",
                     "value": p.get("prone_count", 0),
+                    "exclusion_key": p.get("exclusion_key", "") or _ek_map.get(p.get("pid", ""), ""),
+                    "pid_ref": p.get("pid", ""),
                 })
+            excl_map = _get_exclusion_map(dept_codes, period, code)
+            for item in items:
+                ek = item.get("exclusion_key", "")
+                if ek in excl_map:
+                    item["excluded"] = True
+                    item["reason_code"] = excl_map[ek].get("reason_code", "")
+                    item["reason_text"] = excl_map[ek].get("reason_text", "")
+                    item["operator"] = excl_map[ek].get("operator", "")
+                else:
+                    item["excluded"] = False
             return items
         else:
+            # Build pid->exclusion_key map from den_patients
+            _ek_map = {p.get("pid"): p.get("exclusion_key", "") for p in data.get("den_patients", [])}
             items = []
             for p in data.get("den_patients", []):
                 flow_v = p.get('flow_val')
@@ -811,7 +887,19 @@ def query_detail(code: str, period: str, part: str, icu_unit: str = "all"):
                     "discharge_time": str(p.get("pf_time", ""))[:16] if p.get("pf_time") else "",
                     "admission_source": "",
                     "value": round(p.get('pf_ratio', 0), 1) if isinstance(p.get('pf_ratio'), (int, float)) else p.get('pf_ratio', 0),
+                    "exclusion_key": p.get("exclusion_key", ""),
+                    "pid_ref": p.get("pid", ""),
                 })
+            excl_map = _get_exclusion_map(dept_codes, period, code)
+            for item in items:
+                ek = item.get("exclusion_key", "")
+                if ek in excl_map:
+                    item["excluded"] = True
+                    item["reason_code"] = excl_map[ek].get("reason_code", "")
+                    item["reason_text"] = excl_map[ek].get("reason_text", "")
+                    item["operator"] = excl_map[ek].get("operator", "")
+                else:
+                    item["excluded"] = False
             return items
 
     # ---- ICU-04：从 score 表取 APACHEⅡ 明细 ----
@@ -2141,6 +2229,94 @@ def indicator_detail(code: str, period: str, part: str, icu_unit: str = "all", e
     paged["patients"] = items[offset:offset + limit]
     paged.pop("all_patients", None)
     return paged
+
+
+# ============================================================
+# 人工排除 CRUD 接口
+# ============================================================
+
+@app.get("/api/indicators/{code}/exclusions")
+def get_exclusions(code: str, period: str, icu_unit: str = "all"):
+    dept_codes = _resolve_dept_codes(icu_unit)
+    dept_key = _dept_cache_key(dept_codes)
+    for db_name in BED_DB_NAMES:
+        try:
+            db = get_client(db_name)[db_name]
+            coll = db[EXCLUSION_COLLECTION]
+            docs = list(coll.find(
+                {"dept_code": dept_key, "period": period, "code": code},
+                {"_id": 0},
+            ).sort("created_at", -1))
+            return {"exclusions": docs}
+        except Exception:
+            continue
+    return {"exclusions": []}
+
+
+@app.post("/api/indicators/{code}/exclusions")
+def add_exclusion(code: str, body: dict = None):
+    if not body:
+        return {"error": "Missing body"}
+    dept_codes = _resolve_dept_codes(body.get("icu_unit", "all"))
+    dept_key = _dept_cache_key(dept_codes)
+    now = datetime.utcnow()
+    doc = {
+        "dept_code": dept_key,
+        "period": body["period"],
+        "code": code,
+        "exclusion_key": body["exclusion_key"],
+        "patient_id": body.get("patient_id", ""),
+        "name": body.get("name", ""),
+        "excluded": True,
+        "reason_code": body.get("reason_code", ""),
+        "reason_text": body.get("reason_text", ""),
+        "operator": body.get("operator", ""),
+        "created_at": now,
+        "updated_at": now,
+        "history": [{"action": "exclude", "time": now, "operator": body.get("operator", ""),
+                      "reason_code": body.get("reason_code", ""), "reason_text": body.get("reason_text", "")}],
+    }
+    for db_name in BED_DB_NAMES:
+        try:
+            db = get_client(db_name)[db_name]
+            coll = db[EXCLUSION_COLLECTION]
+            coll.update_one(
+                {"dept_code": dept_key, "period": body["period"], "code": code,
+                 "exclusion_key": body["exclusion_key"]},
+                {"$set": doc, "$push": {"history": doc["history"][0]}},
+                upsert=True,
+            )
+            _invalidate_detail_cache(dept_codes, body["period"], code)
+            _trigger_summary_rebuild(dept_codes, [body["period"]], indicators=[code])
+            return {"ok": True}
+        except Exception:
+            continue
+    return {"error": "Database unavailable"}
+
+
+@app.delete("/api/indicators/{code}/exclusions/{exclusion_key}")
+def remove_exclusion(code: str, exclusion_key: str, period: str = "", icu_unit: str = "all"):
+    dept_codes = _resolve_dept_codes(icu_unit)
+    dept_key = _dept_cache_key(dept_codes)
+    now = datetime.utcnow()
+    for db_name in BED_DB_NAMES:
+        try:
+            db = get_client(db_name)[db_name]
+            coll = db[EXCLUSION_COLLECTION]
+            result = coll.update_one(
+                {"dept_code": dept_key, "period": period, "code": code,
+                 "exclusion_key": exclusion_key},
+                {"$set": {"excluded": False, "updated_at": now},
+                 "$push": {"history": {"action": "restore", "time": now, "operator": "system",
+                                       "reason_code": "", "reason_text": ""}}},
+            )
+            if result.modified_count:
+                _invalidate_detail_cache(dept_codes, period, code)
+                _trigger_summary_rebuild(dept_codes, [period], indicators=[code])
+            return {"ok": True}
+        except Exception:
+            continue
+    return {"error": "Database unavailable"}
 
 
 class TriTubeConfirmPayload(BaseModel):

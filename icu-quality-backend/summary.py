@@ -103,13 +103,65 @@ def _compute_icu07(dept_codes, start, end):
     return {"num": num, "den": den, "val": val, "val_type": "percent"}
 
 
+
+EXCLUSION_COLLECTION = "icu_indicator_exclusion"
+
+
+def apply_exclusions(code, dept_codes, period, num_items, den_items):
+    # type: (str, list, str, list, list) -> dict
+    """
+    从分子/分母明细中剔除已排除的记录。
+    返回 {num_items, den_items, excluded_num, excluded_den, raw_num, raw_den}
+    """
+    dept_key = ",".join(dept_codes) if len(dept_codes) > 1 else dept_codes[0]
+    excluded_keys = set()
+    for db_name in BED_DB_NAMES:
+        try:
+            db = get_client(db_name)[db_name]
+            coll = db[EXCLUSION_COLLECTION]
+            docs = coll.find(
+                {"dept_code": dept_key, "period": period, "code": code, "excluded": True},
+                {"exclusion_key": 1, "_id": 0},
+            )
+            excluded_keys = {d["exclusion_key"] for d in docs}
+            break
+        except Exception:
+            continue
+
+    raw_num = len(num_items)
+    raw_den = len(den_items)
+
+    filtered_num = [item for item in num_items if item.get("exclusion_key") not in excluded_keys]
+    filtered_den = [item for item in den_items if item.get("exclusion_key") not in excluded_keys]
+
+    return {
+        "num_items": filtered_num,
+        "den_items": filtered_den,
+        "excluded_num": raw_num - len(filtered_num),
+        "excluded_den": raw_den - len(filtered_den),
+        "raw_num": raw_num,
+        "raw_den": raw_den,
+    }
+
+
 def _compute_icu08(dept_codes, start, end):
-    """ICU-08: ARDS俯卧位实施率"""
+    """ICU-08: ARDS俯卧位实施率（支持人工排除）"""
     d = get_icu08_data(dept_codes, start, end)
-    num = d["num_count"]
-    den = d["den_count"]
+    period = start[:7]  # "YYYY-MM"
+    ex = apply_exclusions("ICU-08", dept_codes, period,
+                          d.get("num_patients", []), d.get("den_patients", []))
+    raw_num = ex["raw_num"]
+    raw_den = ex["raw_den"]
+    excluded_num = ex["excluded_num"]
+    excluded_den = ex["excluded_den"]
+    num = raw_num - excluded_num
+    den = raw_den - excluded_den
     val = round(num / den * 100, 1) if den > 0 else 0.0
-    return {"num": num, "den": den, "val": val, "val_type": "percent"}
+    return {
+        "num": num, "den": den, "val": val, "val_type": "percent",
+        "raw_num": raw_num, "raw_den": raw_den,
+        "excluded_num": excluded_num, "excluded_den": excluded_den,
+    }
 
 
 def _compute_icu09(dept_codes, start, end):
@@ -360,6 +412,10 @@ def rebuild_summary(dept_codes: list, periods: list, indicators: list = None,
         elapsed = int((time.time() - t0) * 1000)
         census_data = result.pop("census", None)
         data_available = result.pop("data_available", True)
+        raw_num = result.pop("raw_num", None)
+        raw_den = result.pop("raw_den", None)
+        excluded_num = result.pop("excluded_num", None)
+        excluded_den = result.pop("excluded_den", None)
         doc = {
             "dept_code": ",".join(dept_codes) if len(dept_codes) > 1 else dept_codes[0],
             "period": period,
@@ -374,6 +430,11 @@ def rebuild_summary(dept_codes: list, periods: list, indicators: list = None,
         }
         if census_data:
             doc["census"] = census_data
+        if raw_num is not None:
+            doc["raw_num"] = raw_num
+            doc["raw_den"] = raw_den
+            doc["excluded_num"] = excluded_num
+            doc["excluded_den"] = excluded_den
         return doc
 
     light_first = {
