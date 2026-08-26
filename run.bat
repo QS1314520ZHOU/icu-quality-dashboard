@@ -24,7 +24,15 @@ cd ..
 echo [2/3] Checking and installing Vue frontend dependencies...
 cd icu-quality-dashboard
 call npm install
+echo.
+echo [2.5/3] Building Vue frontend...
+call npm run build
 cd ..
+
+:: Sync built frontend to backend static directory
+echo [2.6/3] Syncing frontend dist to backend...
+if not exist "icu-quality-backend\frontend_dist" mkdir "icu-quality-backend\frontend_dist"
+xcopy /E /Y /Q "icu-quality-dashboard\dist\*" "icu-quality-backend\frontend_dist\"
 
 echo [3/3] Starting frontend and backend services in parallel...
 echo Backend server will run at http://localhost:%BACKEND_PORT%

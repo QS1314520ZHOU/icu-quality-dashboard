@@ -1,4 +1,4 @@
-<template>
+﻿<template>
   <div class="table-page">
     <!-- 顶部筛选条 -->
     <div class="filter-bar">
@@ -24,16 +24,16 @@
     <!-- 患者动态摘要条 -->
     <div v-if="census" class="census-bar">
       <span class="census-label">患者动态</span>
-      <span class="census-item">
+      <span class="census-item clickable" @click="drillCensus('carry_in', '原有患者')">
         <small>原有</small> <b>{{ census.carry_in }}</b>
       </span>
-      <span class="census-item">
+      <span class="census-item clickable" @click="drillCensus('new_admit', '新入患者')">
         <small>新入</small> <b>{{ census.new_admit }}</b>
       </span>
-      <span class="census-item">
+      <span class="census-item clickable" @click="drillCensus('discharge', '出科患者')">
         <small>出科</small> <b>{{ census.discharge }}</b>
       </span>
-      <span class="census-item">
+      <span class="census-item clickable" @click="drillCensus('carry_out', '期末在科')">
         <small>期末在科</small> <b>{{ census.carry_out }}</b>
       </span>
       <span class="census-item total">
@@ -217,13 +217,23 @@ async function reloadRange(startPeriod, endPeriod = '', nocache = false) {
       const ind = INDICATORS.find(i => i.code === r.code);
       return ind && r.value != null ? { ...r, status: evalStatus(ind, r.value, statusConfig.value) } : r;
     });
-    census.value = data.census || null;
+    const icu00 = data.find(r => r.code === 'ICU-00'); census.value = icu00?.census || null;
   } catch { rows.value = []; census.value = null; }
 }
 
 async function drillTrend(row) {
   if (row.value == null) return;
   try { trendData.value = await apiFetchTrend(row.code, year.value, unit.value, startMonth.value, endMonth.value); } catch { /* */ }
+}
+async function drillCensus(part, label) {
+  const endP = isMultiMonth.value ? periodEnd.value : '';
+  const base = { code: 'ICU-00', name: label, part, count: 0, source_desc: '明细加载中...', patients: [], loading: true };
+  detailData.value = base;
+  try {
+    detailData.value = await apiFetchDetail('ICU-00', period.value, part, unit.value, endP, { limit: 200, offset: 0 });
+  } catch (e) {
+    detailData.value = { ...base, loading: false, error: e.message || '明细加载失败', source_desc: '明细加载失败' };
+  }
 }
 async function drillDetail(row, part) {
   if (row[part] == null) return;
@@ -505,6 +515,8 @@ window.addEventListener('status-config-updated', () => {
 .census-label { font-size:12px; font-weight:700; color:var(--brand); white-space:nowrap;
   padding-right:12px; border-right:1px solid #cbd5e1; }
 .census-item { display:flex; flex-direction:column; align-items:center; gap:2px; }
+.census-item.clickable { cursor:pointer; padding:4px 8px; border-radius:6px; transition:background .15s; }
+.census-item.clickable:hover { background:rgba(44,142,137,0.1); }
 .census-item small { font-size:11px; color:#64748b; }
 .census-item b { font-size:15px; color:#0f172a; font-family:'Cascadia Code','Consolas',monospace; }
 .census-item.total b { color:var(--brand); }

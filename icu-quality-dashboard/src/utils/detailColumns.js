@@ -1,4 +1,4 @@
-// src/utils/detailColumns.js
+﻿// src/utils/detailColumns.js
 // ============================================================
 // 指标明细「单一数据源」列定义
 // DetailModal.vue（渲染表头/单元格）与 exportExcel.js（导出）共同调用，
@@ -93,6 +93,8 @@ function resolveDefaultCols(code, part) {
   return [
     { header: resolveCol3Header(code, part), get: (p) => fmtText(p.bed_no) },
     { header: resolveCol4Header(code, part), get: (p) => fmtDate(p.admit_time) },
+    { header: '入科类型', get: (p) => fmtText(p.admission_type) },
+    { header: '出科类型', get: (p) => fmtText(p.discharge_type) },
     { header: resolveCol5Header(code, part), get: (p) => fmtText(p.value ?? '—') },
   ]
 }
@@ -283,6 +285,21 @@ export function getDetailColumns(code, part) {
       { header: '评分中文名', get: (p) => fmtText(p.dept) },
       { header: '分值',       get: (p) => fmtText(p.value ?? '—') },
       { header: '评估时间',   get: (p) => fmtDate(p.admit_time) },
+    ]
+  }
+
+  // ---- ICU-00：患者动态（原有/新入/出科） ----
+  if (code === 'ICU-00') {
+    return [
+      COL_PATIENT_ID,
+      COL_NAME,
+      { header: '患者类型', get: (p) => fmtText(p.patient_type) },
+      { header: '床号',     get: (p) => fmtText(p.bed_no) },
+      { header: '入科时间', get: (p) => fmtDate(p.admit_time) },
+      { header: '出科时间', get: (p) => fmtDate(p.discharge_time) },
+      { header: '入科类型', get: (p) => fmtText(p.admission_type) },
+      { header: '出科类型', get: (p) => fmtText(p.discharge_type) },
+      { header: '住院天数', get: (p) => fmtText(p.los_days != null ? p.los_days + '天' : '/') },
     ]
   }
 

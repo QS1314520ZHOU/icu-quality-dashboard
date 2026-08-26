@@ -1,4 +1,4 @@
-<template>
+﻿<template>
   <div>
     <div class="source">
       <span class="tag">数据源</span>{{ data.source_desc }}
@@ -35,13 +35,22 @@
         <p class="tri-basis">{{ columns[columns.length - 1]?.get(p) }}</p>
       </article>
     </div>
+    <!-- ICU-00 患者类型筛选 -->
+    <div v-if="hasPatientType && data.patients?.length" class="census-filter">
+      <span class="filter-label">筛选：</span>
+      <button :class="['filter-btn', { active: !patientTypeFilter }]" @click="patientTypeFilter = ''">全部</button>
+      <button :class="['filter-btn', { active: patientTypeFilter === '原有' }]" @click="patientTypeFilter = '原有'">原有</button>
+      <button :class="['filter-btn', { active: patientTypeFilter === '新入' }]" @click="patientTypeFilter = '新入'">新入</button>
+      <button :class="['filter-btn', { active: patientTypeFilter === '出科' }]" @click="patientTypeFilter = '出科'">出科</button>
+      <span class="filter-count">共 {{ filteredPatients.length }} 例</span>
+    </div>
     <!-- 通用表格（共享列定义） -->
-    <table v-else class="detail-table">
+    <table v-if="data.patients?.length && !isSummary && !isTriTube" class="detail-table">
       <thead>
         <tr><th v-for="c in columns" :key="c.header">{{ c.header }}</th><th v-if="canExclude">操作</th></tr>
       </thead>
       <tbody>
-        <tr v-for="p in data.patients" :key="p.detail_id || p.patient_id" :class="[rowClass(p), p.excluded ? 'excluded-row' : '']"
+        <tr v-for="p in filteredPatients" :key="p.detail_id || p.patient_id" :class="[rowClass(p), p.excluded ? 'excluded-row' : '']"
             :title="p.admission_source === 'low_confidence' ? '⚠️ AI判定置信度<0.6，待人工复核' : ''">
           <td v-for="c in columns" :key="c.header" :class="{ mono: c.header === '住院号' || c.header === '账号' }">
             {{ c.get(p) }}
@@ -120,6 +129,13 @@ const EXCL_REASONS = [
 const EXCLUSION_SUPPORTED_CODES = ['ICU-08'];
 const canExclude = computed(() => EXCLUSION_SUPPORTED_CODES.includes(props.data?.code));
 const excludedCount = computed(() => (props.data?.patients || []).filter(p => p.excluded).length);
+const patientTypeFilter = ref('');
+const hasPatientType = computed(() => ['ICU-00','ICU-04','ICU-07','ICU-09','ICU-10'].includes(props.data?.code) && props.data?.part === 'denominator');
+const filteredPatients = computed(() => {
+  const list = props.data?.patients || [];
+  if (!hasPatientType.value || !patientTypeFilter.value) return list;
+  return list.filter(p => p.patient_type === patientTypeFilter.value);
+});
 
 function getReasonLabel(code) {
   return EXCL_REASONS.find(r => r.code === code)?.label || code;
@@ -283,4 +299,10 @@ tr.excluded-row td { text-decoration: line-through; }
 .btn-cancel { padding: 7px 16px; border: 1px solid #d1d5db; border-radius: 6px; background: #fff; font-size: 13px; cursor: pointer; }
 .btn-confirm { padding: 7px 16px; border: none; border-radius: 6px; background: #D9534F; color: #fff; font-size: 13px; cursor: pointer; }
 .btn-confirm:disabled { opacity: 0.5; cursor: not-allowed; }
+.census-filter { display: flex; align-items: center; gap: 8px; margin-bottom: 10px; padding: 8px 12px; background: #f8fafc; border: 1px solid #e2e8f0; border-radius: 6px; }
+.filter-label { font-size: 12px; color: #64748b; font-weight: 600; }
+.filter-btn { padding: 4px 12px; border: 1px solid #d1d5db; border-radius: 4px; background: #fff; font-size: 12px; cursor: pointer; color: #475569; }
+.filter-btn:hover { border-color: #93c5fd; color: #2563eb; }
+.filter-btn.active { background: #2C8E89; color: #fff; border-color: #2C8E89; }
+.filter-count { margin-left: auto; font-size: 12px; color: #64748b; }
 </style>

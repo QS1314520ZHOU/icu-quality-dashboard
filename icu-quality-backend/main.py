@@ -773,6 +773,42 @@ def query_trend(code: str, year: int, icu_unit: str = "all"):
     by_period = {r.get("period"): r.get("value") for r in rows}
     return {m: by_period.get(f"{year}-{m:02d}") for m in range(1, 13)}
 
+
+def _enrich_admission_discharge(items, dept_codes):
+    """Batch-add admission_type and discharge_type from patient collection."""
+    if not items:
+        return items
+    mrns = set()
+    for it in items:
+        mid = it.get("mrn") or it.get("patient_id") or it.get("hisPid") or ""
+        if mid and mid not in ("-", "—"):
+            mrns.add(str(mid))
+    if not mrns:
+        return items
+    lookup = {}
+    for db_name in BED_DB_NAMES:
+        try:
+            db = get_client()[db_name]
+            cursor = db.patient.find(
+                {"mrn": {"$in": list(mrns)}},
+                {"mrn": 1, "admissionType": 1, "dischargedType": 1, "_id": 0}
+            )
+            for d in cursor:
+                lookup[d.get("mrn", "")] = {
+                    "admission_type": d.get("admissionType", ""),
+                    "discharge_type": d.get("dischargedType", ""),
+                }
+            if lookup:
+                break
+        except Exception:
+            continue
+    for it in items:
+        mid = it.get("mrn") or it.get("patient_id") or it.get("hisPid") or ""
+        info = lookup.get(str(mid), {})
+        it["admission_type"] = info.get("admission_type", "")
+        it["discharge_type"] = info.get("discharge_type", "")
+    return items
+
 def query_detail(code: str, period: str, part: str, icu_unit: str = "all"):
     """
     第三级：明细数据。
@@ -822,7 +858,7 @@ def query_detail(code: str, period: str, part: str, icu_unit: str = "all"):
     if code == "ICU-00":
         from db import get_patient_census_detail as _census_detail
         items = _census_detail(dept_codes, start_date, end_date, part)
-        return [{
+        items = [{
             "patient_id": p.get("patient_id", ""),
             "name": p.get("name", ""),
             "gender": "",
@@ -838,6 +874,8 @@ def query_detail(code: str, period: str, part: str, icu_unit: str = "all"):
             "patient_type": p.get("patient_type", ""),
             "los_days": p.get("los_days"),
         } for p in items]
+        _enrich_admission_discharge(items, dept_codes)
+        return items
 
     # ---- ICU-08：ARDS俯卧位实施率明细 ----
     if code == "ICU-08":
@@ -869,6 +907,7 @@ def query_detail(code: str, period: str, part: str, icu_unit: str = "all"):
                     item["operator"] = excl_map[ek].get("operator", "")
                 else:
                     item["excluded"] = False
+            _enrich_admission_discharge(items, dept_codes)
             return items
         else:
             # Build pid->exclusion_key map from den_patients
@@ -900,6 +939,7 @@ def query_detail(code: str, period: str, part: str, icu_unit: str = "all"):
                     item["operator"] = excl_map[ek].get("operator", "")
                 else:
                     item["excluded"] = False
+            _enrich_admission_discharge(items, dept_codes)
             return items
 
     # ---- ICU-04：从 score 表取 APACHEⅡ 明细 ----
@@ -921,6 +961,7 @@ def query_detail(code: str, period: str, part: str, icu_unit: str = "all"):
                     "admission_source": "",
                     "value": p.get("score", 0),
                 })
+            _enrich_admission_discharge(items, dept_codes)
             return items
         else:
             # 分母：所有在科患者
@@ -936,8 +977,10 @@ def query_detail(code: str, period: str, part: str, icu_unit: str = "all"):
                     "admit_time": p.get("icuAdmissionTime").strftime("%Y-%m-%d %H:%M") if p.get("icuAdmissionTime") else "-",
                     "discharge_time": "",
                     "admission_source": "",
+                    "patient_type": "原有" if p.get("icuAdmissionTime", end_dt) < start_dt else "新入",
                     "value": 1,
                 })
+            _enrich_admission_discharge(items, dept_codes)
             return items
 
     # ---- ICU-05-1h/3h/6h：Bundle 明细 ----
@@ -954,6 +997,7 @@ def query_detail(code: str, period: str, part: str, icu_unit: str = "all"):
                     "admit_time": "", "discharge_time": "", "admission_source": "",
                     "value": 1,
                 })
+            _enrich_admission_discharge(items, dept_codes)
             return items
         else:
             items = [{"patient_id": d.get("mrn", ""), "name": d.get("name", ""),
@@ -961,6 +1005,7 @@ def query_detail(code: str, period: str, part: str, icu_unit: str = "all"):
                       "admit_time": str(d.get("diagnosisTime", ""))[:16] if d.get("diagnosisTime") else "",
                       "discharge_time": "", "admission_source": "", "value": 1}
                      for d in data.get("den_patients", [])]
+            _enrich_admission_discharge(items, dept_codes)
             return items
 
     # ---- ICU-06：抗菌药物送检率明细（含治疗/预防判定） ----
@@ -981,6 +1026,7 @@ def query_detail(code: str, period: str, part: str, icu_unit: str = "all"):
                     "admission_source": "",
                     "value": 1,
                 })
+            _enrich_admission_discharge(items, dept_codes)
             return items
         else:
             items = []
@@ -1015,6 +1061,7 @@ def query_detail(code: str, period: str, part: str, icu_unit: str = "all"):
                     "admission_source": "low_confidence" if is_low_conf else "",
                     "value": p.get("total_doses", 1),
                 })
+            _enrich_admission_discharge(items, dept_codes)
             return items
 
     # ---- ICU-09：镇痛评估率明细 ----
@@ -1035,6 +1082,7 @@ def query_detail(code: str, period: str, part: str, icu_unit: str = "all"):
                     "admission_source": "",
                     "value": p.get("assess_value", ""),
                 })
+            _enrich_admission_discharge(items, dept_codes)
             return items
         else:
             items = []
@@ -1048,9 +1096,11 @@ def query_detail(code: str, period: str, part: str, icu_unit: str = "all"):
                     "dept": "",
                     "admit_time": at.strftime("%Y-%m-%d %H:%M") if hasattr(at, 'strftime') else str(at)[:16] if at else "",
                     "discharge_time": "",
+                    "patient_type": "原有" if at and at < start_dt else "新入",
                     "admission_source": "",
                     "value": 1,
                 })
+            _enrich_admission_discharge(items, dept_codes)
             return items
 
     # ---- ICU-10：镇静评估率明细 ----
@@ -1071,6 +1121,7 @@ def query_detail(code: str, period: str, part: str, icu_unit: str = "all"):
                     "admission_source": "",
                     "value": p.get("assess_value", ""),
                 })
+            _enrich_admission_discharge(items, dept_codes)
             return items
         else:
             items = []
@@ -1085,8 +1136,10 @@ def query_detail(code: str, period: str, part: str, icu_unit: str = "all"):
                     "admit_time": at.strftime("%Y-%m-%d %H:%M") if hasattr(at, 'strftime') else str(at)[:16] if at else "",
                     "discharge_time": "",
                     "admission_source": "",
+                    "patient_type": "原有" if at and at < start_dt else "新入",
                     "value": 1,
                 })
+            _enrich_admission_discharge(items, dept_codes)
             return items
 
     # ---- ICU-11：标化病死指数(SMR)明细 ----
@@ -1109,6 +1162,7 @@ def query_detail(code: str, period: str, part: str, icu_unit: str = "all"):
                 "admission_source": "",
                 "value": round(cal_dead, 4) if isinstance(cal_dead, (int, float)) else cal_dead,
             })
+        _enrich_admission_discharge(items, dept_codes)
         return items
 
     # ---- ICU-12/13：人工气道明细 ----
@@ -1148,6 +1202,7 @@ def query_detail(code: str, period: str, part: str, icu_unit: str = "all"):
                 "reinsert_start": reinsert_start.strftime("%Y-%m-%d %H:%M") if hasattr(reinsert_start, 'strftime') else str(reinsert_start)[:16] if reinsert_start else "",
                 "value": 1,
             })
+        _enrich_admission_discharge(items, dept_codes)
         return items
 
     # ---- ICU-14：非计划转入ICU率明细 ----
@@ -1179,6 +1234,7 @@ def query_detail(code: str, period: str, part: str, icu_unit: str = "all"):
                 "basis": basis,
                 "value": 1,
             })
+        _enrich_admission_discharge(items, dept_codes)
         return items
 
     # ---- ICU-16/17/CAUTI：三管院感明细 ----
@@ -1215,6 +1271,7 @@ def query_detail(code: str, period: str, part: str, icu_unit: str = "all"):
                 "basis": basis,
                 "value": 1,
             })
+        _enrich_admission_discharge(items, dept_codes)
         return items
 
     if code == "ICU-18":
@@ -1247,6 +1304,7 @@ def query_detail(code: str, period: str, part: str, icu_unit: str = "all"):
                 "basis": f"{p.get('den_source', '')}: {p.get('evidence', '')}",
                 "value": 1,
             })
+        _enrich_admission_discharge(items, dept_codes)
         return items
 
     if code == "ICU-19":
@@ -1302,6 +1360,7 @@ def query_detail(code: str, period: str, part: str, icu_unit: str = "all"):
                 "basis": basis,
                 "value": 1 if p.get("within_48h") else 0,
             })
+        _enrich_admission_discharge(items, dept_codes)
         return items
 
     if code in ("ICU-16", "ICU-17", "CAUTI"):
@@ -1405,6 +1464,7 @@ def query_detail(code: str, period: str, part: str, icu_unit: str = "all"):
                     "basis": basis_text,
                     "value": day_count,
                 })
+        _enrich_admission_discharge(items, dept_codes)
         return items
 
     # ---- ICU-07：DVT预防率明细 ----
@@ -1438,14 +1498,16 @@ def query_detail(code: str, period: str, part: str, icu_unit: str = "all"):
                     "admission_source": "",
                     "value": p.get("order_count", 0),
                 })
+            _enrich_admission_discharge(items, dept_codes)
             return items
         else:
             data2 = get_icu04_apache_data(dept_codes, start_date, end_date)
             items = [{"patient_id": p.get("patientId", str(p.get("_id", ""))[-8:]), "name": p.get("name", ""),
                       "gender": "", "age": "", "bed_no": p.get("hisBed", ""), "dept": "",
                       "admit_time": p.get("icuAdmissionTime").strftime("%Y-%m-%d %H:%M") if p.get("icuAdmissionTime") else "-",
-                      "discharge_time": "", "admission_source": "", "value": 1}
+                      "discharge_time": "", "admission_source": "", "patient_type": "原有" if p.get("icuAdmissionTime", end_dt) < start_dt else "新入", "value": 1}
                      for p in data2.get("den_patients", [])]
+            _enrich_admission_discharge(items, dept_codes)
             return items
 
     # ---- ICU-02/03：从 account 表取真实医护人员明细 ----
@@ -1503,6 +1565,7 @@ def query_detail(code: str, period: str, part: str, icu_unit: str = "all"):
                 "admit_time": "", "discharge_time": "", "admission_source": "",
                 "value": total_beds,
             }]
+        _enrich_admission_discharge(staff, dept_codes)
         return staff
 
     # ---- 分子 / 其他指标：患者明细 ----
@@ -1572,6 +1635,7 @@ def query_detail(code: str, period: str, part: str, icu_unit: str = "all"):
         except Exception:
             continue
 
+    _enrich_admission_discharge(patients, dept_codes)
     return patients
 
 
