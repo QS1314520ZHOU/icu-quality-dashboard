@@ -1,36 +1,35 @@
-/* theme.css — ICU 质控专业主题 */
+/* theme.css — ICU 质控专业主题 (蓝色医疗风格) */
 
 :root {
-  --bg-body: #f7f8fa;
+  --bg-body: #f0f4fa;
   --bg-card: #ffffff;
-  --bg-hover: #f6f8fc;
-  --bg-header: #fafbfc;
+  --bg-hover: #f0f5ff;
+  --bg-header: #f5f8fc;
 
-  --text-main: #1f2937;
-  --text-sub: #6b7280;
-  --text-faint: #9ca3af;
+  --text-main: #1a2742;
+  --text-sub: #5a6a80;
+  --text-faint: #8e9bb5;
 
-  --border: #eaecef;
-  --border-light: #f0f2f5;
+  --border: #d8e2f0;
+  --border-light: #e8eef6;
 
-  --brand: #2C8E89;
-  --brand-light: rgba(44,142,137,0.08);
-  --good: #2C8E89;
+  --brand: #2B5EA7;
+  --brand-light: rgba(43,94,167,0.08);
+  --good: #1a8c5e;
   --warn: #E8A53D;
   --danger: #D9534F;
-  --trend-normal: #A0A6AD;
+  --trend-normal: #8e9bb5;
 
-  --shadow-sm: 0 1px 2px rgba(17,24,39,0.04);
-  --shadow-md: 0 1px 3px rgba(17,24,39,0.06), 0 4px 12px rgba(17,24,39,0.04);
+  --shadow-sm: 0 1px 2px rgba(26,39,66,0.05);
+  --shadow-md: 0 1px 3px rgba(26,39,66,0.08), 0 4px 12px rgba(26,39,66,0.04);
   --radius: 12px;
 
-  /* Sidebar */
-  --sidebar-width: 220px;
-  --sidebar-collapsed: 60px;
-  --sidebar-bg: #0f1a2e;
-  --sidebar-text: #94a3b8;
-  --sidebar-active: #2C8E89;
-  --sidebar-hover: rgba(44,142,137,0.15);
+  /* Top nav bar */
+  --nav-bg: #1a3a6e;
+  --nav-text: #b8c8e0;
+  --nav-active: #ffffff;
+  --nav-active-bg: rgba(255,255,255,0.12);
+  --nav-hover: rgba(255,255,255,0.06);
 }
 
 [data-theme="dark"] {

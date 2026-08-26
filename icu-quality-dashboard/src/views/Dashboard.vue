@@ -21,10 +21,6 @@
           <select v-model.number="eMonth" @change="loadData">
             <option v-for="m in 12" :key="m" :value="m">{{ m }}月</option>
           </select>
-          <select v-model="dept" @change="loadData">
-            <option value="all">全部ICU</option>
-            <option v-for="d in departments" :key="d.code" :value="d.code">{{ d.name }}</option>
-          </select>
         </div>
         <div class="header-actions">
           <button class="action-pill" @click="guideVisible=true">指标说明</button>
@@ -242,9 +238,9 @@
 </template>
 
 <script setup>
-import { ref, computed, onMounted, watch } from 'vue';
+import { ref, computed, inject, onMounted, watch } from 'vue';
 import { INDICATORS, getStatusConfig, statusText as getStatusLabel } from '../config/indicators.js';
-import { fetchCommandCenter, fetchDepartments } from '../api/index.js';
+import { fetchCommandCenter } from '../api/index.js';
 import GaugeChart from '../components/GaugeChart.vue';
 import ControlChart from '../components/ControlChart.vue';
 import AiPanel from '../components/AiPanel.vue';
@@ -257,9 +253,10 @@ import IndicatorGuideModal from '../components/IndicatorGuideModal.vue';
 const year = ref(2026);
 const sMonth = ref(6);
 const eMonth = ref(6);
-const dept = ref('all');
+const hostDeptCode = inject('hostDeptCode', ref('all'));
+const dept = computed(() => hostDeptCode.value || 'all');
 const years = [2024, 2025, 2026];
-const departments = ref([]);
+
 const rows = ref([]);
 const rowsByCode = ref({});
 const values = ref({});
@@ -380,28 +377,28 @@ async function loadData(nocache = false) {
 
 function syncFromURL() {
   const p = new URLSearchParams(window.location.search);
-  const dc = p.get('deptCode');
-  if (dc) dept.value = dc;
+  // deptCode comes from postMessage
   const y = p.get('year'); if (y) year.value = +y;
   const sm = p.get('sMonth'); if (sm) sMonth.value = +sm;
   const em = p.get('eMonth'); if (em) eMonth.value = +em;
 }
 function syncToURL() {
   const u = new URL(window.location);
-  dept.value === 'all' ? u.searchParams.delete('deptCode') : u.searchParams.set('deptCode', dept.value);
+  // deptCode managed by postMessage
   u.searchParams.set('year', year.value);
   u.searchParams.set('sMonth', sMonth.value);
   u.searchParams.set('eMonth', eMonth.value);
   window.history.replaceState({}, '', u);
 }
-watch([dept, year, sMonth, eMonth], syncToURL);
+watch([year, sMonth, eMonth], syncToURL);
 
+watch(hostDeptCode, () => { loadData(true); });
 onMounted(async () => {
   window.addEventListener('status-config-updated', () => {
     statusConfig.value = getStatusConfig();
   });
   syncFromURL();
-  try { departments.value = await fetchDepartments(); } catch { departments.value = []; }
+
   await loadData();
 });
 </script>
@@ -443,7 +440,7 @@ onMounted(async () => {
 .action-pill:disabled { opacity: .5; cursor: not-allowed; }
 .status-pill {
   padding: 5px 12px; border-radius: 20px; font-size: 12px; font-weight: 600;
-  background: rgba(44,142,137,0.15); color: var(--brand); border: 1px solid rgba(44,142,137,0.3);
+  background: rgba(43,94,167,0.15); color: var(--brand); border: 1px solid rgba(43,94,167,0.3);
 }
 .status-pill.danger { background: rgba(217,83,79,0.15); color: #D9534F; border-color: rgba(217,83,79,0.3); }
 .status-pill.warn { background: rgba(232,165,61,0.15); color: #E8A53D; border-color: rgba(232,165,61,0.3); }
@@ -451,8 +448,8 @@ onMounted(async () => {
 
 .state {
   margin-bottom: 12px; padding: 10px 12px; border-radius: 8px;
-  background: rgba(44,142,137,0.1); color: #94a3b8; font-size: 13px;
-  border: 1px solid rgba(44,142,137,0.2);
+  background: rgba(43,94,167,0.1); color: #94a3b8; font-size: 13px;
+  border: 1px solid rgba(43,94,167,0.2);
 }
 .state.error { background: rgba(217,83,79,0.1); color: #D9534F; border-color: rgba(217,83,79,0.2); }
 
@@ -470,13 +467,13 @@ onMounted(async () => {
 .kpi-card-left.danger-accent { background: #D9534F; }
 .kpi-card-left.warn-accent { background: #E8A53D; }
 .kpi-card-left.ai-accent { background: #6366f1; }
-.kpi-card-left.sentinel-accent { background: #2C8E89; }
+.kpi-card-left.sentinel-accent { background: #2B5EA7; }
 .kpi-card-left.low-accent { background: #94a3b8; }
 .kpi-stat-card.danger .kpi-card-left { background: #D9534F; }
 .kpi-stat-card.danger .kpi-card-big { color: #D9534F; }
 .kpi-stat-card.warn .kpi-card-left { background: #E8A53D; }
 .kpi-stat-card.warn .kpi-card-big { color: #E8A53D; }
-.kpi-stat-card.good .kpi-card-left { background: #2C8E89; }
+.kpi-stat-card.good .kpi-card-left { background: #2B5EA7; }
 .kpi-card-body { padding: 12px 14px; flex: 1; min-width: 0; }
 .kpi-card-top { display: flex; justify-content: space-between; align-items: center; margin-bottom: 4px; }
 .kpi-card-label { font-size: 12px; color: #94a3b8; }
@@ -503,7 +500,7 @@ onMounted(async () => {
   background: #131c31; border: 1px solid #1e293b;
   border-left: 4px solid #475569; border-radius: 10px; padding: 14px;
 }
-.kpi-card.good { border-left-color: #2C8E89; }
+.kpi-card.good { border-left-color: #2B5EA7; }
 .kpi-card.warn { border-left-color: #E8A53D; }
 .kpi-card.danger { border-left-color: #D9534F; }
 .kpi-card.unknown { border-left-color: #475569; }
@@ -517,11 +514,11 @@ onMounted(async () => {
 .kpi-value small { color: #64748b; }
 .kpi-sub { margin-top: 4px; color: #64748b; font-size: 12px; }
 .kpi-guide {
-  margin-top: 8px; background: rgba(44,142,137,0.1);
-  border: 1px solid rgba(44,142,137,0.3); border-radius: 6px;
+  margin-top: 8px; background: rgba(43,94,167,0.1);
+  border: 1px solid rgba(43,94,167,0.3); border-radius: 6px;
   color: var(--brand); font-size: 12px; padding: 5px 8px; cursor: pointer;
 }
-.kpi-guide:hover { background: rgba(44,142,137,0.2); }
+.kpi-guide:hover { background: rgba(43,94,167,0.2); }
 
 /* Census strip */
 .census-strip { display: grid; grid-template-columns: repeat(4, 1fr) 2fr; gap: 10px; margin-bottom: 14px; }
@@ -570,7 +567,7 @@ onMounted(async () => {
 }
 .bundle-item span { display: block; color: #94a3b8; font-size: 13px; margin-bottom: 6px; }
 .bundle-item strong { font-size: 26px; color: #e2e8f0; }
-.bundle-item.good strong { color: #2C8E89; }
+.bundle-item.good strong { color: #2B5EA7; }
 .bundle-item.warn strong { color: #E8A53D; }
 .bundle-item.danger strong { color: #D9534F; }
 .gauge-grid { display: grid; grid-template-columns: repeat(2, 1fr); gap: 4px; }

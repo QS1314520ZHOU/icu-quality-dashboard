@@ -5,7 +5,7 @@
         <h2>状态配置</h2>
       </div>
       <div class="actions">
-        <button class="btn-ghost" @click="$router.push('/')">📋 指标明细表</button>
+        <button class="btn-ghost" @click="window.dispatchEvent(new CustomEvent('navigate-view', { detail: 'table' }))">📋 指标明细表</button>
         <button class="btn-primary" @click="save">💾 保存配置</button>
       </div>
     </header>
@@ -170,17 +170,17 @@ function save() {
 .actions { display: flex; gap: 10px; }
 .btn-ghost {
   background: #fff;
-  color: #2C8E89;
-  border: 1px solid rgba(44,142,137,0.30);
+  color: #2B5EA7;
+  border: 1px solid rgba(43,94,167,0.30);
   border-radius: 8px;
   padding: 8px 18px;
   font-size: 13px;
   cursor: pointer;
   transition: all 0.2s;
 }
-.btn-ghost:hover { background: rgba(44,142,137,0.06); border-color: #2C8E89; }
+.btn-ghost:hover { background: rgba(43,94,167,0.06); border-color: #2B5EA7; }
 .btn-primary {
-  background: #2C8E89;
+  background: #2B5EA7;
   color: #fff;
   border: none;
   border-radius: 8px;
@@ -196,8 +196,8 @@ function save() {
   display: flex;
   align-items: center;
   gap: 8px;
-  background: rgba(44,142,137,0.06);
-  border: 1px solid rgba(44,142,137,0.15);
+  background: rgba(43,94,167,0.06);
+  border: 1px solid rgba(43,94,167,0.15);
   border-radius: 8px;
   padding: 10px 16px;
   margin-bottom: 20px;
@@ -210,7 +210,7 @@ function save() {
   justify-content: center;
   width: 18px; height: 18px;
   border-radius: 50%;
-  background: #2C8E89;
+  background: #2B5EA7;
   color: #fff;
   font-size: 11px;
   font-weight: 700;
@@ -235,7 +235,7 @@ function save() {
   width: 4px;
   height: 20px;
   border-radius: 2px;
-  background: #2C8E89;
+  background: #2B5EA7;
 }
 .section-header h3 {
   margin: 0;
@@ -305,7 +305,7 @@ function save() {
   background: #f9fafb;
   transition: border-color 0.2s;
 }
-.hex-input:focus { outline: none; border-color: #2C8E89; }
+.hex-input:focus { outline: none; border-color: #2B5EA7; }
 .swatch {
   width: 32px; height: 32px;
   border-radius: 6px;
@@ -362,7 +362,7 @@ function save() {
   transition: border-color 0.2s;
   appearance: auto;
 }
-.dir-select:focus { outline: none; border-color: #2C8E89; }
+.dir-select:focus { outline: none; border-color: #2B5EA7; }
 .range-inputs {
   display: flex;
   align-items: center;
@@ -383,14 +383,14 @@ function save() {
   text-align: center;
   transition: border-color 0.2s;
 }
-.range-input:focus { outline: none; border-color: #2C8E89; }
+.range-input:focus { outline: none; border-color: #2B5EA7; }
 .cell-action { text-align: center; }
 .reset-btn {
   width: 30px; height: 30px;
   border-radius: 50%;
   border: 1px solid #d9e2ef;
   background: #fff;
-  color: #2C8E89;
+  color: #2B5EA7;
   font-size: 16px;
   font-weight: 700;
   cursor: pointer;
@@ -399,7 +399,7 @@ function save() {
   justify-content: center;
   transition: all 0.2s;
 }
-.reset-btn:hover { background: rgba(44,142,137,0.08); border-color: #2C8E89; }
+.reset-btn:hover { background: rgba(43,94,167,0.08); border-color: #2B5EA7; }
 
 .table-tip {
   display: flex;
@@ -417,13 +417,13 @@ function save() {
   position: fixed;
   top: 24px;
   right: 24px;
-  background: #2C8E89;
+  background: #2B5EA7;
   color: #fff;
   padding: 10px 22px;
   border-radius: 8px;
   font-size: 13px;
   font-weight: 600;
-  box-shadow: 0 4px 12px rgba(44,142,137,0.30);
+  box-shadow: 0 4px 12px rgba(43,94,167,0.30);
   z-index: 9999;
 }
 .fade-enter-active, .fade-leave-active { transition: opacity 0.3s; }

@@ -124,8 +124,8 @@ function multiplierText(code) {
 .guide-nav button { width:100%; display:flex; gap:8px; align-items:center; text-align:left;
   background:#fff; border:1px solid transparent; border-radius:8px; padding:9px 10px; cursor:pointer;
   color:#334155; margin-bottom:5px; }
-.guide-nav button:hover { background:rgba(44,142,137,0.05); border-color:rgba(44,142,137,0.2); }
-.guide-nav button.active { background:rgba(44,142,137,0.1); border-color:var(--brand); color:var(--brand); }
+.guide-nav button:hover { background:rgba(43,94,167,0.05); border-color:rgba(43,94,167,0.2); }
+.guide-nav button.active { background:rgba(43,94,167,0.1); border-color:var(--brand); color:var(--brand); }
 .guide-nav span { flex-shrink:0; width:54px; font-size:12px; font-weight:800; color:var(--brand); }
 .guide-nav strong { min-width:0; font-size:13px; font-weight:600; white-space:nowrap; overflow:hidden; text-overflow:ellipsis; }
 .guide-body { overflow:auto; max-height:68vh; padding-right:4px; }

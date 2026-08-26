@@ -1,4 +1,4 @@
-﻿<template>
+<template>
   <div class="table-page">
     <!-- 顶部筛选条 -->
     <div class="filter-bar">
@@ -8,10 +8,7 @@
         <select v-model="startMonth" @change="reload"><option v-for="m in 12" :key="m" :value="m">{{ m }}月</option></select>
         <span class="dash">—</span>
         <select v-model="endMonth" @change="reload"><option v-for="m in 12" :key="m" :value="m">{{ m }}月</option></select>
-        <select v-model="unit" @change="reload">
-          <option value="all">全部ICU</option>
-          <option v-for="d in departments" :key="d.code" :value="d.code">{{ d.name }}</option>
-        </select>
+
         <button class="refresh-btn" :disabled="refreshing" @click="triggerRefresh">
           <span v-if="refreshing" class="spinner"></span>
           {{ refreshing ? '后台刷新中' : '刷新数据' }}
@@ -125,20 +122,22 @@
 </template>
 
 <script setup>
-import { ref, computed, onMounted, watch } from 'vue';
+import { ref, computed, inject, onMounted, watch } from 'vue';
 import { INDICATORS, evalStatus, getStatusConfig, statusText as getStatusText } from './config/indicators.js';
 import Modal from './components/Modal.vue';
 import TrendModal from './components/TrendModal.vue';
 import DetailModal from './components/DetailModal.vue';
 import IndicatorGuideModal from './components/IndicatorGuideModal.vue';
-import { fetchDepartments, fetchIndicatorList, fetchTrend as apiFetchTrend, fetchDetail as apiFetchDetail, triggerRefresh as apiTriggerRefresh, getRefreshStatus } from './api/index.js';
+import { fetchIndicatorList, fetchTrend as apiFetchTrend, fetchDetail as apiFetchDetail, triggerRefresh as apiTriggerRefresh, getRefreshStatus } from './api/index.js';
 
-const year = ref(2026), startMonth = ref(6), endMonth = ref(6), unit = ref('all');
+const year = ref(2026), startMonth = ref(6), endMonth = ref(6);
+const hostDeptCode = inject('hostDeptCode', ref('all'));
+const unit = computed(() => hostDeptCode.value || 'all');
 const years = [2024, 2025, 2026];
 const rows = ref([]); const trendData = ref(null); const detailData = ref(null);
 const census = ref(null);
 const guideVisible = ref(false);
-const departments = ref([]); const deptName = ref('全部ICU');
+const deptName = computed(() => { if (!hostDeptCode.value || hostDeptCode.value === 'all') return '全部ICU'; return hostDeptCode.value; });
 const refreshing = ref(false);
 const toast = ref({ show: false, message: '', type: 'success' });
 const statusConfig = ref(getStatusConfig());
@@ -376,25 +375,9 @@ function exportCsv() {
   a.download = `ICU质控_${period.value}.csv`; a.click();
 }
 
-// 科室列表 + URL deptCode
-async function loadDepartments() {
-  try { departments.value = await fetchDepartments(); } catch { departments.value = []; }
-  const params = new URLSearchParams(window.location.search);
-  const urlCode = params.get('deptCode');
-  if (urlCode) {
-    const dept = departments.value.find(d => d.code === urlCode);
-    if (dept) { unit.value = dept.code; deptName.value = dept.name; return; }
-  }
-  deptName.value = '全部ICU';
-}
-watch(unit, (val) => {
-  deptName.value = val === 'all' ? '全部ICU' : (departments.value.find(d=>d.code===val)?.name || val);
-  const url = new URL(window.location);
-  val === 'all' ? url.searchParams.delete('deptCode') : url.searchParams.set('deptCode', val);
-  window.history.replaceState({}, '', url);
-});
 
-onMounted(async () => { await loadDepartments(); await reload(true); });
+watch(hostDeptCode, () => { reload(true); });
+onMounted(async () => { await reload(true); });
 window.addEventListener('status-config-updated', () => {
   statusConfig.value = getStatusConfig();
   rows.value = rows.value.map(r => {

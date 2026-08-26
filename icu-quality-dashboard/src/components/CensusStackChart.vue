@@ -44,13 +44,13 @@ function formatPeriod(p) {
 .chart-body { display:flex; align-items:flex-end; gap:8px; height:120px; padding:0 4px; }
 .bar-group { flex:1; display:flex; flex-direction:column; align-items:center; gap:4px; }
 .stack { display:flex; flex-direction:column; width:100%; max-width:36px; height:100px; gap:1px; }
-.carry-in { background:#2C8E89; border-radius:3px 3px 0 0; min-height:2px; transition:height .3s; }
+.carry-in { background:#2B5EA7; border-radius:3px 3px 0 0; min-height:2px; transition:height .3s; }
 .new-admit { background:#E8A53D; border-radius:0 0 3px 3px; min-height:2px; transition:height .3s; }
 .bar-label { font-size:11px; color:#94a3b8; }
 .legend { display:flex; gap:14px; margin-top:10px; justify-content:center; }
 .leg-item { display:flex; align-items:center; gap:5px; font-size:11px; color:#94a3b8; }
 .dot { width:10px; height:10px; border-radius:2px; }
-.dot.carry-in { background:#2C8E89; }
+.dot.carry-in { background:#2B5EA7; }
 .dot.new-admit { background:#E8A53D; }
 .empty { color:#64748b; font-size:12px; text-align:center; padding:20px; }
 </style>

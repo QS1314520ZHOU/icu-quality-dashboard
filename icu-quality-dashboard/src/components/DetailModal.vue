@@ -1,4 +1,4 @@
-﻿<template>
+<template>
   <div>
     <div class="source">
       <span class="tag">数据源</span>{{ data.source_desc }}
@@ -280,7 +280,7 @@ tr.low-confidence td:first-child::before {
 .action-cell { text-align: center; white-space: normal; }
 .btn-exclude { background: #E8A53D; color: #fff; border: none; border-radius: 4px; padding: 3px 10px; font-size: 12px; cursor: pointer; }
 .btn-exclude:hover { background: #d4952f; }
-.btn-restore { background: #2C8E89; color: #fff; border: none; border-radius: 4px; padding: 3px 10px; font-size: 12px; cursor: pointer; }
+.btn-restore { background: #2B5EA7; color: #fff; border: none; border-radius: 4px; padding: 3px 10px; font-size: 12px; cursor: pointer; }
 .btn-restore:hover { background: #247470; }
 .reason-tag { display: inline-block; margin-left: 4px; font-size: 11px; color: #94a3b8; background: #f1f5f9; border-radius: 3px; padding: 1px 6px; }
 .excl-count { color: #E8A53D; font-weight: 600; }
@@ -303,6 +303,6 @@ tr.excluded-row td { text-decoration: line-through; }
 .filter-label { font-size: 12px; color: #64748b; font-weight: 600; }
 .filter-btn { padding: 4px 12px; border: 1px solid #d1d5db; border-radius: 4px; background: #fff; font-size: 12px; cursor: pointer; color: #475569; }
 .filter-btn:hover { border-color: #93c5fd; color: #2563eb; }
-.filter-btn.active { background: #2C8E89; color: #fff; border-color: #2C8E89; }
+.filter-btn.active { background: #2B5EA7; color: #fff; border-color: #2B5EA7; }
 .filter-count { margin-left: auto; font-size: 12px; color: #64748b; }
 </style>
