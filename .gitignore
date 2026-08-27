@@ -4,3 +4,11 @@ __pycache__/
 *.pyc
 .env
 .DS_Store
+
+# 临时脚本 & 调试日志
+_apply.ps1
+_fix*.py
+_p.py
+_patch*.py
+_test.ps1
+debug.log
