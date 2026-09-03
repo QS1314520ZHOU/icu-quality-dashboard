@@ -1,30 +1,86 @@
 /* theme.css — ICU 质控专业主题 (蓝色医疗风格) */
 
 :root {
-  --bg-body: #f0f4fa;
+  /* ---- 统一设计 token（浅色默认） ---- */
+  --bg-app: #f5f7fb;
+  --bg-surface: #ffffff;
+  --bg-subtle: #f8fafc;
+  --bg-hover: #f1f5fb;
+  --bg-body: #f5f7fb;
   --bg-card: #ffffff;
-  --bg-hover: #f0f5ff;
   --bg-header: #f5f8fc;
 
-  --text-main: #1a2742;
-  --text-sub: #5a6a80;
-  --text-faint: #8e9bb5;
+  --border: #e5eaf2;
+  --border-strong: #d8e0ec;
+  --border-light: #e5eaf2;
 
-  --border: #d8e2f0;
-  --border-light: #e8eef6;
+  --text-title: #1f2a44;
+  --text-body: #3d4a63;
+  --text-sub: #6b7a94;
+  --text-faint: #8b98ae;
+  --text-main: #1f2a44;
 
-  --brand: #2B5EA7;
-  --brand-light: rgba(43,94,167,0.08);
-  --good: #1a8c5e;
-  --warn: #E8A53D;
-  --danger: #D9534F;
-  --trend-normal: #8e9bb5;
+  --brand: #1e5eb8;
+  --brand-weak: #eaf1fb;
+  --brand-light: #eaf1fb;
 
-  --shadow-sm: 0 1px 2px rgba(26,39,66,0.05);
-  --shadow-md: 0 1px 3px rgba(26,39,66,0.08), 0 4px 12px rgba(26,39,66,0.04);
+  --good: #0e7a52;
+  --good-weak: #e8f6ef;
+
+  --warn: #b26a00;
+  --warn-weak: #fdf3e3;
+
+  --danger: #c62828;
+  --danger-weak: #fdecec;
+
+  --ai: #4f46c5;
+  --ai-weak: #eeedfb;
+
+  --trend-normal: #8b98ae;
+
+  --shadow-card: 0 1px 2px rgba(16,24,40,.04), 0 8px 24px rgba(16,24,40,.06);
+  --shadow-sm: 0 1px 2px rgba(16,24,40,.04);
+  --shadow-md: 0 1px 3px rgba(16,24,40,.08), 0 4px 12px rgba(16,24,40,.04);
+  --radius-card: 12px;
+  --radius-sm: 8px;
   --radius: 12px;
 
-  /* Top nav bar */
+  /* ---- 字号阶梯 ---- */
+  --fs-display: clamp(26px, 1.7vw, 36px);
+  --fs-metric: clamp(20px, 1.3vw, 28px);
+  --fs-h1: 20px;
+  --fs-h2: 15px;
+  --fs-body: 14px;
+  --fs-label: 13px;
+  --fs-caption: 12px;
+
+  /* Top nav bar (legacy compat) */
+  --nav-bg: #ffffff;
+  --nav-text: #6b7a94;
+  --nav-active: #1e5eb8;
+  --nav-active-bg: #eaf1fb;
+  --nav-hover: #f1f5fb;
+}
+
+[data-theme="dark"] {
+  --bg-app: #0b1120;
+  --bg-surface: #131c31;
+  --bg-subtle: #0f1729;
+  --bg-body: #0b1120;
+  --bg-card: #131c31;
+  --bg-hover: #1a2540;
+  --bg-header: #111827;
+  --text-title: #e2e8f0;
+  --text-body: #cbd5e1;
+  --text-sub: #94a3b8;
+  --text-faint: #64748b;
+  --text-main: #e2e8f0;
+  --border: #1e293b;
+  --border-strong: #334155;
+  --border-light: #1e293b;
+  --shadow-card: 0 1px 2px rgba(0,0,0,0.2);
+  --shadow-sm: 0 1px 2px rgba(0,0,0,0.2);
+  --shadow-md: 0 2px 8px rgba(0,0,0,0.3);
   --nav-bg: #1a3a6e;
   --nav-text: #b8c8e0;
   --nav-active: #ffffff;
@@ -49,9 +105,15 @@
 * { margin:0; padding:0; box-sizing:border-box; }
 body {
   font-family: 'Segoe UI', 'HarmonyOS Sans', 'PingFang SC', 'Microsoft YaHei', system-ui, sans-serif;
-  background: var(--bg-body);
-  color: var(--text-main);
+  background: var(--bg-app);
+  color: var(--text-body);
   -webkit-font-smoothing: antialiased;
   -moz-osx-font-smoothing: grayscale;
   letter-spacing: -0.01em;
+  font-size: var(--fs-body);
+  line-height: 1.55;
 }
+/* 数字等宽 */
+.tabular-nums { font-variant-numeric: tabular-nums; }
+/* 全局 select / button 基础 */
+select, button { font-family: inherit; }

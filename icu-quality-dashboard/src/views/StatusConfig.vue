@@ -5,8 +5,14 @@
         <h2>状态配置</h2>
       </div>
       <div class="actions">
-        <button class="btn-ghost" @click="window.dispatchEvent(new CustomEvent('navigate-view', { detail: 'table' }))">📋 指标明细表</button>
-        <button class="btn-primary" @click="save">💾 保存配置</button>
+        <button class="btn-ghost" @click="window.dispatchEvent(new CustomEvent('navigate-view', { detail: 'table' }))">
+          <svg viewBox="0 0 16 16" fill="none" stroke="currentColor" stroke-width="1.5" style="width:14px;height:14px;margin-right:4px;vertical-align:-2px"><path d="M2 2h5l1 2h6v10H2V2zM6 8h4M6 11h2"/></svg>
+          指标明细表
+        </button>
+        <button class="btn-primary" @click="save">
+          <svg viewBox="0 0 16 16" fill="none" stroke="currentColor" stroke-width="1.5" style="width:14px;height:14px;margin-right:4px;vertical-align:-2px"><path d="M12 14H4a1 1 0 0 1-1-1V3a1 1 0 0 1 1-1h5l3 3v8a1 1 0 0 1-1 1zM10 2v3h3M6 9h4"/></svg>
+          保存配置
+        </button>
       </div>
     </header>
 
@@ -165,7 +171,7 @@ function save() {
   margin: 0;
   font-size: 22px;
   font-weight: 700;
-  color: #1e293b;
+  color: var(--text-title);
 }
 .actions { display: flex; gap: 10px; }
 .btn-ghost {
@@ -210,9 +216,9 @@ function save() {
   justify-content: center;
   width: 18px; height: 18px;
   border-radius: 50%;
-  background: #2B5EA7;
+  background: var(--brand);
   color: #fff;
-  font-size: 11px;
+  font-size: var(--fs-caption);
   font-weight: 700;
   flex-shrink: 0;
 }
@@ -241,7 +247,7 @@ function save() {
   margin: 0;
   font-size: 16px;
   font-weight: 700;
-  color: #1e293b;
+  color: var(--text-title);
 }
 
 .status-grid {
@@ -270,7 +276,7 @@ function save() {
 }
 .card-label strong {
   font-size: 14px;
-  color: #1e293b;
+  color: var(--text-title);
   font-weight: 600;
 }
 .card-label .en {
@@ -349,7 +355,7 @@ function save() {
   color: #64748b;
   font-weight: 500;
 }
-.cell-name { color: #1e293b; }
+.cell-name { color: var(--text-title); }
 .dir-select {
   width: 100%;
   border: 1px solid #d9e2ef;

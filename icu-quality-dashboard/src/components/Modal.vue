@@ -17,12 +17,12 @@ defineEmits(['close']);
 <style scoped>
 .mask { position:fixed; inset:0; background:rgba(0,0,0,0.4); display:flex;
   align-items:center; justify-content:center; z-index:100; }
-.modal { background:#ffffff; border:1px solid rgba(0,0,0,0.08); border-radius:10px;
-  width:min(1080px,92vw); max-height:84vh; display:flex; flex-direction:column; box-shadow: 0 10px 25px rgba(0,0,0,0.1); }
+.modal { background:var(--bg-surface); border:1px solid var(--border); border-radius:var(--radius-card);
+  width:min(1080px,92vw); max-height:84vh; display:flex; flex-direction:column; box-shadow: var(--shadow-card); }
 .modal-head { display:flex; align-items:center; padding:16px 20px;
-  border-bottom:1px solid rgba(0,0,0,0.06); color:#1e293b; font-size:16px; font-weight:bold; }
+  border-bottom:1px solid var(--border); color:var(--text-title); font-size:var(--fs-h1); font-weight:600; }
 .modal-head-right { margin-left:auto; margin-right:12px; font-weight:normal; }
-.close { cursor:pointer; color:#64748b; }
-.close:hover { color:#1e293b; }
+.close { cursor:pointer; color:var(--text-sub); }
+.close:hover { color:var(--text-title); }
 .modal-body { padding:18px 20px; overflow-y:auto; }
 </style>

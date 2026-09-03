@@ -82,7 +82,7 @@
                 {{ statusText(row.status) }}
               </span>
             </td>
-            <td class="t-center"><span class="mini" @click="drillTrend(row)">📈</span></td>
+            <td class="t-center"><span class="mini" @click="drillTrend(row)"><svg viewBox="0 0 16 16" fill="none" stroke="currentColor" stroke-width="1.5" style="width:16px;height:16px;vertical-align:-2px"><polyline points="1,12 4,6 7,9 10,3 15,8"/><line x1="1" y1="14" x2="15" y2="14"/></svg></span></td>
           </tr>
         </tbody>
       </table>
@@ -405,7 +405,7 @@ window.addEventListener('status-config-updated', () => {
 @keyframes spin { to { transform:rotate(360deg); } }
 .export-btn { background:var(--brand); color:#fff; border:none; border-radius:7px;
   padding:7px 16px; cursor:pointer; font-size:13px; font-weight:500; }
-.guide-btn { background:#f8fafc; color:#1e3a5f; border:1px solid #cbd5e1; border-radius:7px;
+.guide-btn { background:var(--bg-subtle); color:var(--brand); border:1px solid var(--border); border-radius:7px;
   padding:7px 14px; cursor:pointer; font-size:13px; font-weight:500; }
 .guide-btn:hover { background:#eff6ff; border-color:#93c5fd; color:var(--brand); }
 
@@ -437,7 +437,7 @@ window.addEventListener('status-config-updated', () => {
 }
 .indi-table th {
   background:var(--bg-header); color:var(--text-faint);
-  font-size:11px; font-weight:600; letter-spacing:0.04em;
+  font-size:var(--fs-caption); font-weight:600; letter-spacing:0.04em;
   border-bottom:1px solid var(--border);
 }
 .indi-table td { color:var(--text-main); border-bottom:1px solid var(--border-light); }
@@ -465,12 +465,12 @@ window.addEventListener('status-config-updated', () => {
 .month-cell { color: var(--text-sub); font-weight:400; font-size:12px; }
 .month-cell.alert { color: var(--warn); font-weight:500; }
 
-.formula-icon { margin-left:5px; font-style:italic; font-size:11px; color:var(--brand);
+.formula-icon { margin-left:5px; font-style:italic; font-size:var(--fs-caption); color:var(--brand);
   background:var(--brand-light); border-radius:3px; padding:0 4px; opacity:.5; }
 .name:hover .formula-icon { opacity:1; }
 
 /* 状态徽章:圆点+文字 */
-.badge { padding:3px 10px; border-radius:20px; font-size:11px; font-weight:500;
+.badge { padding:3px 10px; border-radius:20px; font-size:var(--fs-caption); font-weight:500;
   display:inline-flex; align-items:center; gap:4px; }
 .badge-dot { width:5px; height:5px; border-radius:50%; flex-shrink:0; display:inline-block; }
 .badge.good { background:rgba(21,150,107,0.08); color:var(--good); }
@@ -492,15 +492,15 @@ window.addEventListener('status-config-updated', () => {
 .multiplier { font-size:12px; color:var(--brand); }
 .tip-special .special-line { font-size:12px; line-height:1.8; color:var(--text-main); }
 .tip-note { font-size:12px; line-height:1.6; color:var(--text-main); margin-bottom:8px; }
-.tip-meaning { font-size:11px; color:var(--text-sub); padding-top:8px; border-top:1px dashed var(--border); }
+.tip-meaning { font-size:var(--fs-caption); color:var(--text-sub); padding-top:8px; border-top:1px dashed var(--border); }
 .census-bar { display:flex; align-items:center; gap:18px; padding:10px 16px; margin-bottom:10px;
-  background:linear-gradient(90deg,#f0f9ff,#f8fafc); border:1px solid #e2e8f0; border-radius:8px; }
+  background:var(--bg-subtle); border:1px solid var(--border); border-radius:8px; }
 .census-label { font-size:12px; font-weight:700; color:var(--brand); white-space:nowrap;
-  padding-right:12px; border-right:1px solid #cbd5e1; }
+  padding-right:12px; border-right:1px solid var(--border); }
 .census-item { display:flex; flex-direction:column; align-items:center; gap:2px; }
 .census-item.clickable { cursor:pointer; padding:4px 8px; border-radius:6px; transition:background .15s; }
 .census-item.clickable:hover { background:rgba(44,142,137,0.1); }
-.census-item small { font-size:11px; color:#64748b; }
+.census-item small { font-size:var(--fs-caption); color:var(--text-sub); }
 .census-item b { font-size:15px; color:#0f172a; font-family:'Cascadia Code','Consolas',monospace; }
 .census-item.total b { color:var(--brand); }
 .copyright-bar { text-align:center; padding:14px 0 6px; font-size:12px; color:var(--text-faint); }

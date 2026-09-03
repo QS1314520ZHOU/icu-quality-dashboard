@@ -3,7 +3,7 @@ from fastapi import FastAPI, BackgroundTasks
 from pydantic import BaseModel
 from datetime import date, datetime, timedelta
 from ai_analyzer import analyze, get_all_ai_decisions, override_ai_decision, ensure_ai_cache_collection as ensure_ai_cache
-from db import assert_db_ready, get_open_bed_count, get_occupied_bed_days, get_staff_count, get_icu04_apache_data, get_bundle_data, get_icu08_data, get_icu06_data, get_icu09_data, get_icu10_data, get_icu11_data, get_icu12_data, get_icu13_data, get_icu14_data, get_icu15_data, get_icu16_data, get_icu17_data, get_icu18_data, get_icu19_data, get_cauti_data, get_tri_tube_suspected_warnings, get_sepsis_alert_warnings, confirm_tri_tube_warning, get_dvt_prevention_patients, get_client, BED_DB_NAMES, PROFESSION_CN, get_patient_census, get_patient_census_detail
+from db import assert_db_ready, get_open_bed_count, get_occupied_bed_days, get_staff_count, get_icu04_apache_data, get_bundle_data, get_icu08_data, get_icu06_data, get_icu09_data, get_icu10_data, get_icu11_data, get_icu12_data, get_icu13_data, get_icu14_data, get_icu15_data, get_icu16_data, get_icu17_data, get_icu18_data, get_icu19_data, get_cauti_data, get_tri_tube_suspected_warnings, get_sepsis_alert_warnings, confirm_tri_tube_warning, get_dvt_prevention_patients, get_client, BED_DB_NAMES, PROFESSION_CN, get_patient_census, get_patient_census_detail, iter_bed_dbs
 import random
 import os
 import sys
@@ -70,6 +70,7 @@ def on_startup():
     ensure_detail_cache_collection()
     ensure_exclusion_collection()
     ensure_ai_cache()
+    ensure_clinical_indexes()
     _start_scheduler()
 
 # 简易缓存（TTL 60秒，支持 nocache 参数强制刷新）
@@ -185,6 +186,49 @@ def ensure_detail_cache_collection():
         coll.create_index([("updated_at", -1)], background=True)
     except Exception as e:
         print(f"[detail-cache] ensure index failed: {e}")
+
+
+def ensure_clinical_indexes():
+    """为临床集合创建索引，加速 tri-tube / sepsis 查询"""
+    for db_name, db in iter_bed_dbs():
+        try:
+            # bedside: 最常用的集合，覆盖 sputum/fever/vent/latest_* 查询
+            db.bedside.create_index(
+                [("pid", 1), ("valid", 1), ("code", 1), ("time", -1)],
+                background=True, name="idx_bedside_pid_valid_code_time",
+            )
+            db.bedside.create_index(
+                [("pid", 1), ("time", -1), ("code", 1)],
+                background=True, name="idx_bedside_pid_time_code",
+            )
+            # patient: 覆盖 _tri_tube_patient_scope
+            db.patient.create_index(
+                [("deptCode", 1), ("status", 1), ("icuAdmissionTime", 1)],
+                background=True, name="idx_patient_dept_status_admit",
+            )
+            # diseaseDiagnosis: 覆盖 _confirmed_tri_tube_keys
+            db.diseaseDiagnosis.create_index(
+                [("pid", 1), ("diagnosisTime", 1), ("propertyType", 1)],
+                background=True, name="idx_diag_pid_time_type",
+            )
+            # temperatureData: 覆盖 _fever_evidence
+            db.temperatureData.create_index(
+                [("pid", 1), ("record_time", -1)],
+                background=True, name="idx_temp_pid_time",
+            )
+            # tubeExe: 覆盖 _long_tube_patients
+            db.tubeExe.create_index(
+                [("pid", 1), ("type", 1), ("startTime", 1), ("endTime", 1)],
+                background=True, name="idx_tube_pid_type_time",
+            )
+            # criticalValue: 覆盖 _wbc_evidence (pid 分支)
+            db.criticalValue.create_index(
+                [("pid", 1), ("publishTime", -1)],
+                background=True, name="idx_critval_pid_time",
+            )
+            print(f"[clinical-indexes] ensured on {db_name}")
+        except Exception as e:
+            print(f"[clinical-indexes] failed on {db_name}: {e}")
 
 
 def _is_historical_period(period: str) -> bool:

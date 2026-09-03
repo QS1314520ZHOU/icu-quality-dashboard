@@ -4300,18 +4300,14 @@ def _wbc_evidence(db, pids: list, start_dt, end_dt_wide) -> dict:
     evidence = {}
     if "criticalValue" not in db.list_collection_names():
         return evidence
-    patient_id_alias = set(pids)
+    # 仅按 pid + 时间范围查询（可走索引），文本过滤移到 Python 侧
     for doc in db.criticalValue.find(
         {
+            "pid": {"$in": list(pids)},
             "publishTime": {"$gte": start_dt, "$lte": end_dt_wide},
-            "$or": [
-                {"pid": {"$in": list(patient_id_alias)}},
-                {"lisItem": {"$regex": "白细胞|WBC"}},
-                {"bigItemName": {"$regex": "血常规"}},
-            ],
         },
         {"pid": 1, "lisItem": 1, "value": 1, "publishTime": 1, "bigItemName": 1},
-    ).sort("publishTime", -1).max_time_ms(15000).limit(50000):
+    ).sort("publishTime", -1).max_time_ms(15000).limit(20000):
         text = f"{doc.get('lisItem', '')} {doc.get('value', '')} {doc.get('bigItemName', '')}"
         if "白细胞" not in text and "WBC" not in text.upper():
             continue
@@ -4430,7 +4426,13 @@ def _latest_text_bedside(db, pids: list, codes: list, start_dt, end_dt_wide) -> 
     return result
 
 
+_sepsis_codes_cache = None  # configParam 很少变化，内存缓存
+
+
 def _sepsis_bedside_codes(db) -> dict:
+    global _sepsis_codes_cache
+    if _sepsis_codes_cache is not None:
+        return _sepsis_codes_cache
     codes = {key: [] for key in SEPSIS_BEDSIDE_NAME_RULES}
     for doc in db.configParam.find(
         {},
@@ -4445,6 +4447,7 @@ def _sepsis_bedside_codes(db) -> dict:
                 codes[key].append(code)
     codes["temperature"] = list(set(codes.get("temperature", []) + ["param_T"]))
     codes["consciousness"] = list(set(codes.get("consciousness", []) + ["param_score_gcs_obs"]))
+    _sepsis_codes_cache = codes
     return codes
 
 
@@ -4649,16 +4652,13 @@ def get_sepsis_alert_warnings(dept_codes: list, start_date: str, end_date: str, 
 
 def _long_vent_patients(db, pat_by_pid: dict, start_dt, end_dt_wide, hours: int) -> dict:
     records = defaultdict(list)
+    # 按 pid+code+time 查询（可走索引），regex 过滤移到 Python 侧
     for doc in db.bedside.find(
         {
             "pid": {"$in": list(pat_by_pid.keys())},
             "code": "param_XiYangTuJing",
             "valid": True,
             "time": {"$gte": start_dt, "$lte": end_dt_wide},
-            "$or": [
-                {"strVal": {"$in": list(INVASIVE_VENT_VALUES)}},
-                {"strVal": {"$regex": "有创呼吸机"}},
-            ],
         },
         {"pid": 1, "strVal": 1, "time": 1},
     ).sort("time", 1).max_time_ms(30000).limit(300000):

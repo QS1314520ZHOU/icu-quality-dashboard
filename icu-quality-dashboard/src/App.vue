@@ -1,10 +1,12 @@
 <template>
   <div class="app-shell">
-    <!-- 顶部深蓝导航栏 -->
+    <!-- 顶部导航栏 -->
     <header class="topnav">
       <div class="topnav-brand">
-        <span class="brand-cross">✚</span>
-        <span class="brand-text">ICU 质控中心</span>
+        <svg class="brand-icon" viewBox="0 0 16 16" fill="none" stroke="currentColor" stroke-width="1.5">
+          <path d="M8 1v14M1 8h14M4 4l8 8M12 4l-8 8"/>
+        </svg>
+        <span class="brand-text">ICU 医疗质量控制中心</span>
       </div>
       <nav class="topnav-links">
         <button
@@ -15,8 +17,15 @@
         >{{ item.label }}</button>
       </nav>
       <div class="topnav-actions">
-        <button class="nav-btn dashboard-btn" @click="openDashboard" title="实时大屏">📊 实时大屏</button>
-        <button class="nav-btn config-btn" @click="openConfig" title="状态配置">⚙ 配置</button>
+        <button class="ghost-btn" @click="refreshCurrent" title="刷新数据">
+          <svg viewBox="0 0 16 16" fill="none" stroke="currentColor" stroke-width="1.5"><path d="M1 8a7 7 0 0 1 13.1-3.5M15 1v4h-4M15 8a7 7 0 0 1-13.1 3.5M1 15v-4h4"/></svg>
+        </button>
+        <button class="ghost-btn" @click="guideVisible=true" title="指标说明">
+          <svg viewBox="0 0 16 16" fill="none" stroke="currentColor" stroke-width="1.5"><circle cx="8" cy="8" r="7"/><path d="M6 6a2 2 0 1 1 2 2v2M8 12h.01"/></svg>
+        </button>
+        <button class="ghost-btn" @click="toggleFullscreen" title="全屏">
+          <svg viewBox="0 0 16 16" fill="none" stroke="currentColor" stroke-width="1.5"><path d="M1 5V1h4M15 5V1h-4M1 11v4h4M15 11v4h-4"/></svg>
+        </button>
       </div>
     </header>
 
@@ -51,7 +60,9 @@ provide('hostDeptCode', hostDeptCode);
 provide('hostPatient', hostPatient);
 
 const navItems = [
-  { key: 'table', label: '指标管理' },
+  { key: 'dashboard', label: '大屏总览' },
+  { key: 'table',     label: '指标管理' },
+  { key: 'statusConfig', label: '状态配置' },
 ];
 
 const views = {
@@ -60,9 +71,19 @@ const views = {
   table: IndicatorTable,
 };
 
-function openDashboard() { currentView.value = 'dashboard'; }
-function openConfig() { currentView.value = 'statusConfig'; }
 function navigateView(e) { currentView.value = e.detail; }
+
+function refreshCurrent() {
+  window.dispatchEvent(new CustomEvent('refresh-data'));
+}
+
+function toggleFullscreen() {
+  if (!document.fullscreenElement) {
+    document.documentElement.requestFullscreen?.();
+  } else {
+    document.exitFullscreen?.();
+  }
+}
 
 // ===== postMessage 通信 =====
 const PRINT_ORIGIN = '*'; // 联调阶段用 *，正式部署替换为宿主来源
@@ -115,48 +136,47 @@ onUnmounted(() => {
 .topnav {
   display: flex;
   align-items: center;
-  background: var(--nav-bg);
+  background: var(--bg-surface);
   padding: 0 20px;
-  height: 48px;
+  height: 56px;
   flex-shrink: 0;
-  box-shadow: 0 2px 8px rgba(0,0,0,0.15);
+  border-bottom: 1px solid var(--border);
   z-index: 100;
 }
 .topnav-brand {
   display: flex;
   align-items: center;
-  gap: 8px;
+  gap: 10px;
   margin-right: 32px;
   flex-shrink: 0;
 }
-.brand-cross { font-size: 18px; color: #fff; }
-.brand-text { font-size: 14px; font-weight: 700; color: #fff; white-space: nowrap; }
+.brand-icon { width: 16px; height: 16px; color: var(--brand); flex-shrink: 0; }
+.brand-text { font-size: var(--fs-h2); font-weight: 600; color: var(--text-title); white-space: nowrap; }
 
 .topnav-links { display: flex; align-items: center; gap: 0; flex: 1; }
 .topnav-item {
-  background: none; border: none; color: var(--nav-text);
-  font-size: 14px; padding: 14px 20px; cursor: pointer;
+  background: none; border: none; color: var(--text-sub);
+  font-size: var(--fs-body); padding: 16px 20px; cursor: pointer;
   transition: all 0.2s; white-space: nowrap; position: relative;
 }
-.topnav-item:hover { color: #fff; background: var(--nav-hover); }
-.topnav-item.active { color: var(--nav-active); font-weight: 600; }
+.topnav-item:hover { color: var(--text-title); background: var(--bg-hover); }
+.topnav-item.active { color: var(--brand); font-weight: 600; }
 .topnav-item.active::after {
   content: ''; position: absolute; bottom: 0; left: 50%;
-  transform: translateX(-50%); width: 32px; height: 3px;
-  background: #5b9bd5; border-radius: 2px 2px 0 0;
+  transform: translateX(-50%); width: 32px; height: 2px;
+  background: var(--brand); border-radius: 2px 2px 0 0;
 }
 
-.topnav-actions { display: flex; align-items: center; gap: 8px; margin-left: auto; flex-shrink: 0; }
-.nav-btn {
-  padding: 6px 16px; border-radius: 6px; border: none;
-  font-size: 13px; font-weight: 500; cursor: pointer;
-  transition: all 0.2s; white-space: nowrap;
+.topnav-actions { display: flex; align-items: center; gap: 4px; margin-left: auto; flex-shrink: 0; }
+.ghost-btn {
+  width: 32px; height: 32px; border-radius: 8px; border: none;
+  background: transparent; color: var(--text-sub); cursor: pointer;
+  display: inline-flex; align-items: center; justify-content: center;
+  transition: all 0.2s;
 }
-.dashboard-btn { background: #2B5EA7; color: #fff; }
-.dashboard-btn:hover { background: #3a72bf; }
-.config-btn { background: rgba(255,255,255,0.12); color: #fff; border: 1px solid rgba(255,255,255,0.2); }
-.config-btn:hover { background: rgba(255,255,255,0.2); }
+.ghost-btn svg { width: 16px; height: 16px; }
+.ghost-btn:hover { background: var(--bg-hover); color: var(--text-title); }
 
 /* ---- Main Content ---- */
-.app-main { flex: 1; padding: 16px 24px; overflow: auto; background: var(--bg-body); }
+.app-main { flex: 1; overflow: auto; background: var(--bg-app); }
 </style>

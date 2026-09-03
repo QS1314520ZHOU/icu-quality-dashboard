@@ -6,6 +6,7 @@
 <script setup>
 import { ref, onMounted, watch } from 'vue';
 import * as echarts from 'echarts';
+import { SEMANTIC } from '../utils/chartTheme.js';
 
 const props = defineProps({
   name: String, value: Number, unit: String,
@@ -15,7 +16,7 @@ const props = defineProps({
 const chartRef = ref(null);
 let chart = null;
 
-const COLOR = { good: '#10b981', warn: '#f59e0b', danger: '#ef4444' };
+const COLOR = { good: SEMANTIC.good, warn: SEMANTIC.warn, danger: SEMANTIC.danger };
 
 function render() {
   if (!chart) return;
@@ -24,18 +25,18 @@ function render() {
       type: 'gauge', radius: '90%',
       startAngle: 210, endAngle: -30,
       min: 0, max: props.unit === '‰' ? 30 : (props.unit === '' ? 2 : 100),
-      progress: { show: true, width: 12, itemStyle: { color: COLOR[props.status] } },
+      progress: { show: true, width: 12, itemStyle: { color: COLOR[props.status] || SEMANTIC.brand } },
       axisLine: { lineStyle: { width: 12, color: [[1, '#eef2f7']] } },
       axisTick: { show: false },
       splitLine: { length: 8, lineStyle: { color: '#dfe6ef' } },
-      axisLabel: { color: '#9aa7b8', fontSize: 9, distance: 14 },
-      pointer: { width: 4, itemStyle: { color: COLOR[props.status] } },
+      axisLabel: { color: SEMANTIC.textSub, fontSize: 9, distance: 14 },
+      pointer: { width: 4, itemStyle: { color: COLOR[props.status] || SEMANTIC.brand } },
       detail: {
         valueAnimation: true, fontSize: 26, fontWeight: 'bold',
-        color: COLOR[props.status], offsetCenter: [0, '40%'],
+        color: COLOR[props.status] || SEMANTIC.brand, offsetCenter: [0, '40%'],
         formatter: v => `${v}${props.unit}`,
       },
-      title: { offsetCenter: [0, '75%'], color: '#6b7c93', fontSize: 12 },
+      title: { offsetCenter: [0, '75%'], color: SEMANTIC.textSub, fontSize: 12 },
       data: [{ value: props.value, name: props.name }],
     }],
   });

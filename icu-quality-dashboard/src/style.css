@@ -1,2 +1,7 @@
 /* style.css — 全局基础（被 theme.css 覆盖） */
 #app { width: 100vw; min-height: 100vh; }
+/* 数字等宽，避免跳动 */
+.tabular-nums,
+strong, .kpi-card-big, .kpi-value span, .census-kpi strong, .bundle-item strong {
+  font-variant-numeric: tabular-nums;
+}
