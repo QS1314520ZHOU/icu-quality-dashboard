@@ -67,16 +67,10 @@ SMARTCARE_CFG = DBConfig("SMARTCARE")
 # DataCenter（数据中心 / 指标汇总库）
 DATACENTER_CFG = DBConfig("DATACENTER")
 
-# bedRecord / configBed / patient 所在的数据库，按优先级排列
-# 优先使用 .env 中 SMARTCARE_DB_AUTH 指定的库，其 _4y 变体作为兜底
-_smartcare_auth = SMARTCARE_CFG.auth_db or "SmartCare"  # e.g. "SmartCare" or "SmartCare_4y"
-if _smartcare_auth.endswith("_4y"):
-    BED_DB_NAMES = [_smartcare_auth, _smartcare_auth[:-3]]  # strip trailing _4y
-else:
-    BED_DB_NAMES = [_smartcare_auth, _smartcare_auth + "_4y"]
-# 去空白、去重，保序
-BED_DB_NAMES = list(dict.fromkeys(name.strip() for name in BED_DB_NAMES if name.strip()))
-if not BED_DB_NAMES:
+# bedRecord / configBed / patient 所在的数据库
+_smartcare_auth = SMARTCARE_CFG.auth_db or "SmartCare"
+BED_DB_NAMES = [_smartcare_auth]
+if not BED_DB_NAMES or not BED_DB_NAMES[0]:
     raise RuntimeError("BED_DB_NAMES is empty — check SMARTCARE_DB_AUTH in .env")
 
 def iter_bed_dbs():
@@ -164,7 +158,7 @@ def get_client(db_name: str = "SmartCare") -> MongoClient:
     if db_name in _clients:
         return _clients[db_name]
 
-    # 根据库名猜测所属配置（SmartCare_4y 也用 SmartCare 凭证）
+    # 根据库名猜测所属配置
     if db_name.startswith("SmartCare") or db_name == "SmartCare":
         cfg = SMARTCARE_CFG
     else:
@@ -192,34 +186,21 @@ def get_datacenter_db():
     return get_datacenter_client()[db_name]
 
 
-def _gbk_mojibake(text: str) -> str:
-    """兼容 4y 库中以 GBK 字节误按 latin1 存储/展示的中文字段。"""
-    try:
-        return text.encode("gbk").decode("latin1")
-    except Exception:
-        return text
-
-
 def _keyword_regex(keywords: list[str]) -> str:
     variants = []
     seen = set()
     for kw in keywords:
-        for item in (kw, _gbk_mojibake(kw)):
-            if item and item not in seen:
-                seen.add(item)
-                variants.append(re.escape(item))
+        if kw and kw not in seen:
+            seen.add(kw)
+            variants.append(re.escape(kw))
     return "|".join(variants)
 
 
 # 不同院区/接口的医嘱状态编码不完全一致：
 # - 旧接口常见 "3"
-# - 部分 DataCenter_4y 只保留 "已审核/停止"，没有 "已执行"
 # 取消/撤销不纳入。
-EXECUTED_ORDER_STATUSES = [
-    "已执行", "已审核", "停止", "3",
-    _gbk_mojibake("已执行"), _gbk_mojibake("已审核"), _gbk_mojibake("停止"),
-]
-LAB_ORDER_TYPES = ["检验", _gbk_mojibake("检验")]
+EXECUTED_ORDER_STATUSES = ["已执行", "已审核", "停止", "3"]
+LAB_ORDER_TYPES = ["检验"]
 
 
 # ============================================================
@@ -4911,7 +4892,7 @@ def get_patient_census_detail(dept_codes: list, start_date: str, end_date: str,
 def test_connections() -> dict:
     """测试所有数据库连接，返回状态"""
     results = {}
-    for db_name in ["SmartCare_4y", "SmartCare", "DataCenter", "DataCenter_4y"]:
+    for db_name in ["SmartCare", "DataCenter"]:
         try:
             client = get_client(db_name)
             client[db_name].command("ping")
