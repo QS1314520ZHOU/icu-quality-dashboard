@@ -1,0 +1,75 @@
+# ============================================================================
+# 唯一用途：在麒麟 V11 环境里把整个后端 + 前端静态资源编译成一个单文件二进制。
+# 产物：/out/icu-quality-dashboard  （拷到麒麟服务器上直接跑，无需任何依赖）
+# 构建上下文：仓库根目录
+# ============================================================================
+ARG BASE_IMAGE=kylin-server:v11
+FROM ${BASE_IMAGE}
+
+ARG PIP_INDEX_URL=https://pypi.tuna.tsinghua.edu.cn/simple
+ARG PIP_TRUSTED_HOST=pypi.tuna.tsinghua.edu.cn
+
+# 源码含中文，构建期必须 UTF-8
+ENV LANG=C.UTF-8 LC_ALL=C.UTF-8 PYTHONIOENCODING=utf-8 \
+    PIP_NO_CACHE_DIR=1 PIP_DISABLE_PIP_VERSION_CHECK=1
+
+# python3-devel 提供 libpython3.x.so，binutils 提供 objcopy/strip，都是 PyInstaller 必需
+RUN set -eux; \
+    dnf -y install python3 python3-devel python3-pip gcc make binutils \
+                   tar gzip findutils file; \
+    dnf clean all; rm -rf /var/cache/dnf; python3 -V
+
+COPY icu-quality-backend/requirements.txt /tmp/req.txt
+RUN set -eux; \
+    pip3 install -i "${PIP_INDEX_URL}" --trusted-host "${PIP_TRUSTED_HOST}" \
+        --upgrade pip setuptools wheel; \
+    pip3 install -i "${PIP_INDEX_URL}" --trusted-host "${PIP_TRUSTED_HOST}" \
+        -r /tmp/req.txt pyinstaller
+
+WORKDIR /src
+COPY icu-quality-backend/ /src/
+
+# 前端必须已构建好（仓库里 frontend_dist 已提交；改了前端就先 npm run build 同步）
+RUN test -f /src/frontend_dist/index.html || { \
+      echo "ERROR: 缺少 icu-quality-backend/frontend_dist/index.html"; \
+      echo "先执行 npm run build 并把 dist 同步到 frontend_dist"; exit 1; }
+
+RUN set -eux; \
+    python3 -m PyInstaller \
+      --clean --noconfirm \
+      --name icu-quality-dashboard \
+      --onefile \
+      --add-data "frontend_dist:frontend_dist" \
+      --hidden-import uvicorn.loops.auto \
+      --hidden-import uvicorn.loops.asyncio \
+      --hidden-import uvicorn.protocols.http.auto \
+      --hidden-import uvicorn.protocols.http.h11_impl \
+      --hidden-import uvicorn.protocols.websockets.auto \
+      --hidden-import uvicorn.protocols.websockets.websockets_impl \
+      --hidden-import uvicorn.lifespan.on \
+      --hidden-import uvicorn.lifespan.off \
+      --collect-submodules pymongo \
+      --collect-submodules bson \
+      --collect-all openai \
+      --collect-submodules pydantic \
+      main.py
+
+RUN mkdir -p /out && install -m 0755 /src/dist/icu-quality-dashboard /out/
+
+# ---- 依赖体检：确认真的"零依赖"，有缺失就让构建失败 ----
+RUN set -eux; \
+    echo "=== 文件信息 ==="; file /out/icu-quality-dashboard; \
+    du -h /out/icu-quality-dashboard; \
+    echo "=== 动态依赖（应只有 glibc 基础库）==="; ldd /out/icu-quality-dashboard || true; \
+    if ldd /out/icu-quality-dashboard 2>/dev/null | grep -q "not found"; then \
+      echo "ERROR: 存在缺失的动态库"; exit 1; fi; \
+    echo "=== 运行所需最低 GLIBC 版本 ==="; \
+    objdump -T /out/icu-quality-dashboard 2>/dev/null \
+      | grep -o "GLIBC_[0-9.]*" | sort -uV | tail -3
+
+# ---- 冒烟测试：不连数据库也应能拉起进程（失败只告警，不阻断）----
+RUN set -eux; cd /out; \
+    (timeout 12 ./icu-quality-dashboard > /tmp/smoke.log 2>&1 || true); \
+    echo "=== 启动日志尾部 ==="; tail -n 20 /tmp/smoke.log || true; \
+    if grep -qiE "uvicorn|application startup|8091" /tmp/smoke.log; then \
+      echo "SMOKE: OK"; else echo "SMOKE: WARN 请人工在目标机验证"; fi
