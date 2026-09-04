@@ -19,7 +19,7 @@ from pymongo import MongoClient, ASCENDING
 from db import (
     get_client, get_datacenter_client, BED_DB_NAMES, iter_bed_dbs,
     get_open_bed_count, get_occupied_bed_days, get_staff_count,
-    get_icu04_apache_data, get_bundle_data, get_icu06_data, get_icu09_data, get_icu10_data,
+    get_icu04_apache_data, get_bundle_data, get_bundle_data_v2, get_icu06_data, get_icu09_data, get_icu10_data,
     get_icu11_data, get_icu12_data, get_icu13_data, get_icu14_data, get_icu15_data,
     get_icu16_data, get_icu17_data, get_icu18_data, get_icu19_data, get_cauti_data,
     get_dvt_prevention_patients, get_icu08_data,
@@ -75,8 +75,8 @@ def _compute_icu04(dept_codes, start, end):
 
 
 def _compute_icu05(dept_codes, start, end, hour):
-    """ICU-05: Bundle完成率 (1h/3h/6h)"""
-    d = get_bundle_data(dept_codes, start, end)
+    """ICU-05: Bundle完成率 (1h/3h/6h) — 使用 V2 双集合查询"""
+    d = get_bundle_data_v2(dept_codes, start, end)
     key = f"h{hour[0]}_num"
     num = d.get(key, 0)
     den = d["total"]

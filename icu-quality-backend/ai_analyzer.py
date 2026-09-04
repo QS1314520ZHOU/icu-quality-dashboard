@@ -817,7 +817,26 @@ def _drug_amount_ug(dose, unit):
 
 
 def _vaso_rate_ugkgmin(drug, doc, weight_kg, speed_mlh):
-    """浓度=药量/总配液量；速率=浓度×泵速(ml/h)/60/体重(kg) → µg/kg/min。"""
+    """浓度=药量/总配液量；速率=浓度×泵速(ml/h)/60/体重(kg) → µg/kg/min。
+
+    优先使用 scoring.adapter.ne_ugkgmin (含单位白名单、盐型校验)。
+    降级到旧逻辑兜底。
+    """
+    try:
+        from scoring.adapter import ne_ugkgmin
+        action = {
+            "dose": drug.get("dose"),
+            "unit": drug.get("unit"),
+            "liquidAmount": drug.get("liquidAmount") or doc.get("liquidAmount"),
+            "liquidAmountUnit": drug.get("liquidAmountUnit") or doc.get("liquidAmountUnit") or "ml",
+            "speed": speed_mlh,
+        }
+        result, flags = ne_ugkgmin(action, weight_kg)
+        if result is not None:
+            return result
+    except Exception:
+        pass
+    # 降级: 旧逻辑
     drug_ug = _drug_amount_ug(drug.get("dose"), drug.get("unit"))
     total_ml = _safe_float(drug.get("liquidAmount")) or _safe_float(doc.get("liquidAmount"))
     if drug_ug and total_ml and weight_kg and speed_mlh and speed_mlh > 0:
@@ -1097,6 +1116,36 @@ def extract_sofa_qsofa(pid, his_pid, before=None):
     sofa_data["t0"], sofa_data["t0_basis"] = compute_sofa_t0(t0_items, sofa_data["sofa_baseline"])
 
     return sofa_data
+
+
+def compute_sofa_shadow(observations, medications, eval_time, weight_kg=None):
+    """
+    使用新评分模块计算经典 SOFA + SOFA-2，用于影子比对。
+
+    Args:
+        observations: 观测数据 [{code, value_number, unit, observed_at}]
+        medications: 用药数据 [{med_name, route, dose_ugkgmin, admin_end}]
+        eval_time: 评估时间 (timezone-aware)
+        weight_kg: 体重
+
+    Returns:
+        {
+            "classic": compute_sofa_classic 结果,
+            "sofa2": compute_sofa2 结果,
+        }
+    """
+    from scoring.sofa_core import compute_sofa_classic
+    from scoring.sofa2_core import compute_sofa2
+
+    classic = compute_sofa_classic(
+        observations, medications, eval_time,
+        has_advanced_support=False, weight_kg=weight_kg,
+    )
+    sofa2 = compute_sofa2(
+        observations, medications, eval_time,
+        has_advanced_support=False, weight_kg=weight_kg,
+    )
+    return {"classic": classic, "sofa2": sofa2}
 
 
 def get_infection_evidence(pid, his_pid, before=None):
