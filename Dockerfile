@@ -65,6 +65,8 @@ RUN python3 -m PyInstaller \
     --collect-submodules bson \
     --collect-all openai \
     --collect-submodules pydantic \
+    --collect-submodules config \
+    --collect-submodules scoring \
     main.py
 
 FROM oraclelinux:8.2 AS artifact

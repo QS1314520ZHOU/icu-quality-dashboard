@@ -20,6 +20,9 @@ from .sofa_rules import (
     CLASSIC_SOFA_THRESHOLDS as _TH,
     _UNIT_CONVERSION,
 )
+from .adapter import ne_ugkgmin as _ne_ugkgmin  # noqa: F401 — 唯一换算点引用
+from .missing_policy import apply_policy as _apply_policy
+import config.indicator_windows as _cfg
 
 logger = logging.getLogger(__name__)
 
@@ -96,18 +99,19 @@ def _worst_in_window(
     eval_time: datetime,
     lookback_hours: int,
     max_staleness_hours: int,
+    agg: str = "min",
 ) -> Tuple[Optional[float], Optional[str], Optional[datetime]]:
     """
     在 [eval_time - lookback, eval_time] 窗口内，按 code 匹配观测，
     返回 (worst_value, unit, observed_at)。
-    如果 max_staleness > 0，还会检查最近一条是否在 staleness 范围内。
 
-    对于"worst"聚合:
-      - 呼吸/凝血/肝/肾肌酐: 取最低值(越低越差)
-      - 但对于 PaO2/FiO2 ratio 和 GCS，评分函数会自行处理
+    agg 聚合方向:
+      - min:   取最低值 (PLT, PF ratio, GCS)
+      - max:   取最高值 (胆红素, 肌酐)
+      - sum:   求和 (尿量)
+      - latest: 取最新一条
     """
     window_start = eval_time - timedelta(hours=lookback_hours)
-    cutoff = eval_time - timedelta(hours=max_staleness_hours) if max_staleness_hours else None
 
     candidates = []
     for obs in observations:
@@ -131,8 +135,19 @@ def _worst_in_window(
     if not candidates:
         return None, None, None
 
-    # 返回最差值(最小值), 同时记录时间用于 staleness 检查
-    candidates.sort(key=lambda x: x[0])
+    if agg == "sum":
+        total_val = sum(c[0] for c in candidates)
+        # 返回总和，unit 取最后一条，ts 取最新
+        best_ts = max(c[2] for c in candidates)
+        best_unit = [c[1] for c in candidates if c[2] == best_ts][0]
+        return total_val, best_unit, best_ts
+    elif agg == "max":
+        candidates.sort(key=lambda x: x[0], reverse=True)
+    elif agg == "latest":
+        candidates.sort(key=lambda x: x[2], reverse=True)
+    else:
+        # min (default)
+        candidates.sort(key=lambda x: x[0])
     return candidates[0]
 
 
@@ -156,12 +171,12 @@ def _calc_respiratory(
     codes_ratio = ["param_bg_P/Fratio"]
 
     # 先查 ratio 直接值
-    val, unit, ts = _worst_in_window(obs, codes_ratio, eval_time, 24, 4)
+    val, unit, ts = _worst_in_window(obs, codes_ratio, eval_time, _cfg.RESP_LOOKBACK_H, _cfg.RESP_STALENESS_MAX_H)
     if val is not None and val > 0:
         ratio = val
     else:
-        val_pao2, _, ts_pao2 = _worst_in_window(obs, codes_pao2, eval_time, 24, 4)
-        val_fio2, _, ts_fio2 = _worst_in_window(obs, codes_fio2, eval_time, 24, 4)
+        val_pao2, _, ts_pao2 = _worst_in_window(obs, codes_pao2, eval_time, _cfg.RESP_LOOKBACK_H, _cfg.RESP_STALENESS_MAX_H)
+        val_fio2, _, ts_fio2 = _worst_in_window(obs, codes_fio2, eval_time, _cfg.RESP_LOOKBACK_H, _cfg.RESP_STALENESS_MAX_H)
         if val_pao2 is None or val_fio2 is None:
             info["respiratory_missing"] = True
             return None, info
@@ -220,6 +235,7 @@ def _calc_liver(
         obs, _TH["liver"]["codes"], eval_time,
         _TH["liver"]["lookback_hours"],
         _TH["liver"]["max_staleness_hours"],
+        agg="max",
     )
     if val is None:
         info["liver_missing"] = True
@@ -259,6 +275,7 @@ def _calc_cardiovascular(
     ne_dose_ugkgmin = 0.0
     epi_dose_ugkgmin = 0.0
     dopa_dose_ugkgmin = 0.0
+    dobu_dose_ugkgmin = 0.0
     dose_known = False
 
     for med in pressors:
@@ -268,23 +285,20 @@ def _calc_cardiovascular(
                 continue  # 已结束
 
         med_name = (med.get("med_name") or "").lower()
-        route = (med.get("route") or "").lower()
-        if "iv" not in route and "泵" not in route:
+        route = (med.get("route") or "")
+        # 白名单: 静脉 静滴 静推 泵入 iv 任一命中即通过
+        # route 缺失时不跳过, 照常计入并打 route_unknown 标记
+        _IV_KEYWORDS = {"静脉", "静滴", "静推", "泵入", "iv"}
+        route_lower = route.strip().lower()
+        if route_lower and not any(kw in route_lower for kw in _IV_KEYWORDS):
             continue
+        if not route_lower:
+            info.setdefault("data_quality_flags", []).append("route_unknown")
 
         has_active_pressor = True
 
-        # 优先取 dose_ugkgmin (已由 adapter 换算)
+        # 剂量只能来自 adapter.ne_ugkgmin, 取不到走保底
         dose = med.get("dose_ugkgmin")
-        if dose is None or dose <= 0:
-            # 降级: 尝试从 med_dose 换算
-            raw_dose = med.get("med_dose")
-            raw_unit = (med.get("med_unit") or "").lower()
-            if raw_dose is not None and raw_dose > 0 and weight_kg and weight_kg > 0:
-                if "ug/kg/min" in raw_unit or "μg/kg/min" in raw_unit:
-                    dose = raw_dose
-                elif "mg" in raw_unit and "min" in raw_unit:
-                    dose = raw_dose * 1000 / weight_kg
         if dose is not None and dose > 0:
             dose_known = True
             if "去甲" in med_name or "norepinephrine" in med_name or med_name == "ne":
@@ -293,10 +307,12 @@ def _calc_cardiovascular(
                 epi_dose_ugkgmin = max(epi_dose_ugkgmin, dose)
             elif "多巴胺" in med_name or "dopamine" in med_name or med_name == "dopa":
                 dopa_dose_ugkgmin = max(dopa_dose_ugkgmin, dose)
+            elif "多巴酚丁胺" in med_name or "dobutamine" in med_name:
+                dobu_dose_ugkgmin = max(dobu_dose_ugkgmin, dose)
 
     # 检查 MAP
     map_val, _, _ = _worst_in_window(
-        obs, ["MAP", "mean_arterial_pressure"], eval_time, 24, 1
+        obs, ["MAP", "mean_arterial_pressure"], eval_time, _cfg.RESP_LOOKBACK_H, 1
     )
 
     score = 0
@@ -305,27 +321,35 @@ def _calc_cardiovascular(
     if map_val is not None and map_val < 70 and not has_active_pressor:
         score = 1
 
-    # 多巴胺分档 (经典 SOFA: ≤5→2, 5-15→3, >15→4)
+    # 多巴胺分档 (经典 SOFA: ≤5→2, >5且≤15→3, >15→4)
     if dopa_dose_ugkgmin > 0:
-        for t in _TH["cardiovascular"]["dopamine_thresholds"]:
-            if t["low"] < dopa_dose_ugkgmin <= t["high"]:
-                score = max(score, int(t["score"]))
-                break
-        else:
-            if dopa_dose_ugkgmin > 15:
-                score = max(score, 4)
-
-    # NE/Epi 剂量梯度 (经典 SOFA 只有 ≤5→3, >5→4)
-    ne_epi_sum = ne_dose_ugkgmin + epi_dose_ugkgmin
-    if ne_epi_sum > 0:
-        if ne_epi_sum <= 5:
+        if dopa_dose_ugkgmin <= 5:
+            score = max(score, 2)
+        elif dopa_dose_ugkgmin <= 15:
             score = max(score, 3)
         else:
             score = max(score, 4)
 
-    # 需求文档 7.3 第 9 条: has_active_pressor 且剂量未知 → max(score, 2)
-    if has_active_pressor and not dose_known:
+    # 多巴酚丁胺 (经典 SOFA: 任意剂量→2)
+    if dobu_dose_ugkgmin > 0:
         score = max(score, 2)
+
+    # NE/Epi 剂量梯度 (Vincent 1996: ≤0.1→3, >0.1→4, 单位 ug/kg/min)
+    ne_epi_sum = ne_dose_ugkgmin + epi_dose_ugkgmin
+    if ne_epi_sum > 0:
+        if ne_epi_sum <= 0.1:
+            score = max(score, 3)
+        else:
+            score = max(score, 4)
+
+    # 需求文档 7.3 第 9 条: has_active_pressor 且剂量未知 → 读配置策略
+    if has_active_pressor and not dose_known:
+        policy = _cfg.VASO_DOSE_UNKNOWN_POLICY
+        if policy == "min_band_2":
+            score = max(score, 2)
+        elif policy == "reject":
+            info["dose_unknown_rejected"] = True
+        # 不许硬编码 max(score, 2)
 
     info["has_active_pressor"] = has_active_pressor
     info["dose_known"] = dose_known
@@ -343,16 +367,16 @@ def _calc_cardiovascular(
 # -----------------------------------------------------------
 # 中枢神经 (GCS, 需求文档 7.3 第 8 条: 编码解析)
 # -----------------------------------------------------------
-_GCS_MOTOR_MAP = {
-    # 语言/运动映射: V=T → motor fallback
-    "t": 4,  # T(气管插管) → 扩展/无反应
-}
+
+# V=T 时的替代值 (气管插管无法评估语言, 用 1 分替代)
+_V_T_SUBSTITUTE = 1
 
 def _parse_gcs(gcs_val: Any) -> Tuple[Optional[int], Optional[str]]:
     """
-    解析 GCS 值。支持:
-      - 数值: 直接返回
-      - 字符串 "E1VTM1": 解析 E/V/M 分量，V=T→motor fallback
+    解析 GCS 值。需求文档 7.3 第 8 条:
+      - 数值: 直接返回，范围 3-15
+      - 字符串 "E1VTM1": 用 re.fullmatch 解析，E/M 只允许一位数字
+      - V=T 时返回 None，调用方走 motor fallback，禁止当 4 分加进总分
       - 字符串 "15": 解析为数字
 
     返回 (total_score, error)。
@@ -361,28 +385,35 @@ def _parse_gcs(gcs_val: Any) -> Tuple[Optional[int], Optional[str]]:
         return None, None
 
     if isinstance(gcs_val, (int, float)):
-        return int(gcs_val), None
+        total = int(gcs_val)
+        if total < 3 or total > 15:
+            return None, f"GCS 数值超范围: {total} (有效 3-15)"
+        return total, None
 
     if isinstance(gcs_val, str):
         # 尝试数值解析
         try:
-            return int(float(gcs_val)), None
+            total = int(float(gcs_val))
+            if total < 3 or total > 15:
+                return None, f"GCS 数值超范围: {total} (有效 3-15)"
+            return total, None
         except ValueError:
             pass
 
-        # E1VTM1 格式解析
-        pattern = r"[Ee](\d+)[Vv]([Tt\d]+)[Mm](\d+)"
-        m = re.search(pattern, gcs_val)
+        # E1VTM1 格式解析: E 和 M 只允许一位数字，V 允许 T 或一位数字
+        pattern = r"^[Ee]([1-5])[Vv]([Tt1-5])[Mm]([1-6])$"
+        m = re.fullmatch(pattern, gcs_val.strip())
         if m:
             e = int(m.group(1))
             v_raw = m.group(2)
             m_score = int(m.group(3))
             if v_raw.upper() == "T":
-                # V=T → motor fallback (用 M 分量)
-                total = e + _GCS_MOTOR_MAP["t"] + m_score
-            else:
-                v = int(v_raw)
-                total = e + v + m_score
+                # V=T → 调用方走 motor fallback，返回 None
+                return None, "V=T_motor_fallback"
+            v = int(v_raw)
+            total = e + v + m_score
+            if total < 3 or total > 15:
+                return None, f"GCS 编码计算结果超范围: E{e}V{v}M{m_score}={total}"
             return total, None
 
     return None, f"无法解析 GCS 值: {gcs_val}"
@@ -423,14 +454,29 @@ def _calc_cns(
     # 解析 GCS (可能为数值或 E1VTM1 格式)
     raw_gcs = best.get("value_number") or best.get("value_text")
     gcs_total, parse_err = _parse_gcs(raw_gcs)
-    if parse_err:
+    if parse_err == "V=T_motor_fallback":
+        # V=T: 无法评估语言分量, 走 motor fallback (需求文档 7.3 第 8 条)
+        # 从原始文本中提取 E 和 M 分量
+        raw_text = str(raw_gcs).strip()
+        vt_match = re.fullmatch(r"^[Ee]([1-5])[Vv][Tt][Mm]([1-6])$", raw_text)
+        if vt_match:
+            e_val = int(vt_match.group(1))
+            m_val = int(vt_match.group(2))
+            # 经典 SOFA 无 motor_fallback 表, 用 E+M 直接评分
+            motor_total = e_val + m_val
+            info["gcs_vt_motor_fallback"] = {"e": e_val, "m": m_val, "motor_total": motor_total}
+            score = _score_from_thresholds(motor_total, _TH["central_nervous_system"]["thresholds"])
+        else:
+            info["gcs_parse_error"] = parse_err
+            return None, info
+    elif parse_err:
         info["gcs_parse_error"] = parse_err
         return None, info
-    if gcs_total is None:
+    elif gcs_total is None:
         info["cns_missing"] = True
         return None, info
-
-    score = _score_from_thresholds(gcs_total, _TH["central_nervous_system"]["thresholds"])
+    else:
+        score = _score_from_thresholds(gcs_total, _TH["central_nervous_system"]["thresholds"])
     return score, info
 
 
@@ -450,11 +496,12 @@ def _calc_renal(
     score_creat = None
     score_urine = None
 
-    # 肌酐
+    # 肌酐 (取最高值: 越高越差)
     val, unit, ts = _worst_in_window(
         obs, _TH["renal"]["codes_creatinine"], eval_time,
         _TH["renal"]["lookback_hours"],
         _TH["renal"]["max_staleness_hours"],
+        agg="max",
     )
     if val is not None:
         converted, err = _convert_to_classic_canonical(val, unit, "creatinine")
@@ -465,11 +512,12 @@ def _calc_renal(
                 converted, _TH["renal"]["creatinine_thresholds"]
             )
 
-    # 尿量 (mL/24h)
+    # 尿量 (mL/24h, 取总和)
     val, unit, ts = _worst_in_window(
         obs, _TH["renal"]["codes_urine"], eval_time,
         _TH["renal"]["lookback_hours"],
         _TH["renal"]["max_staleness_hours"],
+        agg="sum",
     )
     if val is not None:
         normalized_u = _normalize_unit(unit)
@@ -573,13 +621,37 @@ def compute_sofa_classic(
         flags.append("renal_missing")
     components["renal"] = renal_score
 
+    # 应用缺失策略 (SOFA_MISSING_POLICY)
+    policy_result = _apply_policy(
+        policy=_cfg.SOFA_MISSING_POLICY,
+        components=components,
+        data_quality_flags=flags,
+        eval_time=eval_time,
+    )
+    components = policy_result["components"]
+    total = policy_result["total"]
+    if policy_result["imputed_organs"]:
+        info["imputed_organs"] = policy_result["imputed_organs"]
+
     # 计算总分 (仅对有值的器官求和)
     valid_scores = [s for s in components.values() if s is not None]
-    total = sum(valid_scores) if valid_scores else None
+
+    # result_status: complete / partial / insufficient
+    n_valid = len(valid_scores)
+    n_total = len(components)
+    completeness = n_valid / n_total if n_total > 0 else 0.0
+    if n_valid == n_total:
+        result_status = "complete"
+    elif n_valid >= 1:
+        result_status = "partial"
+    else:
+        result_status = "insufficient"
 
     return {
         "sofa_score": total,
         "components": components,
         "data_quality_flags": flags,
         "meta": info,
+        "result_status": result_status,
+        "completeness": completeness,
     }

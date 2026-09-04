@@ -27,8 +27,9 @@ _AIRWAY = "_AIRWAY"
 _ROUTE_TABLE: dict[str, tuple[Optional[bool], Optional[bool], str]] = {
     # ---- 有创机械通气 (管辅/切辅/有创) ----
     # classic_advanced=✅, sofa2_advanced=✅, icu08_arm=invasive
-    "管辅":       (_AIRWAY,  True,     "invasive"),
-    "切辅":       (_AIRWAY,  True,     "invasive"),
+    # 管辅=气管插管+机械通气=IMV，两个版本都算高级支持，不受 _AIRWAY 控制
+    "管辅":       (True,     True,     "invasive"),
+    "切辅":       (True,     True,     "invasive"),
     "有创":       (True,     True,     "invasive"),
 
     # ---- 无创通气 (无创/无创呼吸机) ----
@@ -43,14 +44,15 @@ _ROUTE_TABLE: dict[str, tuple[Optional[bool], Optional[bool], str]] = {
     "管高":       (False,    True,     "hfnc"),
     "切高":       (False,    True,     "hfnc"),
 
-    # ---- 有创但非高级支持 (管氧/切氧/管文/切文/T管/带管自主) ----
-    # classic_advanced=❌, sofa2_advanced=❌, icu08_arm=invasive
-    "管氧":       (False,    False,    "invasive"),
-    "切氧":       (False,    False,    "invasive"),
-    "管文":       (False,    False,    "invasive"),
-    "切文":       (False,    False,    "invasive"),
-    "T管":        (False,    False,    "invasive"),
-    "带管自主":   (False,    False,    "invasive"),
+    # ---- 有人工气道但只低流量吸氧 (管氧/切氧/管文/切文/T管/带管自主) ----
+    # classic_advanced 由 ARTIFICIAL_AIRWAY_AS_ADVANCED 运行时控制
+    # sofa2_advanced=❌, icu08_arm=invasive
+    "管氧":       (_AIRWAY,  False,    "invasive"),
+    "切氧":       (_AIRWAY,  False,    "invasive"),
+    "管文":       (_AIRWAY,  False,    "invasive"),
+    "切文":       (_AIRWAY,  False,    "invasive"),
+    "T管":        (_AIRWAY,  False,    "invasive"),
+    "带管自主":   (_AIRWAY,  False,    "invasive"),
 
     # ---- 普通氧疗/无支持 (无/自主呼吸) ----
     # classic_advanced=❌, sofa2_advanced=❌, icu08_arm=none
@@ -88,8 +90,8 @@ _ROUTE_TABLE: dict[str, tuple[Optional[bool], Optional[bool], str]] = {
     "家用":       (False,    False,    "none"),
 
     # ---- 高频相关 ----
-    "无创高频":   (False,    True,     "hfnc"),     # 无创高频→HFNC
-    "高频":       (True,     True,     "invasive"),  # 高频振荡通气 HFOV→有创
+    "无创高频":   (True,     True,     "noninvasive"),  # NHFOV=无创正压通气
+    "高频":       (True,     True,     "invasive"),     # 高频振荡通气 HFOV→有创
 
     # ---- 单字兜底 ----
     "鼻":         (False,    False,    "none"),
@@ -99,8 +101,6 @@ _ROUTE_TABLE: dict[str, tuple[Optional[bool], Optional[bool], str]] = {
 _SPLIT_CHARS = set("、，/+ ")
 
 # 优先级: ECMO > IMV > NIV > HFNC > NONE
-_CLASSIC_TIER = {True: 3, False: 0}           # advanced=3, not advanced=0
-_SOFATIER     = {"ECMO": 6, "IMV": 5, "NIV": 4, "CPAP": 3, "BIPAP": 3, "HFNC": 2, "NONE": 1}
 _ICU08TIER    = {"invasive": 3, "noninvasive": 2, "hfnc": 1, "none": 0}
 
 # 模块级计数器: 记录未知取值次数，供阶段 9 打印
@@ -108,13 +108,25 @@ _unknown_counter: collections.Counter = collections.Counter()
 
 
 def _split_routes(raw: str) -> list[str]:
-    """拆分组合值,去空,保序。"""
+    """拆分组合值,去空,去纯数字,保序。"""
     if not raw:
         return []
     s = raw.strip()
     for ch in _SPLIT_CHARS:
         s = s.replace(ch, ",")
-    return [x.strip() for x in s.split(",") if x.strip()]
+    result = []
+    for x in s.split(","):
+        token = x.strip()
+        if not token:
+            continue
+        # 纯数字过滤: float 转换成功的 token 直接跳过
+        try:
+            float(token)
+            continue
+        except (TypeError, ValueError):
+            pass
+        result.append(token)
+    return result
 
 
 def classify_o2_route(
@@ -141,8 +153,8 @@ def classify_o2_route(
     parts = _split_routes(raw)
     if not parts:
         return {
-            "classic_advanced": False,
-            "sofa2_advanced": False,
+            "classic_advanced": None,
+            "sofa2_advanced": None,
             "icu08_arm": "none",
             "unknown_tokens": [],
         }
@@ -186,20 +198,13 @@ def classify_o2_route(
             icu08_tier = tier
             icu08_best = arm
 
-    # 有未知值: advanced 返回 None(不是 False), icu08_arm 返回 unknown
-    if unknown_tokens:
-        return {
-            "classic_advanced": None,
-            "sofa2_advanced": None,
-            "icu08_arm": "unknown",
-            "unknown_tokens": unknown_tokens,
-        }
-
+    # 未知取值不污染整条记录: 已识别到的最高级别照常返回
+    # unknown_tokens 只挂在返回值里做追溯
     return {
         "classic_advanced": classic_adv,
         "sofa2_advanced": sofa2_adv,
         "icu08_arm": icu08_best,
-        "unknown_tokens": [],
+        "unknown_tokens": unknown_tokens,
     }
 
 

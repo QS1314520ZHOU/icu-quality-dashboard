@@ -18,18 +18,28 @@ import config.indicator_windows as _cfg
 
 # ---- 枚举 ----
 class SaltForm(StrEnum):
-    """NE 盐型枚举。BASE=碱基计，SALT=盐型计。"""
+    """NE 盐型枚举。五档: base / bitartrate_monohydrate / anhydrous_bitartrate / hydrochloride / unknown。"""
     BASE = "base"
-    SALT = "salt"
+    BITARTRATE_MONOHYDRATE = "bitartrate_monohydrate"
+    ANHYDROUS_BITARTRATE = "anhydrous_bitartrate"
+    HYDROCHLORIDE = "hydrochloride"
+    UNKNOWN = "unknown"
 
 
 # ---- 常量 ----
-_LABEL_TO_BASE = {SaltForm.BASE: 1.0, SaltForm.SALT: 0.5}
+# 用字典查表，禁止写 .get 默认值
+_LABEL_TO_BASE: dict[SaltForm, Optional[float]] = {
+    SaltForm.BASE: 1.0,
+    SaltForm.BITARTRATE_MONOHYDRATE: 0.50,
+    SaltForm.ANHYDROUS_BITARTRATE: 1.0 / 1.89,
+    SaltForm.HYDROCHLORIDE: 1.0 / 1.22,
+    SaltForm.UNKNOWN: None,  # 拒绝计算
+}
 
 # dose 单位白名单(小写比较)
 ValidDoseUnit = {"mg", "毫克"}
 # liquidAmount 单位白名单(小写比较)
-ValidLiquidUnit = {"ml", "ml", "毫升"}
+ValidLiquidUnit = {"ml", "毫升"}
 
 # 体重有效范围(kg)
 WEIGHT_MIN = 20.0
@@ -81,8 +91,9 @@ def ne_ugkgmin(action: dict, weight_kg: float) -> tuple[Optional[float], list[st
     参数:
         action: drugExe 文档或其 drugList 子项，需含:
             - dose: 药量值
-            - unit: 药量单位(mg/毫克)
+            - doseUnit: 药量单位(mg/毫克)
             - liquidAmount: 配液总量(ml)
+            - liquidUnit: 配液单位(ml/毫升)
             - speed: 泵速(ml/h)(可选，来自 drugActionList)
         weight_kg: 患者体重(kg)
 
@@ -105,20 +116,33 @@ def ne_ugkgmin(action: dict, weight_kg: float) -> tuple[Optional[float], list[st
         return None, flags
 
     base_factor = _LABEL_TO_BASE[basis]
+    if base_factor is None:
+        flags.append(
+            f"NE_LABEL_BASIS 为 unknown, 拒绝计算 CV 剂量分. "
+            f"需药师确认盐型后重新计算."
+        )
+        return None, flags
 
     # ---- 2.2 dose 单位白名单 ----
     dose_raw = _safe_float(action.get("dose"))
-    dose_unit = (action.get("unit") or "").strip().lower()
+    dose_unit_raw = action.get("doseUnit")
+    if dose_unit_raw is None:
+        flags.append("doseUnit 缺失, 拒绝计算")
+        return None, flags
+    dose_unit = dose_unit_raw.strip().lower()
     if dose_unit not in ValidDoseUnit:
-        flags.append(f"dose 单位不在白名单: '{action.get('unit')}'（允许: mg/毫克），拒绝计算")
+        flags.append(f"doseUnit 不在白名单: '{dose_unit_raw}'（允许: mg/毫克），拒绝计算")
         return None, flags
 
     # ---- 2.2 liquidAmount 单位白名单 ----
-    # liquidAmount 可能在 action 子项或父文档顶层
     liquid_raw = _safe_float(action.get("liquidAmount"))
-    liquid_unit = (action.get("liquidAmountUnit") or "ml").strip().lower()
+    liquid_unit_raw = action.get("liquidUnit")
+    if liquid_unit_raw is None:
+        flags.append("liquidUnit 缺失, 拒绝计算")
+        return None, flags
+    liquid_unit = liquid_unit_raw.strip().lower()
     if liquid_unit not in ValidLiquidUnit:
-        flags.append(f"liquidAmount 单位不在白名单: '{action.get('liquidAmountUnit')}'（允许: ml/mL/毫升），拒绝计算")
+        flags.append(f"liquidUnit 不在白名单: '{liquid_unit_raw}'（允许: ml/mL/毫升），拒绝计算")
         return None, flags
 
     # ---- 2.3 liquidAmount <= 0 防除零 ----

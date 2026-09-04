@@ -25,30 +25,28 @@ logger = logging.getLogger(__name__)
 # 常量
 # ============================================================
 
-# VASO_WIDE: 所有 IV 泵入升压药
-VASO_WIDE_LABELS = {
-    "去甲肾上腺素", "norepinephrine", "ne",
-    "肾上腺素", "epinephrine", "epi",
+# VASO_WIDE: 运行时从医院药物字典读 classification=="血管活性"
+# 调用方需在启动时调用 set_vaso_wide_labels() 填充
+VASO_WIDE_LABELS: set[str] = set()
+
+# VASO_STRICT: SOFA-2 白名单 8 种 (硬编码)
+VASO_STRICT_LABELS = {
+    "去甲肾上腺素", "norepinephrine",
+    "肾上腺素", "epinephrine",
     "多巴胺", "dopamine",
     "多巴酚丁胺", "dobutamine",
     "血管加压素", "vasopressin",
     "苯肾上腺素", "phenylephrine",
-    "去氧肾上腺素", "phenylephrine",
     "米力农", "milrinone",
     "异丙肾上腺素", "isoproterenol",
 }
 
-# VASO_STRICT: SOFA-2 白名单 8 种
-VASO_STRICT_LABELS = {
-    "去甲肾上腺素", "norepinephrine", "ne",
-    "肾上腺素", "epinephrine", "epi",
-    "多巴胺", "dopamine",
-    "多巴酚丁胺", "dobutamine",
-    "血管加压素", "vasopressin",
-    "苯肾上腺素", "phenylephrine",
-    "米力农", "milrinone",
-    "异丙肾上腺素", "isoproterenol",
-}
+
+def set_vaso_wide_labels(labels: set[str]) -> None:
+    """由调用方注入, 数据源: 医院药物字典 classification=='血管活性'。"""
+    global VASO_WIDE_LABELS
+    VASO_WIDE_LABELS = set(labels)
+
 
 # 感染诊断关键词
 INFECTION_DIAG_KEYWORDS = [
@@ -58,11 +56,12 @@ INFECTION_DIAG_KEYWORDS = [
 ]
 
 # 晶体液 + 胶体液关键词
+# 删掉 氯化钠 (会命中 10% 浓钠) 和 醋酸 (会命中醋酸泼尼松)
 CRYSTALLOID_KEYWORDS = {
     "生理盐水", "0.9%氯化钠", "ns", "normal saline",
     "乳酸林格", "林格", "lr", "lactated ringer",
-    "醋酸林格", "醋酸", "plasmalyte",
-    "复方氯化钠", "氯化钠",
+    "醋酸林格", "plasmalyte",
+    "复方氯化钠",
 }
 COLLOID_KEYWORDS = {
     "白蛋白", "albumin",
@@ -90,12 +89,13 @@ def _in_window(ts: datetime, start: datetime, end: datetime) -> bool:
 
 def _classify_vasopressor(med_name: str) -> Tuple[bool, bool]:
     """
-    分类升压药。
+    分类升压药。全等匹配，禁止子串匹配。
     返回 (in_wide, in_strict)。
     """
     name_lower = (med_name or "").strip().lower()
-    in_wide = any(label in name_lower for label in VASO_WIDE_LABELS)
-    in_strict = any(label in name_lower for label in VASO_STRICT_LABELS)
+    # 全等匹配: 药物名必须精确命中集合中的某个元素
+    in_wide = name_lower in VASO_WIDE_LABELS
+    in_strict = name_lower in VASO_STRICT_LABELS
     return in_wide, in_strict
 
 
@@ -228,8 +228,8 @@ def judge_B3_step2(
         return False
     if antibiotic_time is None or culture_time is None:
         return None
-    # 抗生素晚于或等于血培养 → 达标
-    return antibiotic_time >= culture_time
+    # 抗生素晚于血培养 → 达标
+    return antibiotic_time > culture_time
 
 
 def judge_C1_map_trigger(map_value: Optional[float]) -> Optional[bool]:
@@ -332,30 +332,15 @@ def judge_bundle_finish_v3(
 def judge_bundle_v3(patient_data: Dict[str, Any]) -> Dict[str, Any]:
     """
     对单个患者执行 v3 全量 Bundle 判定。
+    1h 和 3h 分别跑完成判定，输出两套结果。
 
-    patient_data 需包含:
-        - t0: T0 时间
-        - eval_time: 评估时间
-        - diagnosis_text: 诊断文本 (I1)
-        - has_antibiotic: 是否有抗生素执行 (I2)
-        - has_culture: 是否有病原学送检 (I3)
-        - has_vasopressor: 是否有血管活性药 (S4/K2)
-        - lactate_initial: 初始乳酸值 (K1/A1)
-        - lactate_max: 最高乳酸值 (C2)
-        - map_min: 最低MAP值 (S3/C1)
-        - gcs_min: 最低GCS值 (S2)
-        - pf_ratio_min: 最低P/F比值 (S1)
-        - antibiotic_time: 抗生素执行时间 (B1)
-        - culture_time: 血培养执行时间 (B2)
-        - has_fluid_1h: 1h内有液体执行 (C3-1h)
-        - fluid_3h_ml: 3h液体量 (C3-3h)
-
-    返回完整判定结果。
+    返回: {"bundle_1h": {...}, "bundle_3h": {...}, "gate": {...}}
     """
     t0 = patient_data.get("t0")
     if not t0:
-        return {"finish": None, "reason": "NO_T0"}
+        return {"bundle_1h": None, "bundle_3h": None, "reason": "NO_T0"}
 
+    # ---- 门控判定 ----
     # 器官障碍 S1-S4
     s1 = judge_S1_pfratio(patient_data.get("pf_ratio_min"))
     s2 = judge_S2_gcs(patient_data.get("gcs_min"))
@@ -371,57 +356,66 @@ def judge_bundle_v3(patient_data: Dict[str, Any]) -> Dict[str, Any]:
     k1 = judge_K1_lactate(patient_data.get("lactate_initial"))
     k2 = judge_K2_pressor_needed(patient_data.get("has_vasopressor"))
 
-    # 脓毒性休克确认: K1 AND K2
-    has_septic_shock = (k1 is True) and (k2 is True)
-    if not has_septic_shock:
-        return {
-            "finish": None,
-            "is_septic_shock": False,
-            "reason": "NOT_SEPTIC_SHOCK",
-            "k1": k1, "k2": k2,
-            "s1": s1, "s2": s2, "s3": s3, "s4": s4,
-            "i1": i1, "i2": i2, "i3": i3,
-        }
+    gate = {
+        "s1": s1, "s2": s2, "s3": s3, "s4": s4,
+        "i1": i1, "i2": i2, "i3": i3,
+        "k1": k1, "k2": k2,
+        "is_septic_shock": None,
+        "has_infection": None,
+        "has_organ_dysfunction": None,
+    }
+
+    # 器官障碍门控: S1-S4 任一成立
+    has_organ_dysfunction = (s1 is True) or (s2 is True) or (s3 is True) or (s4 is True)
+    gate["has_organ_dysfunction"] = has_organ_dysfunction
+    if not has_organ_dysfunction:
+        gate["reason"] = "NO_ORGAN_DYSFUNCTION"
+        return {"bundle_1h": None, "bundle_3h": None, "gate": gate}
 
     # 感染证据门控: I1/I2/I3 任一
     has_infection = (i1 is True) or (i2 is True) or (i3 is True)
+    gate["has_infection"] = has_infection
     if not has_infection:
-        return {
-            "finish": None,
-            "is_septic_shock": True,
-            "reason": "NO_INFECTION_EVIDENCE",
-            "k1": k1, "k2": k2,
-            "s1": s1, "s2": s2, "s3": s3, "s4": s4,
-            "i1": i1, "i2": i2, "i3": i3,
-        }
+        gate["reason"] = "NO_INFECTION_EVIDENCE"
+        return {"bundle_1h": None, "bundle_3h": None, "gate": gate}
 
-    # Bundle 时间窗判定
+    # 脓毒性休克确认: K1 AND K2
+    has_septic_shock = (k1 is True) and (k2 is True)
+    gate["is_septic_shock"] = has_septic_shock
+    if not has_septic_shock:
+        gate["reason"] = "NOT_SEPTIC_SHOCK"
+        return {"bundle_1h": None, "bundle_3h": None, "gate": gate}
+
+    # ---- Bundle 时间窗判定 (公共部分) ----
     a1 = judge_A1_lactate_measured(patient_data.get("lactate_initial"))
     b1 = judge_B1_antibiotic_time(patient_data.get("antibiotic_time"))
     b2 = judge_B2_culture_time(patient_data.get("culture_time"))
     b3 = judge_B3_step2(b1, b2, patient_data.get("antibiotic_time"), patient_data.get("culture_time"))
     c1 = judge_C1_map_trigger(patient_data.get("map_min"))
     c2 = judge_C2_lactate_trigger(patient_data.get("lactate_max"))
-    c3_1h = judge_C3_1h_fluid(patient_data.get("has_fluid_1h"))
-    c3_3h = judge_C3_3h_fluid(patient_data.get("fluid_3h_ml"))
 
-    # C3 = C3-1h (1h窗口) 或 C3-3h (3h窗口)
-    c3 = c3_1h if c3_1h is not None else c3_3h
-
-    # 完成判定
-    result = judge_bundle_finish_v3(a1, b3, c1, c2, c3)
-
-    # 合并所有判定项
-    result.update({
-        "s1": s1, "s2": s2, "s3": s3, "s4": s4,
-        "i1": i1, "i2": i2, "i3": i3,
-        "k1": k1, "k2": k2,
+    common = {
         "a1": a1, "b1": b1, "b2": b2, "b3": b3,
-        "c1": c1, "c2": c2, "c3": c3,
-        "c3_1h": c3_1h, "c3_3h": c3_3h,
-        "is_septic_shock": has_septic_shock,
-        "has_infection": has_infection,
+        "c1": c1, "c2": c2,
         "t0": t0,
-    })
+    }
 
-    return result
+    # ---- 1h 窗口判定 ----
+    c3_1h = judge_C3_1h_fluid(patient_data.get("has_fluid_1h"))
+    result_1h = judge_bundle_finish_v3(a1, b3, c1, c2, c3_1h)
+    result_1h.update(common)
+    result_1h["c3"] = c3_1h
+    result_1h["c3_1h"] = c3_1h
+
+    # ---- 3h 窗口判定 ----
+    c3_3h = judge_C3_3h_fluid(patient_data.get("fluid_3h_ml"))
+    result_3h = judge_bundle_finish_v3(a1, b3, c1, c2, c3_3h)
+    result_3h.update(common)
+    result_3h["c3"] = c3_3h
+    result_3h["c3_3h"] = c3_3h
+
+    return {
+        "bundle_1h": result_1h,
+        "bundle_3h": result_3h,
+        "gate": gate,
+    }
