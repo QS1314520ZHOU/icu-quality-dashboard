@@ -735,22 +735,24 @@ def get_bundle_data_v2(dept_codes: list, start_date: str, end_date: str) -> dict
         return result
 
     try:
-        # 查询 VI_ICU_ZYYZ 中的感染性休克诊断
-        dc_diagnoses = list(dc.VI_ICU_ZYYZ.find(
+        # 查询 VI_ICU_ZYBR 中的感染性休克诊断
+        # 字段: diagnose (管道符分隔), pid, mrn, name, bed, admitTime
+        dc_diagnoses = list(dc.VI_ICU_ZYBR.find(
             {
-                "DIAGNOSIS_NAME": {"$regex": "感染性休克|脓毒症休克|脓毒性休克"},
-                "DIAGNOSIS_TIME": {
+                "diagnose": {"$regex": "感染性休克|脓毒症休克|脓毒性休克"},
+                "admitTime": {
                     "$gte": start_dt,
                     "$lte": dt(end_dt.year, end_dt.month, end_dt.day, 23, 59, 59),
                 },
             },
             {
-                "PATIENT_ID": 1,
-                "PATIENT_NAME": 1,
-                "MRN": 1,
-                "DIAGNOSIS_TIME": 1,
-                "DIAGNOSIS_NAME": 1,
-                "BED_NO": 1,
+                "pid": 1,
+                "name": 1,
+                "mrn": 1,
+                "admitTime": 1,
+                "diagnose": 1,
+                "bed": 1,
+                "deptTrue": 1,
             },
         ))
 
@@ -762,8 +764,8 @@ def get_bundle_data_v2(dept_codes: list, start_date: str, end_date: str) -> dict
         sc_mrns = {p.get("mrn") or p.get("hisPid") for p in result_sc["den_patients"]}
 
         for dx in dc_diagnoses:
-            mrn = (dx.get("MRN") or "").strip()
-            patient_id = (dx.get("PATIENT_ID") or "").strip()
+            mrn = str(dx.get("mrn") or "").strip()
+            patient_id = str(dx.get("pid") or "").strip()
 
             # 去重: 如果该患者已在 SmartCare 结果中，跳过
             if patient_id in sc_pids or mrn in sc_mrns:
@@ -773,15 +775,15 @@ def get_bundle_data_v2(dept_codes: list, start_date: str, end_date: str) -> dict
             result["den_patients"].append({
                 "_id": patient_id,
                 "mrn": mrn,
-                "name": dx.get("PATIENT_NAME", ""),
-                "hisBed": dx.get("BED_NO", ""),
-                "diagnosisTime": dx.get("DIAGNOSIS_TIME"),
+                "name": dx.get("name", ""),
+                "hisBed": dx.get("bed", ""),
+                "diagnosisTime": dx.get("admitTime"),
                 "diseaseId": str(dx.get("_id", "")),
-                "source": "vi_zyyz",
+                "source": "vi_zybr",
             })
 
     except Exception as _exc:
-        logger.warning("DC VI_ICU_ZYYZ query failed: %s", _exc)
+        logger.warning("DC VI_ICU_ZYBR query failed: %s", _exc)
 
     return result
 
