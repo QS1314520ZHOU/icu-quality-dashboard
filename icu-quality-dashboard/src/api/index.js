@@ -59,6 +59,10 @@ export async function fetchDetail(code, period, part, icuUnit = 'all', endPeriod
   if (options.offset) url += `&offset=${options.offset}`;
   if (['ICU-12', 'ICU-13'].includes(code)) url += '&nocache=true';
   const res = await fetch(url);
+  if (!res.ok) {
+    const err = await res.json().catch(() => ({ detail: `请求失败 (${res.status})` }));
+    throw new Error(err.detail || `请求失败 (${res.status})`);
+  }
   return res.json();
 }
 
@@ -158,4 +162,63 @@ export async function removeExclusion(code, exclusionKey, period, icuUnit = 'all
     method: 'DELETE',
   });
   return resp.json();
+}
+
+// ---- V3 Bundle 判定详情 ----
+export async function fetchBundleV3Detail(mrn, period = '') {
+  let url = `${BASE}/bundle/v3/${encodeURIComponent(mrn)}`;
+  if (period) url += `?period=${period}`;
+  const res = await fetch(url);
+  return res.json();
+}
+
+// ---- 感染部位 ----
+export async function fetchInfectionSite(pid) {
+  const res = await fetch(`${BASE}/bundle/${encodeURIComponent(pid)}/infection-site`);
+  return res.json();
+}
+
+export async function addInfectionSite(pid, body) {
+  const res = await fetch(`${BASE}/bundle/${encodeURIComponent(pid)}/infection-site`, {
+    method: 'POST',
+    headers: { 'Content-Type': 'application/json' },
+    body: JSON.stringify(body),
+  });
+  return res.json();
+}
+
+export async function removeInfectionSite(pid, exclusionKey) {
+  const res = await fetch(`${BASE}/bundle/${encodeURIComponent(pid)}/infection-site/${encodeURIComponent(exclusionKey)}`, {
+    method: 'DELETE',
+  });
+  return res.json();
+}
+
+// ---- 三层人工覆盖 ----
+export async function fetchBundleOverrides(pid, level = null) {
+  let url = `${BASE}/bundle/${encodeURIComponent(pid)}/overrides`;
+  if (level) url += `?level=${level}`;
+  const res = await fetch(url);
+  return res.json();
+}
+
+export async function addBundleOverride(pid, body) {
+  const res = await fetch(`${BASE}/bundle/${encodeURIComponent(pid)}/overrides`, {
+    method: 'POST',
+    headers: { 'Content-Type': 'application/json' },
+    body: JSON.stringify(body),
+  });
+  return res.json();
+}
+
+export async function removeBundleOverride(overrideKey) {
+  const res = await fetch(`${BASE}/bundle/overrides/${encodeURIComponent(overrideKey)}`, {
+    method: 'DELETE',
+  });
+  return res.json();
+}
+
+export async function fetchBundleOverrideStats(period, icuUnit = 'all') {
+  const res = await fetch(`${BASE}/bundle/override-stats?period=${period}&icu_unit=${encodeURIComponent(icuUnit)}`);
+  return res.json();
 }

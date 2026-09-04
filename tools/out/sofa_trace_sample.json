@@ -1,0 +1,234 @@
+[
+  {
+    "pid": "65672ec8b3d93b2a30e99b1e",
+    "components": {
+      "PF_ratio": {
+        "source": "bGATemp",
+        "code": "param_bg_P/Fratio",
+        "unit": "mmHg",
+        "max_staleness_h": 4,
+        "records": [
+          {
+            "value": 380.0,
+            "time": "2023-11-30 22:03:00",
+            "record_id": "6569115c2bbd527205d8235a"
+          },
+          {
+            "value": 283.0,
+            "time": "2023-11-30 11:15:00",
+            "record_id": "65688dad2bbd527205d7febb"
+          },
+          {
+            "value": 239.0,
+            "time": "2023-11-30 06:43:00",
+            "record_id": "656863722bbd527205d7f15d"
+          },
+          {
+            "value": 383.0,
+            "time": "2023-11-29 21:19:00",
+            "record_id": "656863722bbd527205d7f15c"
+          },
+          {
+            "value": 270.0,
+            "time": "2023-11-29 14:08:00",
+            "record_id": "656863722bbd527205d7f15b"
+          }
+        ],
+        "selected": {
+          "value": 380.0,
+          "time": "2023-11-30 22:03:00",
+          "record_id": "6569115c2bbd527205d8235a"
+        }
+      },
+      "MAP": {
+        "source": "bedside",
+        "code": "param_ibp_m",
+        "unit": "mmHg",
+        "max_staleness_h": 1,
+        "records": [
+          {
+            "value": "104",
+            "time": "2023-12-01 02:00:00",
+            "record_id": "656941262bbd527205d83004"
+          }
+        ],
+        "selected": {
+          "value": "104",
+          "time": "2023-12-01 02:00:00"
+        }
+      },
+      "GCS": {
+        "source": "bedside",
+        "code": "param_score_gcs_obs",
+        "unit": "分",
+        "max_staleness_h": 8,
+        "records": [
+          {
+            "value": null,
+            "time": "2023-12-01 03:00:00",
+            "record_id": "656941382bbd527205d8301d"
+          }
+        ],
+        "selected": {
+          "value": null,
+          "time": "2023-12-01 03:00:00"
+        },
+        "note": "strVal是编码(E1VTM1),需解析为数字总分"
+      },
+      "Lactate": {
+        "source": "bGATemp",
+        "code": "param_bg_Lac",
+        "unit": "mmol/L",
+        "records": [
+          {
+            "value": 1.2000000476837158,
+            "time": "2023-11-30 22:03:00",
+            "record_id": "6569115c2bbd527205d8235a"
+          },
+          {
+            "value": 2.799999952316284,
+            "time": "2023-11-30 11:15:00",
+            "record_id": "65688dad2bbd527205d7febb"
+          },
+          {
+            "value": 1.100000023841858,
+            "time": "2023-11-30 06:43:00",
+            "record_id": "656863722bbd527205d7f15d"
+          },
+          {
+            "value": 1.899999976158142,
+            "time": "2023-11-29 21:19:00",
+            "record_id": "656863722bbd527205d7f15c"
+          },
+          {
+            "value": 0.800000011920929,
+            "time": "2023-11-29 14:08:00",
+            "record_id": "656863722bbd527205d7f15b"
+          }
+        ],
+        "selected": {
+          "value": 1.2000000476837158,
+          "time": "2023-11-30 22:03:00",
+          "record_id": "6569115c2bbd527205d8235a"
+        },
+        "note": "不区分动脉/静脉"
+      }
+    }
+  },
+  {
+    "pid": "6565456808d32559cbd5afef",
+    "components": {
+      "PF_ratio": {
+        "source": "bGATemp",
+        "code": "param_bg_P/Fratio",
+        "unit": "mmHg",
+        "max_staleness_h": 4,
+        "records": [
+          {
+            "value": 379.0,
+            "time": "2023-12-01 04:49:00",
+            "record_id": "656968902bbd527205d83a90"
+          },
+          {
+            "value": 145.0,
+            "time": "2023-12-01 04:27:00",
+            "record_id": "656967452bbd527205d83a45"
+          },
+          {
+            "value": 338.0,
+            "time": "2023-12-01 01:33:00",
+            "record_id": "6569622b2bbd527205d839a6"
+          },
+          {
+            "value": 400.0,
+            "time": "2023-11-30 23:59:00",
+            "record_id": "6569295e2bbd527205d82916"
+          },
+          {
+            "value": 438.0,
+            "time": "2023-11-30 22:20:00",
+            "record_id": "6569295e2bbd527205d82915"
+          }
+        ],
+        "selected": {
+          "value": 379.0,
+          "time": "2023-12-01 04:49:00",
+          "record_id": "656968902bbd527205d83a90"
+        }
+      },
+      "MAP": {
+        "source": "bedside",
+        "code": "param_ibp_m",
+        "unit": "mmHg",
+        "max_staleness_h": 1,
+        "records": [
+          {
+            "value": "77",
+            "time": "2023-12-01 02:00:00",
+            "record_id": "6569456a2bbd527205d831b7"
+          }
+        ],
+        "selected": {
+          "value": "77",
+          "time": "2023-12-01 02:00:00"
+        }
+      },
+      "GCS": {
+        "source": "bedside",
+        "code": "param_score_gcs_obs",
+        "unit": "分",
+        "max_staleness_h": 8,
+        "records": [
+          {
+            "value": "E3V5M6",
+            "time": "2023-12-01 05:00:00",
+            "record_id": "656969222bbd527205d83adb"
+          }
+        ],
+        "selected": {
+          "value": "E3V5M6",
+          "time": "2023-12-01 05:00:00"
+        },
+        "note": "strVal是编码(E1VTM1),需解析为数字总分"
+      },
+      "Lactate": {
+        "source": "bGATemp",
+        "code": "param_bg_Lac",
+        "unit": "mmol/L",
+        "records": [
+          {
+            "value": 1.2000000476837158,
+            "time": "2023-12-01 04:49:00",
+            "record_id": "656968902bbd527205d83a90"
+          },
+          {
+            "value": 0.699999988079071,
+            "time": "2023-12-01 04:27:00",
+            "record_id": "656967452bbd527205d83a45"
+          },
+          {
+            "value": 0.8999999761581421,
+            "time": "2023-12-01 01:33:00",
+            "record_id": "6569622b2bbd527205d839a6"
+          },
+          {
+            "value": 0.8999999761581421,
+            "time": "2023-11-30 23:59:00",
+            "record_id": "6569295e2bbd527205d82916"
+          },
+          {
+            "value": 1.0,
+            "time": "2023-11-30 22:20:00",
+            "record_id": "6569295e2bbd527205d82915"
+          }
+        ],
+        "selected": {
+          "value": 1.2000000476837158,
+          "time": "2023-12-01 04:49:00",
+          "record_id": "656968902bbd527205d83a90"
+        },
+        "note": "不区分动脉/静脉"
+      }
+    }
+  }
+]

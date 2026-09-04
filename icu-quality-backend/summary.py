@@ -436,7 +436,7 @@ def rebuild_summary(dept_codes: list, periods: list, indicators: list = None,
             pass
 
         doc = {
-            "dept_code": ",".join(dept_codes) if len(dept_codes) > 1 else dept_codes[0],
+            "dept_code": ",".join(dept_codes) if len(dept_codes) > 1 else (dept_codes[0] if dept_codes else "all"),
             "period": period,
             "indicator": indicator,
             "numerator": result["num"],
@@ -538,7 +538,7 @@ def read_summary(dept_codes: list, periods: list, indicators: list = None) -> li
         try:
             db = get_client(db_name)[db_name]
             coll = db[SUMMARY_COLLECTION]
-            dept_key = ",".join(dept_codes) if len(dept_codes) > 1 else dept_codes[0]
+            dept_key = ",".join(dept_codes) if len(dept_codes) > 1 else (dept_codes[0] if dept_codes else "all")
             query = {"dept_code": dept_key, "period": {"$in": periods}}
             if indicators:
                 query["indicator"] = {"$in": [i for i in indicators if i not in NO_DATA_INDICATORS]}

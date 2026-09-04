@@ -3,7 +3,7 @@ from fastapi import FastAPI, BackgroundTasks
 from pydantic import BaseModel
 from datetime import date, datetime, timedelta
 from ai_analyzer import analyze, get_all_ai_decisions, override_ai_decision, ensure_ai_cache_collection as ensure_ai_cache
-from db import assert_db_ready, get_open_bed_count, get_occupied_bed_days, get_staff_count, get_icu04_apache_data, get_bundle_data, get_icu08_data, get_icu06_data, get_icu09_data, get_icu10_data, get_icu11_data, get_icu12_data, get_icu13_data, get_icu14_data, get_icu15_data, get_icu16_data, get_icu17_data, get_icu18_data, get_icu19_data, get_cauti_data, get_tri_tube_suspected_warnings, get_sepsis_alert_warnings, confirm_tri_tube_warning, get_dvt_prevention_patients, get_client, BED_DB_NAMES, PROFESSION_CN, get_patient_census, get_patient_census_detail, iter_bed_dbs
+from db import assert_db_ready, get_open_bed_count, get_occupied_bed_days, get_staff_count, get_icu04_apache_data, get_bundle_data, get_bundle_data_v2, judge_bundle_v3_for_patient, get_icu08_data, get_icu06_data, get_icu09_data, get_icu10_data, get_icu11_data, get_icu12_data, get_icu13_data, get_icu14_data, get_icu15_data, get_icu16_data, get_icu17_data, get_icu18_data, get_icu19_data, get_cauti_data, get_tri_tube_suspected_warnings, get_sepsis_alert_warnings, confirm_tri_tube_warning, get_dvt_prevention_patients, get_client, BED_DB_NAMES, PROFESSION_CN, get_patient_census, get_patient_census_detail, iter_bed_dbs
 import random
 import os
 import sys
@@ -12,11 +12,25 @@ import threading
 import uuid
 import summary as summary_module
 import calendar
+import logging
+import traceback
 from pathlib import Path
 from fastapi.staticfiles import StaticFiles
-from starlette.responses import FileResponse
+from starlette.responses import FileResponse, JSONResponse
+from starlette.requests import Request
+
+logger = logging.getLogger("main")
 
 app = FastAPI(title="ICU质控指标API")
+
+# 全局异常处理：返回 JSON 而不是 HTML
+@app.exception_handler(Exception)
+async def global_exception_handler(request: Request, exc: Exception):
+    logger.error("Unhandled exception on %s: %s\n%s", request.url.path, exc, traceback.format_exc())
+    return JSONResponse(
+        status_code=500,
+        content={"detail": f"Internal Server Error: {str(exc)[:200]}"},
+    )
 
 
 def _runtime_base_dir() -> Path:
@@ -98,7 +112,7 @@ def _cache_set(key, val):
 
 DETAIL_CACHE_COLLECTION = "icu_indicator_detail_cache"
 # 缓存版本号：修改口径时 +1，旧条目自然失效
-CACHE_VERSION = 4
+CACHE_VERSION = 6
 
 
 def _dept_cache_key(dept_codes: list) -> str:
@@ -263,6 +277,14 @@ def _write_detail_cache(dept_codes: list, period: str, code: str, part: str, ite
     coll = _get_detail_cache_collection()
     if coll is None:
         return
+    # 先删除旧版本缓存
+    coll.delete_many({
+        "dept_code": _dept_cache_key(dept_codes),
+        "period": period,
+        "code": code,
+        "part": part,
+        "cache_version": {"$ne": CACHE_VERSION},
+    })
     coll.update_one(
         {
             "dept_code": _dept_cache_key(dept_codes),
@@ -749,8 +771,8 @@ def query_summary(period: str, icu_unit: str = "all"):
     icu08_num = icu08_data["num_count"]
     icu08_den = icu08_data["den_count"]
 
-    # ----- ICU-05-1h/3h/6h：从 infectionShockV2 表取真实 Bundle 数据 -----
-    bundle_data = get_bundle_data(dept_codes, start_date, end_date)
+    # ----- ICU-05-1h/3h/6h：V3 双集合查询 + 完整分母逻辑 -----
+    bundle_data = get_bundle_data_v2(dept_codes, start_date, end_date)
     bun_den = bundle_data["total"]
     bun_1h = bundle_data["h1_num"]
     bun_3h = bundle_data["h3_num"]
@@ -1034,28 +1056,121 @@ def query_detail(code: str, period: str, part: str, icu_unit: str = "all"):
             _enrich_admission_discharge(items, dept_codes)
             return items
 
-    # ---- ICU-05-1h/3h/6h：Bundle 明细 ----
+    # ---- ICU-05-1h/3h/6h：Bundle 明细 (V3) ----
     if code in ("ICU-05-1h", "ICU-05-3h", "ICU-05-6h"):
-        data = get_bundle_data(dept_codes, start_date, end_date)
+        try:
+            data = get_bundle_data_v2(dept_codes, start_date, end_date)
+        except Exception as e:
+            logger.error("ICU-05 get_bundle_data_v2 failed: %s", e)
+            data = {"den_patients": [], "h1_patients": [], "h3_patients": [], "h6_patients": []}
+        # 使用 get_bundle_data_v2 已经计算好的 v3 结果
+        den_patients = data.get("den_patients", [])
+        v3_results = {}
+        for p in den_patients:
+            mrn = p.get("mrn", "")
+            v3 = p.get("v3", {})
+            if v3:
+                v3_results[mrn] = v3
+
+        # 构建 v3 字段的完整映射
+        def _build_v3_dict(v3):
+            return {
+                "t0": str(v3.get("t0", ""))[:16] if v3.get("t0") else "",
+                "finish": v3.get("finish"),
+                "is_septic_shock": v3.get("is_septic_shock"),
+                "a1": v3.get("a1"), "b3": v3.get("b3"),
+                "c1": v3.get("c1"), "c2": v3.get("c2"), "c3": v3.get("c3"),
+                "k1": v3.get("k1"), "k2": v3.get("k2"),
+                "i1": v3.get("i1"), "i2": v3.get("i2"), "i3": v3.get("i3"),
+                "s1": v3.get("s1"), "s2": v3.get("s2"), "s3": v3.get("s3"), "s4": v3.get("s4"),
+                # 乳酸
+                "lactate": v3.get("lactate_initial"),
+                "lactate_time": str(v3.get("lactate_initial_time", ""))[:16] if v3.get("lactate_initial_time") else "",
+                "lactate_max": v3.get("lactate_max"),
+                "lactate_recheck": v3.get("lactate_recheck_value"),
+                "lactate_recheck_time": str(v3.get("lactate_recheck_time", ""))[:16] if v3.get("lactate_recheck_time") else "",
+                # MAP
+                "map": v3.get("map_min"),
+                "map_time": str(v3.get("map_time", ""))[:16] if v3.get("map_time") else "",
+                # GCS
+                "gcs": v3.get("gcs_min"),
+                "gcs_time": str(v3.get("gcs_time", ""))[:16] if v3.get("gcs_time") else "",
+                # P/F
+                "pf_ratio": v3.get("pf_ratio_min"),
+                "pf_ratio_time": str(v3.get("pf_ratio_time", ""))[:16] if v3.get("pf_ratio_time") else "",
+                # 抗生素
+                "antibiotic_time": str(v3.get("antibiotic_time", ""))[:16] if v3.get("antibiotic_time") else "",
+                "antibiotic_name": v3.get("antibiotic_name", ""),
+                # 血培养
+                "culture_time": str(v3.get("culture_time", ""))[:16] if v3.get("culture_time") else "",
+                "culture_name": v3.get("culture_name", ""),
+                # 液体
+                "fluid_ml": v3.get("fluid_3h_ml", 0),
+                "has_fluid_1h": v3.get("has_fluid_1h"),
+                # 血管活性药
+                "vaso_name": v3.get("vaso_name", ""),
+                "vaso_start_time": str(v3.get("vaso_start_time", ""))[:16] if v3.get("vaso_start_time") else "",
+                # 原因
+                "reason": v3.get("reason", ""),
+                "reason_codes": v3.get("reason_codes", []),
+                # 数据质量
+                "data_quality_flags": v3.get("data_quality_flags", []),
+            }
+
         hour = code.split("-")[2]  # '1h', '3h', '6h'
         key = f"h{hour[0]}_patients"
         if part == "numerator":
             items = []
             for p in data.get(key, []):
+                mrn = p.get("mrn", "")
+                v3 = v3_results.get(mrn, {})
+                # 获取 admission_type
+                admission_type = p.get("admission_type", "")
                 items.append({
-                    "patient_id": p.get("mrn", ""), "name": p.get("name", ""),
+                    "patient_id": mrn, "name": p.get("name", ""),
                     "gender": "", "age": "", "bed_no": p.get("hisBed", ""), "dept": "",
-                    "admit_time": "", "discharge_time": "", "admission_source": "",
+                    "admit_time": str(v3.get("t0", ""))[:16] if v3.get("t0") else "",
+                    "discharge_time": "", "admission_source": "",
+                    "admission_type": admission_type,
                     "value": 1,
+                    "t0": str(v3.get("t0", ""))[:16] if v3.get("t0") else "",
+                    "diagnose": p.get("diagnose", ""),
+                    "sc_pid": p.get("sc_pid", ""),
+                    "v3": _build_v3_dict(v3),
                 })
             _enrich_admission_discharge(items, dept_codes)
             return items
         else:
-            items = [{"patient_id": d.get("mrn", ""), "name": d.get("name", ""),
-                      "gender": "", "age": "", "bed_no": "", "dept": "",
-                      "admit_time": str(d.get("diagnosisTime", ""))[:16] if d.get("diagnosisTime") else "",
-                      "discharge_time": "", "admission_source": "", "value": 1}
-                     for d in data.get("den_patients", [])]
+            items = []
+            for d in den_patients:
+                mrn = d.get("mrn", "")
+                v3 = v3_results.get(mrn, {})
+                # 只显示确诊脓毒性休克的患者（K1 AND K2 都成立）
+                if not v3.get("is_septic_shock"):
+                    continue
+                # 获取 admission_type
+                sc_pid = d.get("sc_pid")
+                admission_type = ""
+                try:
+                    if sc_pid:
+                        sc = get_client("SmartCare")["SmartCare"]
+                        patient_doc = sc.patient.find_one({'_id': sc_pid}, {'admissionType': 1})
+                        if patient_doc:
+                            admission_type = patient_doc.get('admissionType', '')
+                except Exception:
+                    pass
+                items.append({
+                    "patient_id": mrn, "name": d.get("name", ""),
+                    "gender": "", "age": "", "bed_no": "", "dept": "",
+                    "admit_time": str(d.get("diagnosisTime", ""))[:16] if d.get("diagnosisTime") else "",
+                    "discharge_time": "", "admission_source": "",
+                    "admission_type": admission_type,
+                    "value": 1,
+                    "t0": str(v3.get("t0", ""))[:16] if v3.get("t0") else "",
+                    "diagnose": d.get("diagnose", ""),
+                    "sc_pid": d.get("sc_pid", ""),
+                    "v3": _build_v3_dict(v3),
+                })
             _enrich_admission_discharge(items, dept_codes)
             return items
 
@@ -2289,8 +2404,12 @@ def indicator_detail(code: str, period: str, part: str, icu_unit: str = "all", e
             else "分母：来自 patient 表，统计期内在科患者（排除 invalid）"
     elif code in ("ICU-05-1h", "ICU-05-3h", "ICU-05-6h"):
         h = code.split("-")[2]
-        source_desc = f"分子：来自 infectionShockV2 表，{h} bundle 达标（baStandard或finish）的患者" if part == "numerator" \
-            else "分母：来自 diseaseDiagnosis 表，脓毒性休克诊断 + patient 表在科过滤"
+        source_desc = (
+            f"分子：V3双集合查询，{h} Bundle达标（K1+K2确认脓毒性休克 + A1乳酸测定 + B3血培养先于抗生素 + C3液体达标）的患者"
+            if part == "numerator"
+            else "分母：入院24h内进ICU且确诊脓毒性休克（S1-S4器官障碍 + I1-I3感染证据 + K1MAP<70 + K2升压药）"
+            + " | 判定流程：器官障碍→感染证据→脓毒性休克→Bundle完成 | T0=首条医嘱时间"
+        )
     elif code == "ICU-06":
         source_desc = (f"分子：来自 VI_ICU_ZYYZ 培养类检验医嘱，首次抗生素前有病原学送检的患者（送检≤首剂时间）" if part == "numerator"
             else f"分母：来自 drugExe 抗菌药执行记录，经三层判定（A感染信号→B围术期→C短疗程→AI灰区）确认治疗目的，已剔除预防性用药")
@@ -2432,6 +2551,42 @@ def remove_exclusion(code: str, exclusion_key: str, period: str = "", icu_unit: 
 
 
 # ============================================================
+# V3 Bundle 判定详情 API
+# ============================================================
+
+@app.get("/api/bundle/v3/{mrn}")
+def get_bundle_v3_detail(mrn: str, period: str = ""):
+    """获取单患者的 V3 Bundle 判定详情。"""
+    if not period:
+        now = datetime.utcnow()
+        period = f"{now.year}-{now.month:02d}"
+    year, month = map(int, period.split("-"))
+    start_date = f"{year}-{month:02d}-01"
+    import calendar
+    last_day = calendar.monthrange(year, month)[1]
+    end_date = f"{year}-{month:02d}-{last_day}"
+
+    # 从分母患者中查找
+    data = get_bundle_data_v2([], start_date, end_date)
+    for p in data.get("den_patients", []):
+        if p.get("mrn") == mrn:
+            sc_pid = p.get("sc_pid")
+            dc_pid = p.get("_id", "")
+            t0 = p.get("t0")
+            diag = p.get("diagnose", "")
+            if t0 and sc_pid:
+                res = judge_bundle_v3_for_patient(sc_pid, dc_pid, mrn, t0, diag)
+                return {"ok": True, "patient": {
+                    "mrn": mrn, "name": p.get("name", ""),
+                    "t0": str(t0) if t0 else None,
+                    "diagnose": diag,
+                }, "v3": res}
+            return {"ok": True, "patient": {"mrn": mrn, "name": p.get("name", "")},
+                    "v3": {"reason": "NO_T0"}}
+    return {"error": f"Patient MRN {mrn} not found in {period} denominator"}
+
+
+# ============================================================
 # Stage 7: 三层人工覆盖 API
 # ============================================================
 
@@ -2499,7 +2654,7 @@ def get_bundle_infection_site(pid: str):
 
 @app.post("/api/bundle/{pid}/infection-site")
 def add_bundle_infection_site(pid: str, body: dict = None):
-    """添加感染部位记录。"""
+    """添加感染部位记录 (V3 扩展版)。"""
     if not body:
         return {"error": "Missing body"}
     from db import save_infection_site
@@ -2518,6 +2673,9 @@ def add_bundle_infection_site(pid: str, body: dict = None):
         infection_site=body.get("infection_site", ""),
         eval_time=eval_time,
         operator=body.get("operator", "system"),
+        evidence_type=body.get("evidence_type", ""),
+        notes=body.get("notes", ""),
+        secondary_sites=body.get("secondary_sites", []),
     )
     return result
 

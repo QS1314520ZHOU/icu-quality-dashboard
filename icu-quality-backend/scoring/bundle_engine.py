@@ -1,9 +1,17 @@
 """
-Bundle 判定引擎 — 纯函数。
-基于需求文档 ICU-05 §2、§4 实现。
+Bundle 判定引擎 V3 — 纯函数。
+基于需求文档 ICU-05 v3 §2 §4 实现。
 
 判定项只返回 True / False / None (None 不等于 False)。
 缺失数据返回 None + data_quality_flags，不得回退为 0 或空值。
+
+v3 判定项:
+  器官障碍: S1(氧合指数<300) S2(GCS<13) S3(MAP<70) S4(血管活性药)
+  感染证据: I1(诊断关键词) I2(抗生素执行) I3(病原学送检)
+  休克确认: K1(乳酸≥2) K2(需要升压)
+  第一步:   A1(乳酸测定)
+  第二步:   B1(抗生素时间) B2(血培养时间) B3(B1∧B2∧B1晚于B2)
+  第三步:   C1(MAP<70触发) C2(乳酸≥4触发) C3(液体达标)
 """
 from __future__ import annotations
 
@@ -26,13 +34,28 @@ VASO_WIDE_LABELS = {
     "血管加压素", "vasopressin",
     "苯肾上腺素", "phenylephrine",
     "去氧肾上腺素", "phenylephrine",
+    "米力农", "milrinone",
+    "异丙肾上腺素", "isoproterenol",
 }
 
-# VASO_STRICT: 仅去甲肾上腺素 + 肾上腺素
+# VASO_STRICT: SOFA-2 白名单 8 种
 VASO_STRICT_LABELS = {
     "去甲肾上腺素", "norepinephrine", "ne",
     "肾上腺素", "epinephrine", "epi",
+    "多巴胺", "dopamine",
+    "多巴酚丁胺", "dobutamine",
+    "血管加压素", "vasopressin",
+    "苯肾上腺素", "phenylephrine",
+    "米力农", "milrinone",
+    "异丙肾上腺素", "isoproterenol",
 }
+
+# 感染诊断关键词
+INFECTION_DIAG_KEYWORDS = [
+    "脓毒", "败血", "感染性休克", "感染", "肺炎", "腹膜炎",
+    "脑膜炎", "蜂窝织炎", "脓肿", "化脓", "尿路感染", "胆管炎",
+    "septic", "sepsis", "infection",
+]
 
 # 晶体液 + 胶体液关键词
 CRYSTALLOID_KEYWORDS = {
@@ -62,7 +85,7 @@ def _aware(dt: datetime) -> datetime:
 
 def _in_window(ts: datetime, start: datetime, end: datetime) -> bool:
     """检查时间戳是否在 [start, end] 窗口内。"""
-    return start <= _aware(ts) <= end
+    return start <= _aware(ts) <= _aware(end)
 
 
 def _classify_vasopressor(med_name: str) -> Tuple[bool, bool]:
@@ -90,370 +113,315 @@ def _classify_fluid(med_name: str) -> Optional[str]:
 
 
 # ============================================================
-# T0 解析
+# v3 判定项：器官障碍 S1-S4
 # ============================================================
 
-def resolve_septic_shock_t0(
-    diagnoses: List[dict],
-    eval_time: datetime,
-) -> Tuple[Optional[datetime], Optional[str]]:
-    """
-    解析感染性休克 T0 时间。
+def judge_S1_pfratio(pf_ratio: Optional[float]) -> Optional[bool]:
+    """S1: 氧合指数 < 300 (窗口内最低值)"""
+    if pf_ratio is None:
+        return None
+    return pf_ratio < 300
 
-    Args:
-        diagnoses: 疾病诊断列表 (diseaseDiagnosis 或 VI_ICU_ZYYZ)
-        eval_time: 评估时间
 
-    Returns:
-        (t0_time, t0_source) 或 (None, None)
-        t0_source: "disease_diagnosis" / "vi_zyyz" / None
-    """
-    eval_time = _aware(eval_time)
-    candidates = []
+def judge_S2_gcs(gcs: Optional[int]) -> Optional[bool]:
+    """S2: GCS < 13 (评分表数字总分优先，bedside编码兜底)"""
+    if gcs is None:
+        return None
+    return gcs < 13
 
-    for dx in diagnoses:
-        # 检查诊断名称是否包含感染性休克关键词
-        dx_name = (dx.get("diagnosisName") or dx.get("DIAGNOSIS_NAME") or "").strip()
-        if not dx_name:
-            continue
 
-        is_septic_shock = any(
-            kw in dx_name
-            for kw in ["感染性休克", "septic shock", "脓毒症休克", "脓毒性休克"]
-        )
-        if not is_septic_shock:
-            continue
+def judge_S3_map(map_value: Optional[float]) -> Optional[bool]:
+    """S3: 平均动脉压 < 70 mmHg (有创+无创混合，窗口内最低值)"""
+    if map_value is None:
+        return None
+    return map_value < 70
 
-        # 取诊断时间
-        dx_time = dx.get("diagnosisTime") or dx.get("DIAGNOSIS_TIME") or dx.get("record_time")
-        if not isinstance(dx_time, datetime):
-            continue
-        dx_time = _aware(dx_time)
-        if dx_time > eval_time:
-            continue
 
-        source = "disease_diagnosis" if "diagnosisName" in dx else "vi_zyyz"
-        candidates.append((dx_time, source))
-
-    if not candidates:
-        return None, None
-
-    # 取最早的时间
-    candidates.sort(key=lambda x: x[0])
-    return candidates[0]
+def judge_S4_vasopressor(has_vasopressor: Optional[bool]) -> Optional[bool]:
+    """S4: 血管活性药 VASO_WIDE 口径 (存在即成立)"""
+    if has_vasopressor is None:
+        return False  # 缺失处理: false
+    return has_vasopressor
 
 
 # ============================================================
-# SOFA 器官功能障碍判定
+# v3 判定项：感染证据 I1-I3
 # ============================================================
 
-def judge_sepsis_organ_dysfunction(
-    sofa_score: Optional[int],
-    sofa_threshold: int = 2,
+def judge_I1_infection_diag(diagnosis_text: Optional[str]) -> Optional[bool]:
+    """I1: 诊断含感染关键词 (入院/入科/病程诊断)"""
+    if not diagnosis_text:
+        return False  # 缺失处理: false
+    text_lower = diagnosis_text.lower()
+    return any(kw in text_lower for kw in INFECTION_DIAG_KEYWORDS)
+
+
+def judge_I2_antibiotic(has_antibiotic: Optional[bool]) -> Optional[bool]:
+    """I2: 抗感染治疗执行 (窗口内有执行)"""
+    if has_antibiotic is None:
+        return False
+    return has_antibiotic
+
+
+def judge_I3_culture(has_culture: Optional[bool]) -> Optional[bool]:
+    """I3: 病原学送检 (窗口内有送检)"""
+    if has_culture is None:
+        return False
+    return has_culture
+
+
+# ============================================================
+# v3 判定项：休克确认 K1-K2
+# ============================================================
+
+def judge_K1_lactate(lactate: Optional[float]) -> Optional[bool]:
+    """K1: 血乳酸 ≥ 2 mmol/L"""
+    if lactate is None:
+        return None
+    return lactate >= 2
+
+
+def judge_K2_pressor_needed(has_vasopressor: Optional[bool]) -> Optional[bool]:
+    """K2: 是否需要升压 VASO_WIDE 口径"""
+    if has_vasopressor is None:
+        return False
+    return has_vasopressor
+
+
+# ============================================================
+# v3 判定项：Bundle 时间窗
+# ============================================================
+
+def judge_A1_lactate_measured(lactate_value: Optional[float]) -> Optional[bool]:
+    """A1: 乳酸测定 (窗口内最早一条，取到值即达标)"""
+    if lactate_value is None:
+        return None
+    return True
+
+
+def judge_B1_antibiotic_time(antibiotic_time: Optional[datetime]) -> Optional[bool]:
+    """B1: 抗菌药物执行时间 (窗口内倒序取第一条，有值即达标)"""
+    if antibiotic_time is None:
+        return None
+    return True
+
+
+def judge_B2_culture_time(culture_time: Optional[datetime]) -> Optional[bool]:
+    """B2: 血培养执行时间 (窗口内倒序取第一条，有值即达标)"""
+    if culture_time is None:
+        return None
+    return True
+
+
+def judge_B3_step2(
+    b1: Optional[bool], b2: Optional[bool],
+    antibiotic_time: Optional[datetime],
+    culture_time: Optional[datetime],
 ) -> Optional[bool]:
     """
-    判断是否存在脓毒症相关器官功能障碍。
-    SOFA 总分 >= threshold → True。
+    B3: 第二步达标 = B1有值 AND B2有值 AND B1晚于B2
+    即：抗生素执行时间晚于血培养执行时间
     """
-    if sofa_score is None:
+    if b1 is None or b2 is None:
         return None
-    return sofa_score >= sofa_threshold
+    if not b1 or not b2:
+        return False
+    if antibiotic_time is None or culture_time is None:
+        return None
+    # 抗生素晚于或等于血培养 → 达标
+    return antibiotic_time >= culture_time
+
+
+def judge_C1_map_trigger(map_value: Optional[float]) -> Optional[bool]:
+    """C1: MAP < 70 (触发项)"""
+    if map_value is None:
+        return None
+    return map_value < 70
+
+
+def judge_C2_lactate_trigger(lactate_max: Optional[float]) -> Optional[bool]:
+    """C2: 血乳酸 ≥ 4 (触发项)"""
+    if lactate_max is None:
+        return None
+    return lactate_max >= 4
+
+
+def judge_C3_1h_fluid(has_fluid_1h: Optional[bool]) -> Optional[bool]:
+    """C3-1h: 1h内有液体执行"""
+    if has_fluid_1h is None:
+        return None
+    return has_fluid_1h
+
+
+def judge_C3_3h_fluid(fluid_3h_ml: Optional[float], threshold: float = 1500) -> Optional[bool]:
+    """C3-3h: 液体量 ≥ 1500ml"""
+    if fluid_3h_ml is None:
+        return None
+    return fluid_3h_ml >= threshold
 
 
 # ============================================================
-# 1 小时 Bundle 判定
+# v3 完成判定决策树 (§4)
 # ============================================================
 
-def judge_1h_bundle(
-    t0: Optional[datetime],
-    eval_time: datetime,
-    blood_culture_done: bool,
-    blood_culture_time: Optional[datetime],
-    lactate_measured: bool,
-    lactate_time: Optional[datetime],
-    antibiotic_done: bool,
-    antibiotic_time: Optional[datetime],
-    has_shock: bool,
-) -> Dict[str, Optional[bool]]:
-    """
-    1 小时 Bundle 判定。
-
-    需求文档 §4: 1h bundle 包含:
-      S1: 乳酸测量 (T0后1h内)
-      S2: 血培养 (使用抗生素前)
-      S3: 抗生素 (T0后1h内)
-      S4: 晶体液 30ml/kg (有低血压/乳酸≥4时)
-    """
-    result: Dict[str, Optional[bool]] = {}
-
-    if t0 is None:
-        return {
-            "S1_lactate": None,
-            "S2_blood_culture": None,
-            "S3_antibiotic": None,
-            "S4_fluid_resus": None,
-        }
-
-    t0 = _aware(t0)
-    eval_time = _aware(eval_time)
-    window_1h = t0 + timedelta(hours=1)
-
-    # S1: 乳酸测量 (T0后1h内)
-    if lactate_measured and lactate_time:
-        result["S1_lactate"] = _in_window(lactate_time, t0, window_1h)
-    else:
-        result["S1_lactate"] = None
-
-    # S2: 血培养 (使用抗生素前完成)
-    if blood_culture_done and blood_culture_time:
-        if antibiotic_time:
-            result["S2_blood_culture"] = blood_culture_time <= antibiotic_time
-        else:
-            result["S2_blood_culture"] = True  # 已做血培养，无抗生素时间
-    else:
-        result["S2_blood_culture"] = None
-
-    # S3: 抗生素 (T0后1h内)
-    if antibiotic_done and antibiotic_time:
-        result["S3_antibiotic"] = _in_window(antibiotic_time, t0, window_1h)
-    else:
-        result["S3_antibiotic"] = None
-
-    # S4: 晶体液 30ml/kg (有低血压或乳酸≥4时)
-    # 此项需要液体数据，暂时由外部传入
-    result["S4_fluid_resus"] = None  # 需要液体数据
-
-    return result
-
-
-# ============================================================
-# 3 小时 Bundle 判定
-# ============================================================
-
-def judge_3h_bundle(
-    t0: Optional[datetime],
-    eval_time: datetime,
-    lactate_measured: bool,
-    lactate_time: Optional[datetime],
-    lactate_recheck: bool,
-    lactate_recheck_time: Optional[datetime],
-    blood_culture_done: bool,
-    blood_culture_time: Optional[datetime],
-    antibiotic_done: bool,
-    antibiotic_time: Optional[datetime],
-    fluid_30mlkg_done: bool,
-    fluid_30mlkg_time: Optional[datetime],
-) -> Dict[str, Optional[bool]]:
-    """
-    3 小时 Bundle 判定。
-
-    需求文档 §4: 3h bundle 包含:
-      I1: 乳酸测量 (T0后3h内)
-      I2: 血培养 (使用抗生素前)
-      I3: 抗生素 (T0后3h内)
-      K1: 晶体液 30ml/kg (T0后3h内)
-    """
-    result: Dict[str, Optional[bool]] = {}
-
-    if t0 is None:
-        return {
-            "I1_lactate": None,
-            "I2_blood_culture": None,
-            "I3_antibiotic": None,
-            "K1_fluid_30mlkg": None,
-        }
-
-    t0 = _aware(t0)
-    eval_time = _aware(eval_time)
-    window_3h = t0 + timedelta(hours=3)
-
-    # I1: 乳酸测量 (T0后3h内)
-    if lactate_measured and lactate_time:
-        result["I1_lactate"] = _in_window(lactate_time, t0, window_3h)
-    else:
-        result["I1_lactate"] = None
-
-    # I2: 血培养 (使用抗生素前完成)
-    if blood_culture_done and blood_culture_time:
-        if antibiotic_time:
-            result["I2_blood_culture"] = blood_culture_time <= antibiotic_time
-        else:
-            result["I2_blood_culture"] = True
-    else:
-        result["I2_blood_culture"] = None
-
-    # I3: 抗生素 (T0后3h内)
-    if antibiotic_done and antibiotic_time:
-        result["I3_antibiotic"] = _in_window(antibiotic_time, t0, window_3h)
-    else:
-        result["I3_antibiotic"] = None
-
-    # K1: 晶体液 30ml/kg (T0后3h内)
-    if fluid_30mlkg_done and fluid_30mlkg_time:
-        result["K1_fluid_30mlkg"] = _in_window(fluid_30mlkg_time, t0, window_3h)
-    else:
-        result["K1_fluid_30mlkg"] = None
-
-    return result
-
-
-# ============================================================
-# 6 小时 Bundle 判定
-# ============================================================
-
-def judge_6h_bundle(
-    t0: Optional[datetime],
-    eval_time: datetime,
-    has_shock: bool,
-    map_target_met: bool,
-    map_target_met_time: Optional[datetime],
-    vasopressor_started: bool,
-    vasopressor_start_time: Optional[datetime],
-    initial_lactate: Optional[float],
-    lactate_recheck_done: bool,
-    lactate_recheck_time: Optional[datetime],
-    fluid_1500_done: bool,
-    fluid_1500_time: Optional[datetime],
-) -> Dict[str, Optional[bool]]:
-    """
-    6 小时 Bundle 判定。
-
-    需求文档 §4: 6h bundle 包含 (有低血压或乳酸≥4时):
-      A1: 血管活性药维持 MAP≥65 (T0后6h内)
-      B1: 乳酸复测 (T0后6h内，初始乳酸>2时)
-      B2: 乳酸正常化
-      B3: 乳酸下降率≥10%
-      C1: 晶体液 1500ml (T0后6h内)
-      C2: 胶体液 (如有)
-      C3: 液体负荷后 MAP 变化
-    """
-    result: Dict[str, Optional[bool]] = {}
-
-    if t0 is None:
-        return {
-            "A1_map_target": None,
-            "B1_lactate_recheck": None,
-            "B2_lactate_normal": None,
-            "B3_lactate_decline": None,
-            "C1_fluid_1500": None,
-        }
-
-    t0 = _aware(t0)
-    eval_time = _aware(eval_time)
-    window_6h = t0 + timedelta(hours=6)
-
-    # A1: 血管活性药维持 MAP≥65 (T0后6h内)
-    if has_shock:
-        if map_target_met and map_target_met_time:
-            result["A1_map_target"] = _in_window(map_target_met_time, t0, window_6h)
-        elif vasopressor_started and vasopressor_start_time:
-            result["A1_map_target"] = _in_window(vasopressor_start_time, t0, window_6h)
-        else:
-            result["A1_map_target"] = None
-    else:
-        result["A1_map_target"] = None  # 无休克不需评
-
-    # B1: 乳酸复测 (初始乳酸>2时)
-    if initial_lactate is not None and initial_lactate > 2:
-        if lactate_recheck_done and lactate_recheck_time:
-            result["B1_lactate_recheck"] = _in_window(lactate_recheck_time, t0, window_6h)
-        else:
-            result["B1_lactate_recheck"] = None
-    else:
-        result["B1_lactate_recheck"] = True  # 初始乳酸≤2，不需复测
-
-    # B2: 乳酸正常化 (<2 mmol/L)
-    # B3: 乳酸下降率≥10%
-    # 这些需要复测乳酸值，由外部传入
-    result["B2_lactate_normal"] = None
-    result["B3_lactate_decline"] = None
-
-    # C1: 晶体液 1500ml (T0后6h内)
-    if fluid_1500_done and fluid_1500_time:
-        result["C1_fluid_1500"] = _in_window(fluid_1500_time, t0, window_6h)
-    else:
-        result["C1_fluid_1500"] = None
-
-    return result
-
-
-# ============================================================
-# Bundle 完成判定决策树 (需求文档 §4)
-# ============================================================
-
-def judge_bundle_finish(
-    t0: Optional[datetime],
-    has_shock: bool,
-    judge_1h: Dict[str, Optional[bool]],
-    judge_3h: Dict[str, Optional[bool]],
-    judge_6h: Dict[str, Optional[bool]],
+def judge_bundle_finish_v3(
+    a1: Optional[bool],
+    b3: Optional[bool],
+    c1: Optional[bool],
+    c2: Optional[bool],
+    c3: Optional[bool],
 ) -> Dict[str, Any]:
     """
-    Bundle 完成判定决策树。
+    v3 完成判定决策树。
 
-    需求文档 §4:
-      1. 有感染性休克诊断 → 进入判定
-      2. 1h bundle 完成? (S1+S2+S3 全 True)
-      3. 3h bundle 完成? (I1+I2+I3+K1 全 True)
-      4. 6h bundle 完成? (A1+B1+B2+B3+C1 全 True，仅休克患者)
-      5. 总完成 = 1h完成 AND 3h完成 AND (6h完成 OR 无休克)
+    第一步达标 = A1
+    第二步达标 = B3
+    第三步达标 = (C1 或 C2) ? C3 : 视为达标
+    finish = 第一步达标 AND 第二步达标 AND 第三步达标
     """
-    if t0 is None:
-        return {
-            "bundle_complete": None,
-            "reason": "no_t0",
-            "1h_complete": None,
-            "3h_complete": None,
-            "6h_complete": None,
-        }
+    # 第一步
+    step1 = a1
 
-    # 1h 完成判定
-    items_1h = ["S1_lactate", "S2_blood_culture", "S3_antibiotic"]
-    vals_1h = [judge_1h.get(k) for k in items_1h]
-    if all(v is True for v in vals_1h):
-        complete_1h = True
-    elif any(v is False for v in vals_1h):
-        complete_1h = False
+    # 第二步
+    step2 = b3
+
+    # 第三步
+    c1_or_c2_triggered = (c1 is True) or (c2 is True)
+    if c1_or_c2_triggered:
+        step3 = c3
     else:
-        complete_1h = None
+        step3 = True  # 未触发视为达标
 
-    # 3h 完成判定
-    items_3h = ["I1_lactate", "I2_blood_culture", "I3_antibiotic", "K1_fluid_30mlkg"]
-    vals_3h = [judge_3h.get(k) for k in items_3h]
-    if all(v is True for v in vals_3h):
-        complete_3h = True
-    elif any(v is False for v in vals_3h):
-        complete_3h = False
+    # 总完成
+    if step1 is True and step2 is True and step3 is True:
+        finish = True
+    elif step1 is False or step2 is False or step3 is False:
+        finish = False
     else:
-        complete_3h = None
+        finish = None  # 缺失数据无法判定
 
-    # 6h 完成判定 (仅休克患者)
-    if has_shock:
-        items_6h = ["A1_map_target", "B1_lactate_recheck", "B2_lactate_normal",
-                     "B3_lactate_decline", "C1_fluid_1500"]
-        vals_6h = [judge_6h.get(k) for k in items_6h]
-        if all(v is True for v in vals_6h):
-            complete_6h = True
-        elif any(v is False for v in vals_6h):
-            complete_6h = False
+    # 原因码
+    reasons = []
+    if step1 is False:
+        reasons.append("A1_NOT_MET")
+    if step2 is False:
+        if b3 is False:
+            reasons.append("BC_AFTER_AB")  # 抗生素早于血培养
         else:
-            complete_6h = None
-    else:
-        complete_6h = True  # 无休克视为6h完成
-
-    # 总完成判定
-    if complete_1h is True and complete_3h is True and complete_6h is True:
-        bundle_complete = True
-    elif complete_1h is False or complete_3h is False or complete_6h is False:
-        bundle_complete = False
-    else:
-        bundle_complete = None
+            reasons.append("AB_MISSING")
+    if step3 is False:
+        if c1_or_c2_triggered:
+            reasons.append("FLUID_INSUFFICIENT")
+        else:
+            reasons.append("MAP_NOT_MET")
 
     return {
-        "bundle_complete": bundle_complete,
-        "1h_complete": complete_1h,
-        "3h_complete": complete_3h,
-        "6h_complete": complete_6h,
-        "has_shock": has_shock,
-        "reason": None,
+        "finish": finish,
+        "step1": step1,
+        "step2": step2,
+        "step3": step3,
+        "finish_path": "triggered" if c1_or_c2_triggered else "not_triggered",
+        "reasons": reasons,
     }
+
+
+# ============================================================
+# 完整 Bundle 判定（单个患者）
+# ============================================================
+
+def judge_bundle_v3(patient_data: Dict[str, Any]) -> Dict[str, Any]:
+    """
+    对单个患者执行 v3 全量 Bundle 判定。
+
+    patient_data 需包含:
+        - t0: T0 时间
+        - eval_time: 评估时间
+        - diagnosis_text: 诊断文本 (I1)
+        - has_antibiotic: 是否有抗生素执行 (I2)
+        - has_culture: 是否有病原学送检 (I3)
+        - has_vasopressor: 是否有血管活性药 (S4/K2)
+        - lactate_initial: 初始乳酸值 (K1/A1)
+        - lactate_max: 最高乳酸值 (C2)
+        - map_min: 最低MAP值 (S3/C1)
+        - gcs_min: 最低GCS值 (S2)
+        - pf_ratio_min: 最低P/F比值 (S1)
+        - antibiotic_time: 抗生素执行时间 (B1)
+        - culture_time: 血培养执行时间 (B2)
+        - has_fluid_1h: 1h内有液体执行 (C3-1h)
+        - fluid_3h_ml: 3h液体量 (C3-3h)
+
+    返回完整判定结果。
+    """
+    t0 = patient_data.get("t0")
+    if not t0:
+        return {"finish": None, "reason": "NO_T0"}
+
+    # 器官障碍 S1-S4
+    s1 = judge_S1_pfratio(patient_data.get("pf_ratio_min"))
+    s2 = judge_S2_gcs(patient_data.get("gcs_min"))
+    s3 = judge_S3_map(patient_data.get("map_min"))
+    s4 = judge_S4_vasopressor(patient_data.get("has_vasopressor"))
+
+    # 感染证据 I1-I3
+    i1 = judge_I1_infection_diag(patient_data.get("diagnosis_text"))
+    i2 = judge_I2_antibiotic(patient_data.get("has_antibiotic"))
+    i3 = judge_I3_culture(patient_data.get("has_culture"))
+
+    # 休克确认 K1-K2
+    k1 = judge_K1_lactate(patient_data.get("lactate_initial"))
+    k2 = judge_K2_pressor_needed(patient_data.get("has_vasopressor"))
+
+    # 脓毒性休克确认: K1 AND K2
+    has_septic_shock = (k1 is True) and (k2 is True)
+    if not has_septic_shock:
+        return {
+            "finish": None,
+            "is_septic_shock": False,
+            "reason": "NOT_SEPTIC_SHOCK",
+            "k1": k1, "k2": k2,
+            "s1": s1, "s2": s2, "s3": s3, "s4": s4,
+            "i1": i1, "i2": i2, "i3": i3,
+        }
+
+    # 感染证据门控: I1/I2/I3 任一
+    has_infection = (i1 is True) or (i2 is True) or (i3 is True)
+    if not has_infection:
+        return {
+            "finish": None,
+            "is_septic_shock": True,
+            "reason": "NO_INFECTION_EVIDENCE",
+            "k1": k1, "k2": k2,
+            "s1": s1, "s2": s2, "s3": s3, "s4": s4,
+            "i1": i1, "i2": i2, "i3": i3,
+        }
+
+    # Bundle 时间窗判定
+    a1 = judge_A1_lactate_measured(patient_data.get("lactate_initial"))
+    b1 = judge_B1_antibiotic_time(patient_data.get("antibiotic_time"))
+    b2 = judge_B2_culture_time(patient_data.get("culture_time"))
+    b3 = judge_B3_step2(b1, b2, patient_data.get("antibiotic_time"), patient_data.get("culture_time"))
+    c1 = judge_C1_map_trigger(patient_data.get("map_min"))
+    c2 = judge_C2_lactate_trigger(patient_data.get("lactate_max"))
+    c3_1h = judge_C3_1h_fluid(patient_data.get("has_fluid_1h"))
+    c3_3h = judge_C3_3h_fluid(patient_data.get("fluid_3h_ml"))
+
+    # C3 = C3-1h (1h窗口) 或 C3-3h (3h窗口)
+    c3 = c3_1h if c3_1h is not None else c3_3h
+
+    # 完成判定
+    result = judge_bundle_finish_v3(a1, b3, c1, c2, c3)
+
+    # 合并所有判定项
+    result.update({
+        "s1": s1, "s2": s2, "s3": s3, "s4": s4,
+        "i1": i1, "i2": i2, "i3": i3,
+        "k1": k1, "k2": k2,
+        "a1": a1, "b1": b1, "b2": b2, "b3": b3,
+        "c1": c1, "c2": c2, "c3": c3,
+        "c3_1h": c3_1h, "c3_3h": c3_3h,
+        "is_septic_shock": has_septic_shock,
+        "has_infection": has_infection,
+        "t0": t0,
+    })
+
+    return result

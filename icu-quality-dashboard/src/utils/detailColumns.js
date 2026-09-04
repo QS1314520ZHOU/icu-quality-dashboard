@@ -36,6 +36,33 @@ export function fmtText(v) {
 const AIRWAY_CODES = ['ICU-12', 'ICU-13']
 const TRITUBE_CODES = ['ICU-16', 'ICU-17', 'CAUTI']
 const ASSESSMENT_CODES = ['ICU-09', 'ICU-10']
+const BUNDLE_CODES = ['ICU-05-1h', 'ICU-05-3h', 'ICU-05-6h']
+
+/* ---------------- ICU-05 Bundle 原因码映射 ---------------- */
+
+const REASON_MAP = {
+  'NO_T0': '找不到T0锚点',
+  'NOT_SEPTIC_SHOCK': '非脓毒性休克',
+  'NO_INFECTION': '无感染证据',
+  'A1_NOT_MET': '乳酸未测量',
+  'B3_NOT_MET': '血培养/抗生素不达标',
+  'C3_FLUID_INSUFFICIENT': '液体量不足',
+  'MAP_NOT_TRIGGERED': 'MAP未触发',
+  'LACTATE_NOT_TRIGGERED': '乳酸未触发',
+  'FINISH_FALSE': 'Bundle未完成',
+  'DATA_MISSING_LAC': '乳酸数据缺失',
+  'DATA_MISSING_MAP': 'MAP数据缺失',
+  'AB_MISSING': '无抗生素记录',
+  'BC_MISSING': '无血培养记录',
+  'FLUID_NONE': '无液体执行',
+  'FLUID_INSUFFICIENT': '液体量不足',
+  'SITE_UNCONFIRMED': '感染部位未确认',
+  'MANUAL_EXCLUDED': '人工排除',
+}
+
+function fmtReason(code) {
+  return REASON_MAP[code] || code || ''
+}
 
 /* ---------------- 通用列片段 ---------------- */
 
@@ -187,12 +214,80 @@ function resolveTriTubeCols(code, part) {
 }
 
 /* ============================================================
+ * ICU-05 Bundle 列定义
+ * ============================================================ */
+
+function resolveIcu05Cols(part) {
+  return [
+    COL_PATIENT_ID,
+    COL_NAME,
+    { header: '入科诊断', get: (p) => {
+      const diag = p.diagnose || ''
+      return diag.length > 30 ? diag.slice(0, 30) + '...' : diag
+    }},
+    { header: 'T0时间', get: (p) => fmtDate(p.t0 || p.admit_time) },
+    { header: '入科类型', get: (p) => fmtText(p.admission_type || '—') },
+    { header: '乳酸(mmol/L)', get: (p) => {
+      const v3 = p.v3 || {}
+      if (v3.lactate == null) return '—'
+      const time = v3.lactate_time ? ` @${v3.lactate_time.slice(5)}` : ''
+      return `${Number(v3.lactate).toFixed(2)}${time}`
+    }},
+    { header: 'MAP(mmHg)', get: (p) => {
+      const v3 = p.v3 || {}
+      if (v3.map == null) return '—'
+      const time = v3.map_time ? ` @${v3.map_time.slice(5)}` : ''
+      return `${v3.map}${time}`
+    }},
+    { header: '血培养', get: (p) => {
+      const v3 = p.v3 || {}
+      if (!v3.culture_time) return '—'
+      return v3.culture_time.slice(5) // MM-DD HH:mm
+    }},
+    { header: '抗生素', get: (p) => {
+      const v3 = p.v3 || {}
+      if (!v3.antibiotic_time) return '—'
+      const name = v3.antibiotic_name || ''
+      const time = v3.antibiotic_time.slice(5)
+      return name ? `${name} ${time}` : time
+    }},
+    { header: '液体量(ml)', get: (p) => {
+      const v3 = p.v3 || {}
+      const ml = v3.fluid_ml || 0
+      return ml > 0 ? `${ml}` : '—'
+    }},
+    ...(part === 'numerator' ? [
+      { header: '完成时间', get: (p) => {
+        const v3 = p.v3 || {}
+        return v3.finish ? fmtDate(p.admit_time || p.t0) : '—'
+      }},
+    ] : [
+      { header: 'Bundle', get: (p) => {
+        const v3 = p.v3 || {}
+        if (v3.finish === true) return '✅完成'
+        if (v3.finish === false) return '❌未完成'
+        return '—'
+      }},
+      { header: '状态', get: (p) => {
+        const v3 = p.v3 || {}
+        if (v3.finish === true) return '达标'
+        return fmtReason(v3.reason) || '—'
+      }},
+    ]),
+  ]
+}
+
+/* ============================================================
  * 主入口：getDetailColumns(code, part)
  * part: 'numerator' | 'denominator'
  * 返回：[{ header, get }]
  * ============================================================ */
 
 export function getDetailColumns(code, part) {
+  // ---- ICU-05 Bundle ----
+  if (BUNDLE_CODES.includes(code)) {
+    return resolveIcu05Cols(part)
+  }
   // ---- ICU-15：转出ICU后48h重返率 ----
   if (code === 'ICU-15') {
     return [

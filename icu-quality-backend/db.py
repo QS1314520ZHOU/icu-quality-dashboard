@@ -557,10 +557,10 @@ def get_bundle_data(dept_codes: list, start_date: str, end_date: str) -> dict:
     for db_name, db in iter_bed_dbs():
         try:
 
-            # 分母：diseaseDiagnosis 表 脓毒性休克
+            # 分母：diseaseDiagnosis 表（扩展关键词：脓毒性休克/脓毒症/脓毒血症/败血症）
             diagnoses = list(db.diseaseDiagnosis.find(
                 {
-                    "diseaseType": "脓毒性休克",
+                    "diseaseType": {"$regex": SEPSIS_DIAG_KEYWORDS, "$options": "i"},
                     "valid": {"$ne": False},
                     "diagnosisTime": {
                         "$gte": start_dt,
@@ -689,11 +689,28 @@ def get_bundle_data(dept_codes: list, start_date: str, end_date: str) -> dict:
     return result
 
 
+# ---- ICU-05 v3 诊断关键词（扩展版） ----
+SEPSIS_DIAG_KEYWORDS = (
+    "感染性休克|脓毒性休克|脓毒症休克|脓毒血症|败血症|脓毒症"
+    "|septic shock|sepsis"
+)
+
 def get_bundle_data_v2(dept_codes: list, start_date: str, end_date: str) -> dict:
     """
-    Bundle 判定 V2 — 双集合查询。
-    分母来源: diseaseDiagnosis (SmartCare) + VI_ICU_ZYYZ (DataCenter)
-    分子来源: infectionShockV2 (SmartCare) + 自动判定引擎
+    Bundle 判定 V3 — 双集合查询 + 完整分母逻辑。
+
+    分母来源:
+      1. SmartCare diseaseDiagnosis (diseaseType 匹配)
+      2. DataCenter VI_ICU_ZYBR (diagnose 管道符分隔，扩展关键词)
+      3. SmartCare patient.clinicalDiagnosis / admissionDiagnosis (兜底)
+
+    分母过滤:
+      - 入院24h内进ICU (admitTime - inPatientTime <= 24h)
+      - 入科类型在 [入院, 手术入院, 外院] 内（可选，数据允许时启用）
+
+    T0 锚点:
+      - 从 DC VI_ICU_ZYYZ 取该患者第一条医嘱 orderTime
+      - 兜底：admitTime
 
     返回:
         {
@@ -703,7 +720,7 @@ def get_bundle_data_v2(dept_codes: list, start_date: str, end_date: str) -> dict
             "den_patients": [...],
         }
     """
-    from datetime import datetime as dt
+    from datetime import datetime as dt, timedelta
 
     start_dt = dt.fromisoformat(start_date)
     end_dt = dt.fromisoformat(end_date)
@@ -727,7 +744,7 @@ def get_bundle_data_v2(dept_codes: list, start_date: str, end_date: str) -> dict
     result["h6_patients"].extend(result_sc["h6_patients"])
     result["den_patients"].extend(result_sc["den_patients"])
 
-    # ---- 阶段 2: DataCenter VI_ICU_ZYYZ ----
+    # ---- 阶段 2: DataCenter VI_ICU_ZYBR (扩展关键词 + 24h 过滤) ----
     try:
         dc = get_client("DataCenter")["DataCenter"]
     except Exception as _exc:
@@ -735,11 +752,10 @@ def get_bundle_data_v2(dept_codes: list, start_date: str, end_date: str) -> dict
         return result
 
     try:
-        # 查询 VI_ICU_ZYBR 中的感染性休克诊断
-        # 字段: diagnose (管道符分隔), pid, mrn, name, bed, admitTime
+        # 查询 VI_ICU_ZYBR：扩展关键词（脓毒血症/败血症/感染性休克/脓毒性休克等）
         dc_diagnoses = list(dc.VI_ICU_ZYBR.find(
             {
-                "diagnose": {"$regex": "感染性休克|脓毒症休克|脓毒性休克"},
+                "diagnose": {"$regex": SEPSIS_DIAG_KEYWORDS, "$options": "i"},
                 "admitTime": {
                     "$gte": start_dt,
                     "$lte": dt(end_dt.year, end_dt.month, end_dt.day, 23, 59, 59),
@@ -750,42 +766,197 @@ def get_bundle_data_v2(dept_codes: list, start_date: str, end_date: str) -> dict
                 "name": 1,
                 "mrn": 1,
                 "admitTime": 1,
+                "inPatientTime": 1,
                 "diagnose": 1,
                 "bed": 1,
                 "deptTrue": 1,
+                "deptCode": 1,
             },
         ))
 
-        if not dc_diagnoses:
-            return result
+        if dc_diagnoses:
+            # 去重: 已在 SmartCare 中出现的患者不再重复计入
+            sc_pids = {p.get("_id") or p.get("pid") for p in result_sc["den_patients"]}
+            sc_mrns = {p.get("mrn") or p.get("hisPid") for p in result_sc["den_patients"]}
 
-        # 去重: 已在 SmartCare 中出现的患者不再重复计入
-        sc_pids = {p.get("_id") or p.get("pid") for p in result_sc["den_patients"]}
-        sc_mrns = {p.get("mrn") or p.get("hisPid") for p in result_sc["den_patients"]}
+            # 收集 DC pid 用于批量查 T0
+            dc_pids_for_t0 = []
 
-        for dx in dc_diagnoses:
-            mrn = str(dx.get("mrn") or "").strip()
-            patient_id = str(dx.get("pid") or "").strip()
+            for dx in dc_diagnoses:
+                mrn = str(dx.get("mrn") or "").strip()
+                patient_id = str(dx.get("pid") or "").strip()
 
-            # 去重: 如果该患者已在 SmartCare 结果中，跳过
-            if patient_id in sc_pids or mrn in sc_mrns:
-                continue
+                # 去重: 如果该患者已在 SmartCare 结果中，跳过
+                if patient_id in sc_pids or mrn in sc_mrns:
+                    continue
 
-            result["total"] += 1
-            result["den_patients"].append({
-                "_id": patient_id,
-                "mrn": mrn,
-                "name": dx.get("name", ""),
-                "hisBed": dx.get("bed", ""),
-                "diagnosisTime": dx.get("admitTime"),
-                "diseaseId": str(dx.get("_id", "")),
-                "source": "vi_zybr",
-            })
+                # 24h 窗口过滤: 入院到入ICU <= 24h
+                in_patient_time = dx.get("inPatientTime")
+                admit_time = dx.get("admitTime")
+                if isinstance(in_patient_time, dt) and isinstance(admit_time, dt):
+                    delta_hours = (admit_time - in_patient_time).total_seconds() / 3600
+                    if delta_hours > 24:
+                        continue  # 超过24h，不进分母
+
+                dc_pids_for_t0.append(patient_id)
+
+                result["total"] += 1
+                result["den_patients"].append({
+                    "_id": patient_id,
+                    "mrn": mrn,
+                    "name": dx.get("name", ""),
+                    "hisBed": dx.get("bed", ""),
+                    "diagnosisTime": admit_time,
+                    "inPatientTime": in_patient_time,
+                    "diseaseId": str(dx.get("_id", "")),
+                    "deptCode": dx.get("deptCode", ""),
+                    "diagnose": dx.get("diagnose", ""),
+                    "source": "vi_zybr",
+                })
+
+            # 批量查 T0: 从 VI_ICU_ZYYZ 取每患者第一条医嘱 orderTime
+            if dc_pids_for_t0:
+                _resolve_t0_for_dc_patients(dc, dc_pids_for_t0, result["den_patients"])
 
     except Exception as _exc:
         logger.warning("DC VI_ICU_ZYBR query failed: %s", _exc)
 
+    # ---- 阶段 3: MRN → SC pid 桥接（供 judge_bundle_v3_for_patient 使用） ----
+    all_mrns = {p.get("mrn") for p in result["den_patients"] if p.get("mrn")}
+    mrn_to_sc_pid = {}
+    if all_mrns:
+        for db_name, db in iter_bed_dbs():
+            try:
+                pat_docs = list(db.patient.find(
+                    {"mrn": {"$in": list(all_mrns)}},
+                    {"mrn": 1, "_id": 1},
+                ))
+                for pd in pat_docs:
+                    m = pd.get("mrn", "")
+                    if m and m not in mrn_to_sc_pid:
+                        mrn_to_sc_pid[m] = str(pd["_id"])
+                if mrn_to_sc_pid:
+                    break
+            except Exception as _exc:
+                logger.warning("MRN→SC pid bridge failed on %s: %s", db_name, _exc)
+                continue
+
+    # 回填 sc_pid 到 den_patients
+    for pat in result["den_patients"]:
+        mrn = pat.get("mrn", "")
+        if mrn and mrn in mrn_to_sc_pid:
+            pat["sc_pid"] = mrn_to_sc_pid[mrn]
+        elif pat.get("source") != "vi_zybr":
+            # SmartCare 来源的患者，_id 本身就是 sc_pid
+            pat["sc_pid"] = str(pat.get("_id", ""))
+
+    # ---- 阶段 4: V3 判定 → h1/h3/h6 计数 ----
+    for pat in result["den_patients"]:
+        sc_pid = pat.get("sc_pid")
+        t0 = pat.get("t0")
+        diag = pat.get("diagnose", "")
+        if not t0 or not sc_pid:
+            continue
+        try:
+            v3 = judge_bundle_v3_for_patient(sc_pid, pat.get("_id", ""), pat.get("mrn", ""), t0, diag)
+            pat["v3"] = v3
+            # 只有确认脓毒性休克 (K1 AND K2) 的患者才计入分母
+            if v3.get("k1") == True and v3.get("k2") == True:
+                # Bundle 完成 (finish=True) 的患者计入分子
+                if v3.get("finish") == True:
+                    # 计算完成时间：取各组件最晚完成时间
+                    completion_times = []
+                    # A1: 乳酸测量时间
+                    a1_time = v3.get("lactate_initial_time")
+                    if a1_time:
+                        completion_times.append(a1_time)
+                    # B3: 抗生素时间（B3=True 意味着抗生素晚于血培养）
+                    b3_time = v3.get("antibiotic_time")
+                    if b3_time:
+                        completion_times.append(b3_time)
+                    # C3: 液体完成时间
+                    c3_1h = v3.get("c3_1h")
+                    c3_3h = v3.get("c3_3h")
+                    if c3_1h == True:
+                        # 1h内完成液体 → 完成时间 = T0 + 1h
+                        completion_times.append(t0 + timedelta(hours=1))
+                    elif c3_3h == True:
+                        # 3h内完成液体 → 完成时间 = T0 + 3h
+                        completion_times.append(t0 + timedelta(hours=3))
+
+                    # 取最晚完成时间
+                    if completion_times:
+                        latest_completion = max(completion_times)
+                        hours_to_complete = (latest_completion - t0).total_seconds() / 3600
+
+                        if hours_to_complete <= 1:
+                            result["h1_num"] += 1
+                            result["h1_patients"].append(pat)
+                            result["h3_num"] += 1
+                            result["h3_patients"].append(pat)
+                            result["h6_num"] += 1
+                            result["h6_patients"].append(pat)
+                        elif hours_to_complete <= 3:
+                            result["h3_num"] += 1
+                            result["h3_patients"].append(pat)
+                            result["h6_num"] += 1
+                            result["h6_patients"].append(pat)
+                        else:
+                            result["h6_num"] += 1
+                            result["h6_patients"].append(pat)
+                    else:
+                        # 无时间信息，默认计入6h
+                        result["h6_num"] += 1
+                        result["h6_patients"].append(pat)
+        except Exception as _exc:
+            logger.warning("V3 judgment failed for %s: %s", pat.get("mrn"), _exc)
+            continue
+
+    # 重新计算分母（确认脓毒性休克的患者数）
+    confirmed_shock = sum(1 for p in result["den_patients"]
+                         if p.get("v3", {}).get("k1") == True and p.get("v3", {}).get("k2") == True)
+    result["total"] = confirmed_shock
+
     return result
+
+
+def _resolve_t0_for_dc_patients(dc, dc_pids: list, den_patients: list):
+    """
+    批量从 VI_ICU_ZYYZ 解析 T0（第一条医嘱 orderTime）。
+    回填 den_patients 中每条记录的 t0 字段。
+    """
+    from datetime import datetime as dt
+
+    # 批量查询所有 DC 患者的医嘱，按 pid+orderTime 排序
+    try:
+        pipeline = [
+            {"$match": {"pid": {"$in": dc_pids}}},
+            {"$sort": {"pid": 1, "orderTime": 1}},
+            {"$group": {
+                "_id": "$pid",
+                "first_order_time": {"$first": "$orderTime"},
+                "first_order_name": {"$first": "$orderName"},
+            }},
+        ]
+        t0_results = list(dc.VI_ICU_ZYYZ.aggregate(pipeline))
+        t0_map = {str(r["_id"]): r["first_order_time"] for r in t0_results if r.get("first_order_time")}
+        t0_name_map = {str(r["_id"]): r.get("first_order_name", "") for r in t0_results}
+    except Exception as _exc:
+        logger.warning("T0 resolution from VI_ICU_ZYYZ failed: %s", _exc)
+        t0_map = {}
+        t0_name_map = {}
+
+    # 回填 t0
+    for pat in den_patients:
+        pid = pat.get("_id", "")
+        if pid in t0_map:
+            pat["t0"] = t0_map[pid]
+            pat["t0_source"] = "first_order"
+            pat["t0_first_order_name"] = t0_name_map.get(pid, "")
+        else:
+            # 兜底: 用 admitTime
+            pat["t0"] = pat.get("diagnosisTime")
+            pat["t0_source"] = "admit_time_fallback"
 
 
 # ============================================================
@@ -1476,6 +1647,721 @@ def get_dvt_prevention_patients(dept_codes: list, start_date: str, end_date: str
 
     except Exception as e:
         print(f"[ICU-07] Error: {e}")
+
+    return result
+
+
+# ============================================================
+# ICU-05 Bundle 组件提取（跨库查询）
+# 液体量 → SC drugExe | 抗生素 → SC drugExe | 血培养 → DC VI_ICU_ZYYZ
+# ============================================================
+
+def get_bundle_components_from_dc(dc_pids, t0_map):
+    """
+    从 DC 脓毒性休克患者出发，跨库提取 Bundle 组件数据。
+
+    Args:
+        dc_pids: DC VI_ICU_ZYBR 的 pid 列表 (str)
+        t0_map: {dc_pid: t0_datetime} T0时间映射
+
+    Returns:
+        {dc_pid: {
+            'sc_pid': str,
+            'fluids_3h_ml': float,   # T0~T0+3h 液体量 (ml)
+            'fluids_6h_ml': float,   # T0~T0+6h 液体量 (ml)
+            'abx_in_1h': bool,       # T0~T0+1h 是否给予抗生素
+            'abx_in_3h': bool,       # T0~T0+3h 是否给予抗生素
+            'culture_in_1h': bool,   # T0~T0+1h 是否留取血培养
+            'abx_details': [...],    # 抗生素明细
+            'fluid_details': [...],  # 液体明细
+            'culture_details': [...],# 血培养明细
+        }}
+    """
+    result = {}
+    if not dc_pids:
+        return result
+
+    dc = get_client("DataCenter")["DataCenter"]
+    sc = get_client("SmartCare")["SmartCare"]
+
+    # Step 1: DC pid → mrn 映射
+    dc_pts = list(dc.VI_ICU_ZYBR.find(
+        {'pid': {'$in': dc_pids}},
+        {'pid': 1, 'mrn': 1, 'name': 1}
+    ))
+    mrn_to_dc = {}
+    dc_to_mrn = {}
+    for pt in dc_pts:
+        dp = str(pt['pid'])
+        mrn = pt.get('mrn')
+        if mrn:
+            mrn_to_dc[str(mrn)] = dp
+            dc_to_mrn[dp] = str(mrn)
+            result[dp] = {'sc_pid': None}
+
+    if not mrn_to_dc:
+        return result
+
+    # Step 2: mrn → SC _id 映射
+    mrns = list(mrn_to_dc.keys())
+    sc_patients = list(sc.patient.find(
+        {'mrn': {'$in': mrns}},
+        {'_id': 1, 'mrn': 1}
+    ))
+    sc_pid_set = set()
+    mrn_to_sc = {}
+    for sp in sc_patients:
+        sc_pid = str(sp['_id'])
+        mrn = str(sp.get('mrn', ''))
+        mrn_to_sc[mrn] = sc_pid
+        sc_pid_set.add(sc_pid)
+
+    # 回填 sc_pid
+    for dp in result:
+        mrn = dc_to_mrn.get(dp)
+        if mrn and mrn in mrn_to_sc:
+            result[dp]['sc_pid'] = mrn_to_sc[mrn]
+
+    # Step 3: 批量查 SC drugExe（抗生素 + 液体）
+    abx_keywords = [
+        '头孢', '培南', '青霉', '万古', '阿奇', '左氧', '莫西',
+        '甲硝唑', '奥硝唑', '利奈', '替考', '磷霉素', '美罗',
+        '亚胺', '厄他', '哌酮', '他唑', '舒巴坦', '氨苄', '哌拉',
+        '阿莫', '克拉', '多西', '米诺', '替加', '达托', '夫西',
+        '磺胺', '呋喃', '吡哌', '诺氟', '环丙', '氧氟',
+    ]
+    fluid_keywords = [
+        '氯化钠', '林格', '盐水', '白蛋白', '羟乙基', '葡萄糖',
+        '注射液', '氨基酸', '脂肪乳', '碳酸氢钠',
+    ]
+
+    # 为每个 SC pid 查询 drugExe（时间窗口取最大6h）
+    for dp, info in result.items():
+        sc_pid = info.get('sc_pid')
+        if not sc_pid:
+            continue
+        t0 = t0_map.get(dp)
+        if not t0:
+            continue
+
+        # 确保 t0 是 datetime
+        if isinstance(t0, str):
+            try:
+                t0 = datetime.fromisoformat(t0)
+            except (ValueError, TypeError):
+                continue
+
+        # drugExe.startTime 是 naive，统一用 naive
+        if t0.tzinfo is not None:
+            t0 = t0.replace(tzinfo=None)
+
+        t0_6h = t0 + timedelta(hours=6)
+
+        # 查 drugExe
+        drug_docs = list(sc.drugExe.find(
+            {'pid': sc_pid, 'startTime': {'$gte': t0, '$lte': t0_6h}},
+            {'drugList': 1, 'startTime': 1, '_id': 0}
+        ))
+
+        abx_list = []
+        fluid_list = []
+        for d in drug_docs:
+            st = d.get('startTime')
+            if not st:
+                continue
+            hours_from_t0 = (st - t0).total_seconds() / 3600
+
+            for dl in d.get('drugList', []):
+                name = str(dl.get('name', ''))
+                dose = dl.get('dose')
+                unit = dl.get('unit', '')
+                liquid = dl.get('liquidAmount')
+
+                is_abx = any(kw in name for kw in abx_keywords)
+                is_fluid = any(kw in name for kw in fluid_keywords)
+
+                # 排除非抗生素药物（肝素、抗凝、营养等）
+                non_abx_keywords = ['肝素', '低分子', '华法林', '阿司匹林', '氯吡格雷',
+                                    '维生素', '氯化钾', '胰岛素', '碳酸氢钠', '呋塞米',
+                                    '甘露醇', '地塞米松', '甲泼尼龙', '丙泊酚', '咪达唑仑',
+                                    '芬太尼', '瑞芬太尼', '右美托咪定', '吗啡', '布洛芬',
+                                    '对乙酰氨基酚', '皮试', '皮试剂']
+                is_real_abx = is_abx and not any(kw in name for kw in non_abx_keywords)
+
+                if is_real_abx:
+                    abx_list.append({
+                        'name': name, 'dose': dose, 'unit': unit,
+                        'time': st, 'hours': round(hours_from_t0, 2)
+                    })
+                if is_fluid:
+                    fluid_list.append({
+                        'name': name, 'dose': dose, 'unit': unit,
+                        'liquid_ml': liquid, 'time': st,
+                        'hours': round(hours_from_t0, 2)
+                    })
+
+        info['abx_details'] = abx_list
+        info['fluid_details'] = fluid_list
+        info['abx_in_1h'] = any(a['hours'] <= 1.0 for a in abx_list)
+        info['abx_in_3h'] = any(a['hours'] <= 3.0 for a in abx_list)
+        info['fluids_3h_ml'] = sum(
+            f['liquid_ml'] for f in fluid_list
+            if f['hours'] <= 3.0 and f.get('liquid_ml')
+        )
+        info['fluids_6h_ml'] = sum(
+            f['liquid_ml'] for f in fluid_list
+            if f['hours'] <= 6.0 and f.get('liquid_ml')
+        )
+
+    # Step 4: 查 DC VI_ICU_ZYYZ 血培养
+    # 批量查所有 dc_pids 的血培养
+    culture_docs = list(dc.VI_ICU_ZYYZ.find(
+        {
+            'pid': {'$in': dc_pids},
+            'orderName': {'$regex': '血培养'}
+        },
+        {'pid': 1, 'orderName': 1, 'orderTime': 1, 'status': 1, '_id': 0}
+    ))
+
+    for cd in culture_docs:
+        dp = str(cd.get('pid', ''))
+        if dp not in result:
+            continue
+        t0 = t0_map.get(dp)
+        if not t0:
+            continue
+        if isinstance(t0, str):
+            try:
+                t0 = datetime.fromisoformat(t0)
+            except (ValueError, TypeError):
+                continue
+        if t0.tzinfo is not None:
+            t0 = t0.replace(tzinfo=None)
+
+        ct = cd.get('orderTime')
+        if not ct:
+            continue
+        hours_from_t0 = (ct - t0).total_seconds() / 3600
+
+        if 'culture_details' not in result[dp]:
+            result[dp]['culture_details'] = []
+        result[dp]['culture_details'].append({
+            'name': cd.get('orderName', ''),
+            'time': ct,
+            'hours': round(hours_from_t0, 2),
+            'status': cd.get('status', '')
+        })
+
+    # 回填 culture_in_1h（只算 T0 之后的血培养）
+    for dp, info in result.items():
+        cultures = info.get('culture_details', [])
+        info['culture_in_1h'] = any(0 <= c['hours'] <= 1.0 for c in cultures)
+
+    return result
+
+
+def judge_bundle_for_dc_patient(dc_pid, t0, component, sc_pid, eval_time=None):
+    """
+    为单个 DC 患者执行 Bundle 完成判定。
+
+    Args:
+        dc_pid: DC pid (str)
+        t0: T0 时间 (datetime)
+        component: get_bundle_components_from_dc 返回的单个患者数据
+        sc_pid: SC pid (str)
+        eval_time: 评估时间，默认 T0+24h
+
+    Returns:
+        dict: bundle_engine 判定结果 + 组件明细
+    """
+    from scoring.bundle_engine import (
+        judge_1h_bundle, judge_3h_bundle, judge_6h_bundle, judge_bundle_finish
+    )
+
+    if not t0 or not sc_pid:
+        return {'bundle_complete': None, 'reason': 'missing_t0_or_sc_pid'}
+
+    # 确保 naive datetime（与数据库一致）
+    if t0.tzinfo is not None:
+        t0 = t0.replace(tzinfo=None)
+
+    if eval_time is None:
+        eval_time = t0 + timedelta(hours=24)
+    if eval_time.tzinfo is not None:
+        eval_time = eval_time.replace(tzinfo=None)
+
+    sc = get_client("SmartCare")["SmartCare"]
+
+    # 查乳酸 (bGATemp bedsides code=param_bg_Lac)
+    t0_6h = t0 + timedelta(hours=6)
+    bga_docs = list(sc.bGATemp.find(
+        {
+            'eventExe.pid': sc_pid,
+            'bedsides': {
+                '$elemMatch': {
+                    'code': 'param_bg_Lac',
+                    'valid': 'valid',
+                    'time': {'$gte': t0 - timedelta(hours=2), '$lte': t0_6h}
+                }
+            }
+        },
+        {'bedsides.$': 1, '_id': 0}
+    ))
+
+    lac_values = []
+    for doc in bga_docs:
+        for bs in doc.get('bedsides', []):
+            if bs.get('code') == 'param_bg_Lac' and bs.get('valid') == 'valid':
+                lac_val = bs.get('fVal')
+                lac_time = bs.get('time')
+                if lac_val is not None and lac_time:
+                    lac_values.append({'value': lac_val, 'time': lac_time})
+
+    lac_values.sort(key=lambda x: x['time'])
+
+    # 初始乳酸（T0前后2h内最近的）
+    initial_lac = None
+    initial_lac_time = None
+    for lv in lac_values:
+        if lv['time'] <= t0 + timedelta(hours=1):
+            initial_lac = lv['value']
+            initial_lac_time = lv['time']
+
+    # 复测乳酸（T0后1h之后的）
+    recheck_lac = None
+    recheck_lac_time = None
+    for lv in lac_values:
+        if lv['time'] > t0 + timedelta(hours=1):
+            recheck_lac = lv['value']
+            recheck_lac_time = lv['time']
+            break
+
+    # 从 component 提取数据
+    abx_details = component.get('abx_details', [])
+    culture_details = component.get('culture_details', [])
+    fluid_details = component.get('fluid_details', [])
+
+    # 抗生素：取 T0 后最早的
+    abx_in_window = [a for a in abx_details if a['hours'] >= 0]
+    first_abx = min(abx_in_window, key=lambda x: x['hours']) if abx_in_window else None
+    antibiotic_done = bool(first_abx)
+    antibiotic_time = first_abx['time'] if first_abx else None
+
+    # 血培养：取 T0 后最早的
+    culture_in_window = [c for c in culture_details if c['hours'] >= 0]
+    first_culture = min(culture_in_window, key=lambda x: x['hours']) if culture_in_window else None
+    culture_done = bool(first_culture)
+    culture_time = first_culture['time'] if first_culture else None
+
+    # 液体量
+    fluids_3h = component.get('fluids_3h_ml', 0)
+    fluids_6h = component.get('fluids_6h_ml', 0)
+
+    # 调用 bundle_engine
+    judge_1h = judge_1h_bundle(
+        t0=t0, eval_time=eval_time,
+        blood_culture_done=culture_done,
+        blood_culture_time=culture_time,
+        lactate_measured=initial_lac is not None,
+        lactate_time=initial_lac_time,
+        antibiotic_done=antibiotic_done,
+        antibiotic_time=antibiotic_time,
+        has_shock=True,
+    )
+
+    judge_3h = judge_3h_bundle(
+        t0=t0, eval_time=eval_time,
+        lactate_measured=initial_lac is not None,
+        lactate_time=initial_lac_time,
+        lactate_recheck=recheck_lac is not None,
+        lactate_recheck_time=recheck_lac_time,
+        blood_culture_done=culture_done,
+        blood_culture_time=culture_time,
+        antibiotic_done=antibiotic_done,
+        antibiotic_time=antibiotic_time,
+        fluid_30mlkg_done=fluids_3h >= 1500,  # 粗估 50kg × 30ml/kg
+        fluid_30mlkg_time=t0 + timedelta(hours=3) if fluids_3h >= 1500 else None,
+    )
+
+    judge_6h = judge_6h_bundle(
+        t0=t0, eval_time=eval_time,
+        has_shock=True,
+        map_target_met=False,
+        map_target_met_time=None,
+        vasopressor_started=False,
+        vasopressor_start_time=None,
+        initial_lactate=initial_lac,
+        lactate_recheck_done=recheck_lac is not None,
+        lactate_recheck_time=recheck_lac_time,
+        fluid_1500_done=fluids_6h >= 1500,
+        fluid_1500_time=t0 + timedelta(hours=6) if fluids_6h >= 1500 else None,
+    )
+
+    finish = judge_bundle_finish(
+        t0=t0, has_shock=True,
+        judge_1h=judge_1h,
+        judge_3h=judge_3h,
+        judge_6h=judge_6h,
+    )
+
+    return {
+        **finish,
+        'judge_1h': judge_1h,
+        'judge_3h': judge_3h,
+        'judge_6h': judge_6h,
+        'initial_lactate': initial_lac,
+        'initial_lactate_time': initial_lac_time,
+        'recheck_lactate': recheck_lac,
+        'fluids_3h_ml': fluids_3h,
+        'fluids_6h_ml': fluids_6h,
+        'abx_count': len(abx_details),
+        'culture_count': len(culture_details),
+        't0': t0,
+    }
+
+
+def judge_bundle_v3_for_patient(sc_pid: str, dc_pid: str, mrn: str, t0: datetime,
+                                 diagnosis_text: str, eval_time=None) -> dict:
+    """
+    V3 版本的单患者 Bundle 全量判定。
+
+    接线所有数据源：
+    - S1: bGATemp param_bg_P/Fratio (窗口内最低值) — 按 mrn 查
+    - S2: score gcsScore (total) 或 bedside param_score_gcs_obs (窗口内最低值)
+    - S3: bedside param_nibp_m (窗口内最低值)
+    - S4/K2: drugExe 升压药匹配 VASO_WIDE
+    - I1: 诊断文本关键词匹配
+    - I2: drugExe 抗生素
+    - I3: VI_ICU_ZYYZ 病原学送检
+    - K1/A1: bGATemp param_bg_Lac — 按 mrn 查
+    - B1: drugExe 抗生素时间
+    - B2: VI_ICU_ZYYZ 血培养时间
+    - C1: 同 S3
+    - C2: bGATemp param_bg_Lac (最高值)
+    - C3-1h/C3-3h: drugExe 液体量
+
+    Args:
+        sc_pid: SmartCare patient _id (str)
+        dc_pid: DataCenter VI_ICU_ZYBR pid (str)
+        mrn: 病案号 (str)，用于 bGATemp 查询
+        t0: T0 时间 (datetime)
+        diagnosis_text: 诊断文本 (管道符分隔)
+        eval_time: 评估时间，默认 T0+24h
+
+    Returns:
+        dict: 完整 v3 判定结果
+    """
+    from scoring.bundle_engine import (
+        judge_bundle_v3, _classify_vasopressor,
+        CRYSTALLOID_KEYWORDS, COLLOID_KEYWORDS,
+    )
+
+    if not t0:
+        return {"finish": None, "reason": "NO_T0"}
+
+    # 确保 naive datetime
+    if t0.tzinfo is not None:
+        t0 = t0.replace(tzinfo=None)
+    if eval_time is None:
+        eval_time = t0 + timedelta(hours=24)
+    if eval_time.tzinfo is not None:
+        eval_time = eval_time.replace(tzinfo=None)
+
+    sc = get_client("SmartCare")["SmartCare"]
+    try:
+        dc = get_client("DataCenter")["DataCenter"]
+    except Exception:
+        dc = None
+
+    t0_1h = t0 + timedelta(hours=1)
+    t0_3h = t0 + timedelta(hours=3)
+    t0_6h = t0 + timedelta(hours=6)
+
+    # ---- S1: 氧合指数 P/F ratio (bGATemp 用 mrn 查询) ----
+    pf_ratio_min = None
+    pf_ratio_time = None
+    try:
+        bga_pf = list(sc.bGATemp.find(
+            {'mrn': mrn,
+             'bedsides': {'$elemMatch': {'code': 'param_bg_P/Fratio', 'valid': 'valid',
+                                          'time': {'$gte': t0, '$lte': t0_6h}}}},
+            {'bedsides.$': 1}
+        ))
+        for doc in bga_pf:
+            for bs in doc.get('bedsides', []):
+                val = bs.get('fVal')
+                t = bs.get('time')
+                if val is not None:
+                    if pf_ratio_min is None or val < pf_ratio_min:
+                        pf_ratio_min = val
+                        pf_ratio_time = t
+    except Exception:
+        pass
+
+    # ---- S2: GCS ----
+    gcs_min = None
+    gcs_time = None
+    try:
+        # 优先从 score 表取 (scoreType='gcsScore', total 字段)
+        gcs_score = sc.score.find_one(
+            {'pid': sc_pid, 'scoreType': 'gcsScore', 'valid': True,
+             'time': {'$gte': t0, '$lte': t0_6h}},
+            sort=[('time', 1)]
+        )
+        if gcs_score and gcs_score.get('total') is not None:
+            gcs_min = int(gcs_score['total'])
+            gcs_time = gcs_score.get('time')
+        else:
+            # 兜底: bedside param_score_gcs_obs (格式 E2V2M3)
+            gcs_doc = sc.bedside.find_one(
+                {'pid': sc_pid, 'code': 'param_score_gcs_obs', 'valid': True,
+                 'time': {'$gte': t0, '$lte': t0_6h}},
+                sort=[('time', 1)]
+            )
+            if gcs_doc:
+                gcs_str = str(gcs_doc.get('strVal', ''))
+                gcs_time = gcs_doc.get('time')
+                # 尝试直接数值
+                try:
+                    gcs_min = int(float(gcs_str.strip()))
+                except (ValueError, TypeError):
+                    # 解析 E2V2M3 格式
+                    import re
+                    e_match = re.search(r'E(\d+)', gcs_str, re.IGNORECASE)
+                    v_match = re.search(r'V(\d+)', gcs_str, re.IGNORECASE)
+                    m_match = re.search(r'M(\d+)', gcs_str, re.IGNORECASE)
+                    if e_match and v_match and m_match:
+                        gcs_min = int(e_match.group(1)) + int(v_match.group(1)) + int(m_match.group(1))
+    except Exception:
+        pass
+
+    # ---- S3/C1: MAP (无创平均动脉压 param_nibp_m) ----
+    map_min = None
+    map_time = None
+    try:
+        map_docs = list(sc.bedside.find(
+            {'pid': sc_pid, 'code': 'param_nibp_m', 'valid': True,
+             'time': {'$gte': t0, '$lte': t0_6h}},
+            {'strVal': 1, 'time': 1}
+        ).limit(500))
+        for md in map_docs:
+            try:
+                val = float(str(md.get('strVal', '0')).strip())
+                if val > 0:
+                    if map_min is None or val < map_min:
+                        map_min = val
+                        map_time = md.get('time')
+            except (ValueError, TypeError):
+                pass
+    except Exception:
+        pass
+
+    # ---- S4/K2: 血管活性药 ----
+    has_vasopressor = False
+    vaso_name = None
+    vaso_start_time = None
+    try:
+        vaso_docs = list(sc.drugExe.find(
+            {'pid': sc_pid, 'startTime': {'$gte': t0, '$lte': t0_6h}},
+            {'drugList.name': 1, 'startTime': 1}
+        ).sort('startTime', 1).limit(500))
+        for vd in vaso_docs:
+            for dl in vd.get('drugList', []):
+                name = str(dl.get('name', ''))
+                in_wide, _ = _classify_vasopressor(name)
+                if in_wide:
+                    has_vasopressor = True
+                    vaso_name = name
+                    vaso_start_time = vd.get('startTime')
+                    break
+            if has_vasopressor:
+                break
+    except Exception:
+        pass
+
+    # ---- K1/A1/C2: 乳酸 (bGATemp 用 mrn 查询) ----
+    lactate_initial = None
+    lactate_initial_time = None
+    lactate_max = None
+    lactate_recheck_time = None
+    lactate_recheck_value = None
+    try:
+        bga_lac = list(sc.bGATemp.find(
+            {'mrn': mrn,
+             'bedsides': {'$elemMatch': {'code': 'param_bg_Lac', 'valid': 'valid',
+                                          'time': {'$gte': t0 - timedelta(hours=2), '$lte': t0_6h}}}},
+            {'bedsides.$': 1}
+        ))
+        lac_values = []
+        for doc in bga_lac:
+            for bs in doc.get('bedsides', []):
+                if bs.get('code') == 'param_bg_Lac' and bs.get('valid') == 'valid':
+                    val = bs.get('fVal')
+                    t = bs.get('time')
+                    if val is not None and t:
+                        lac_values.append({'value': val, 'time': t})
+        lac_values.sort(key=lambda x: x['time'])
+
+        # 初始乳酸（T0 前后2h内，T0之前的最近值）
+        for lv in lac_values:
+            if lv['time'] <= t0 + timedelta(hours=1):
+                lactate_initial = lv['value']
+                lactate_initial_time = lv['time']
+
+        # 最高乳酸（T0~T0+6h）
+        lac_in_window = [lv for lv in lac_values if t0 <= lv['time'] <= t0_6h]
+        if lac_in_window:
+            lactate_max = max(lv['value'] for lv in lac_in_window)
+            if lactate_initial is None:
+                lactate_initial = lac_in_window[0]['value']
+                lactate_initial_time = lac_in_window[0]['time']
+
+        # 复测乳酸（T0+1h后的乳酸）
+        lac_recheck = [lv for lv in lac_values if lv['time'] >= t0 + timedelta(hours=1)]
+        if lac_recheck:
+            lactate_recheck_value = lac_recheck[-1]['value']
+            lactate_recheck_time = lac_recheck[-1]['time']
+    except Exception:
+        pass
+
+    # ---- I2/B1: 抗生素 ----
+    has_antibiotic = False
+    antibiotic_time = None
+    antibiotic_name = None
+    try:
+        abx_keywords = [
+            '头孢', '培南', '青霉', '万古', '阿奇', '左氧', '莫西',
+            '甲硝唑', '奥硝唑', '利奈', '替考', '磷霉素', '美罗',
+            '亚胺', '厄他', '哌酮', '他唑', '舒巴坦', '氨苄', '哌拉',
+            '阿莫', '克拉', '多西', '米诺', '替加', '达托', '夫西',
+            '磺胺', '呋喃', '吡哌', '诺氟', '环丙', '氧氟',
+        ]
+        non_abx = ['肝素', '低分子', '华法林', '阿司匹林', '氯吡格雷',
+                   '维生素', '氯化钾', '胰岛素', '碳酸氢钠', '呋塞米',
+                   '甘露醇', '地塞米松', '甲泼尼龙', '丙泊酚', '咪达唑仑',
+                   '芬太尼', '瑞芬太尼', '右美托咪定', '吗啡', '布洛芬',
+                   '对乙酰氨基酚', '皮试', '皮试剂']
+        drug_docs = list(sc.drugExe.find(
+            {'pid': sc_pid, 'startTime': {'$gte': t0, '$lte': t0_6h}},
+            {'drugList.name': 1, 'startTime': 1}
+        ).sort('startTime', 1))
+        for dd in drug_docs:
+            st = dd.get('startTime')
+            if not st:
+                continue
+            for dl in dd.get('drugList', []):
+                name = str(dl.get('name', ''))
+                is_abx = any(kw in name for kw in abx_keywords)
+                is_real = is_abx and not any(kw in name for kw in non_abx)
+                if is_real:
+                    has_antibiotic = True
+                    if antibiotic_time is None:
+                        antibiotic_time = st
+                        antibiotic_name = name
+                    break
+            if has_antibiotic:
+                break
+    except Exception:
+        pass
+
+    # ---- I3/B2: 病原学送检 / 血培养 ----
+    has_culture = False
+    culture_time = None
+    culture_name = None
+    try:
+        if dc is not None:
+            culture_docs = list(dc.VI_ICU_ZYYZ.find(
+                {'pid': dc_pid, 'orderName': {'$regex': '血培养|痰培养|尿培养|细菌培养'}},
+                {'orderName': 1, 'orderTime': 1}
+            ).sort('orderTime', 1))
+            for cd in culture_docs:
+                ct = cd.get('orderTime')
+                if ct and ct >= t0:
+                    has_culture = True
+                    if culture_time is None:
+                        culture_time = ct
+                        culture_name = cd.get('orderName', '')
+                    break
+    except Exception:
+        pass
+
+    # ---- C3: 液体 ----
+    has_fluid_1h = False
+    fluid_3h_ml = 0
+    try:
+        fluid_keywords_list = list(CRYSTALLOID_KEYWORDS | COLLOID_KEYWORDS)
+        fluid_docs = list(sc.drugExe.find(
+            {'pid': sc_pid, 'startTime': {'$gte': t0, '$lte': t0_3h}},
+            {'drugList.name': 1, 'drugList.liquidAmount': 1, 'startTime': 1}
+        ))
+        for fd in fluid_docs:
+            st = fd.get('startTime')
+            if not st:
+                continue
+            hours = (st - t0).total_seconds() / 3600
+            for dl in fd.get('drugList', []):
+                name = str(dl.get('name', ''))
+                is_fluid = any(kw in name for kw in fluid_keywords_list)
+                if is_fluid:
+                    if hours <= 1:
+                        has_fluid_1h = True
+                    liquid = dl.get('liquidAmount')
+                    if liquid and hours <= 3:
+                        try:
+                            fluid_3h_ml += float(liquid)
+                        except (ValueError, TypeError):
+                            pass
+    except Exception:
+        pass
+
+    # ---- 调用 v3 引擎 ----
+    patient_data = {
+        't0': t0,
+        'eval_time': eval_time,
+        'diagnosis_text': diagnosis_text,
+        'has_antibiotic': has_antibiotic,
+        'has_culture': has_culture,
+        'has_vasopressor': has_vasopressor,
+        'lactate_initial': lactate_initial,
+        'lactate_max': lactate_max,
+        'map_min': map_min,
+        'gcs_min': gcs_min,
+        'pf_ratio_min': pf_ratio_min,
+        'antibiotic_time': antibiotic_time,
+        'culture_time': culture_time,
+        'has_fluid_1h': has_fluid_1h,
+        'fluid_3h_ml': fluid_3h_ml,
+    }
+
+    result = judge_bundle_v3(patient_data)
+
+    # 附加原始数据明细
+    result.update({
+        't0': t0,
+        'sc_pid': sc_pid,
+        'dc_pid': dc_pid,
+        'mrn': mrn,
+        'pf_ratio_min': pf_ratio_min,
+        'pf_ratio_time': pf_ratio_time,
+        'gcs_min': gcs_min,
+        'gcs_time': gcs_time,
+        'map_min': map_min,
+        'map_time': map_time,
+        'lactate_initial': lactate_initial,
+        'lactate_initial_time': lactate_initial_time,
+        'lactate_max': lactate_max,
+        'lactate_recheck_value': lactate_recheck_value,
+        'lactate_recheck_time': lactate_recheck_time,
+        'antibiotic_time': antibiotic_time,
+        'antibiotic_name': antibiotic_name,
+        'culture_time': culture_time,
+        'culture_name': culture_name,
+        'has_fluid_1h': has_fluid_1h,
+        'fluid_3h_ml': fluid_3h_ml,
+        'has_vasopressor': has_vasopressor,
+        'vaso_name': vaso_name,
+        'vaso_start_time': vaso_start_time,
+    })
 
     return result
 
@@ -5074,15 +5960,21 @@ def save_infection_site(
     infection_site: str,
     eval_time: datetime,
     operator: str = "system",
+    evidence_type: str = "",
+    notes: str = "",
+    secondary_sites: list = None,
 ) -> dict:
     """
-    保存感染部位到 icu_infection_site 集合。
+    保存感染部位到 icu_infection_site 集合 (V3 扩展版)。
 
     Args:
         pid: 患者 ID
-        infection_site: 感染部位 (11 选 1)
+        infection_site: 主要感染部位 (11 选 1)
         eval_time: 评估时间
         operator: 操作者
+        evidence_type: 证据类型 (影像学/实验室/临床/病理)
+        notes: 备注
+        secondary_sites: 次要感染部位列表
 
     Returns:
         {"ok": True, "id": str} 或 {"ok": False, "error": str}
@@ -5092,8 +5984,18 @@ def save_infection_site(
         "中枢神经系统", "心血管", "骨关节", "五官",
         "其他", "不明确",
     }
+    VALID_EVIDENCE = {"影像学", "实验室", "临床", "病理", "微生物学", ""}
+
     if infection_site not in VALID_SITES:
         return {"ok": False, "error": f"无效感染部位: {infection_site}"}
+    if evidence_type not in VALID_EVIDENCE:
+        return {"ok": False, "error": f"无效证据类型: {evidence_type}"}
+
+    # 验证次要感染部位
+    if secondary_sites:
+        for site in secondary_sites:
+            if site not in VALID_SITES:
+                return {"ok": False, "error": f"无效次要感染部位: {site}"}
 
     try:
         sc = get_client("SmartCare")["SmartCare"]
@@ -5105,6 +6007,9 @@ def save_infection_site(
         "pid": pid,
         "exclusion_key": exclusion_key,
         "infection_site": infection_site,
+        "secondary_sites": secondary_sites or [],
+        "evidence_type": evidence_type,
+        "notes": notes,
         "eval_time": _aware(eval_time),
         "operator": operator,
         "created_at": datetime.now(timezone.utc),

@@ -15,6 +15,46 @@
       <span v-if="exportProgress" class="export-progress">{{ exportProgress }}</span>
       <span v-if="exportError" class="export-error">{{ exportError }}</span>
     </div>
+    <!-- ICU-05 指标说明面板 -->
+    <div v-if="isIcu05 && data.patients?.length" class="bundle-guide">
+      <div class="guide-title" @click="showGuide = !showGuide">
+        <span>📋 ICU-05 感染性休克 Bundle 自动判定</span>
+        <span class="guide-toggle">{{ showGuide ? '▼' : '▶' }}</span>
+      </div>
+      <div v-if="showGuide" class="guide-content">
+        <div class="guide-section">
+          <div class="guide-label">分母:</div>
+          <div class="guide-text">入院24h内进ICU且确诊脓毒性休克的患者</div>
+        </div>
+        <div class="guide-section">
+          <div class="guide-label">T0:</div>
+          <div class="guide-text">入科后第一条医嘱时间 (VI_ICU_ZYYZ.orderTime)</div>
+        </div>
+        <div class="guide-section">
+          <div class="guide-label">判定流程:</div>
+          <div class="guide-flow">
+            <span class="flow-step">S1-S4 器官障碍</span>
+            <span class="flow-arrow">→</span>
+            <span class="flow-step">I1-I3 感染证据</span>
+            <span class="flow-arrow">→</span>
+            <span class="flow-step">K1+K2 脓毒性休克</span>
+            <span class="flow-arrow">→</span>
+            <span class="flow-step">A1+B3+C3 Bundle完成</span>
+          </div>
+        </div>
+        <div class="guide-section">
+          <div class="guide-label">完成判定:</div>
+          <div class="guide-text">
+            第一步 A1(乳酸测定) + 第二步 B3(血培养先于抗生素) + 第三步 C3(液体达标)
+          </div>
+        </div>
+        <div class="guide-section">
+          <div class="guide-label">点击患者行:</div>
+          <div class="guide-text">展开查看详细判定信息（时间线、各项指标值、判定结果）</div>
+        </div>
+      </div>
+    </div>
+
     <div v-if="data.loading" class="loading">明细加载中...</div>
     <div v-else-if="data.error" class="empty">{{ data.error }}</div>
     <div v-else-if="!data.patients?.length" class="empty">暂无明细</div>
@@ -47,24 +87,40 @@
     <!-- 通用表格（共享列定义） -->
     <table v-if="data.patients?.length && !isSummary && !isTriTube" class="detail-table">
       <thead>
-        <tr><th v-for="c in columns" :key="c.header">{{ c.header }}</th><th v-if="canExclude">操作</th></tr>
+        <tr>
+          <th v-if="isIcu05" style="width:30px"></th>
+          <th v-for="c in columns" :key="c.header">{{ c.header }}</th>
+          <th v-if="canExclude">操作</th>
+        </tr>
       </thead>
       <tbody>
-        <tr v-for="p in filteredPatients" :key="p.detail_id || p.patient_id" :class="[rowClass(p), p.excluded ? 'excluded-row' : '']"
-            :title="p.admission_source === 'low_confidence' ? 'AI判定置信度<0.6，待人工复核' : ''">
-          <td v-for="c in columns" :key="c.header" :class="{ mono: c.header === '住院号' || c.header === '账号' }">
-            {{ c.get(p) }}
-          </td>
-          <td v-if="canExclude" class="action-cell">
-            <template v-if="p.excluded">
-              <button class="btn-restore" @click="handleRestore(p)">恢复</button>
-              <span class="reason-tag">{{ getReasonLabel(p.reason_code) }}</span>
-            </template>
-            <template v-else>
-              <button class="btn-exclude" @click="handleExclude(p)">排除</button>
-            </template>
-          </td>
-        </tr>
+        <template v-for="p in filteredPatients" :key="p.detail_id || p.patient_id">
+          <tr :class="[rowClass(p), p.excluded ? 'excluded-row' : '', isIcu05 ? 'clickable-row' : '']"
+              :title="p.admission_source === 'low_confidence' ? 'AI判定置信度<0.6，待人工复核' : ''"
+              @click="isIcu05 && toggleExpand(p.patient_id)">
+            <td v-if="isIcu05" class="expand-cell">
+              <span :class="['expand-icon', { expanded: isExpanded(p.patient_id) }]">▶</span>
+            </td>
+            <td v-for="c in columns" :key="c.header" :class="{ mono: c.header === '住院号' || c.header === '账号' }">
+              {{ c.get(p) }}
+            </td>
+            <td v-if="canExclude" class="action-cell">
+              <template v-if="p.excluded">
+                <button class="btn-restore" @click.stop="handleRestore(p)">恢复</button>
+                <span class="reason-tag">{{ getReasonLabel(p.reason_code) }}</span>
+              </template>
+              <template v-else>
+                <button class="btn-exclude" @click.stop="handleExclude(p)">排除</button>
+              </template>
+            </td>
+          </tr>
+          <!-- ICU-05 Bundle详情展开行 -->
+          <tr v-if="isIcu05 && isExpanded(p.patient_id)" class="bundle-detail-row">
+            <td :colspan="columns.length + 1 + (canExclude ? 1 : 0)">
+              <BundleDetail :data="p.v3 || {}" :patient="p" :part="data.part" />
+            </td>
+          </tr>
+        </template>
       </tbody>
     </table>
   </div>
@@ -104,6 +160,7 @@ import { computed, ref } from 'vue';
 import { getDetailColumns } from '../utils/detailColumns.js';
 import { exportDetailExcel } from '../utils/exportExcel.js';
 import { addExclusion, removeExclusion } from '../api/index.js';
+import BundleDetail from './BundleDetail.vue';
 
 const props = defineProps({
   data: Object,
@@ -118,15 +175,30 @@ const emit = defineEmits(['exclusion-changed']);
 // ---- 人工排除 ----
 const showExclForm = ref(false);
 const exclForm = ref({ exclusion_key: '', patient_id: '', name: '', reason_code: '', reason_text: '', operator: '' });
-const EXCL_REASONS = [
-  { code: 'non_ards', label: '非ARDS原因低氧' },
-  { code: 'unstable_gas', label: '氧合数据非稳定状态' },
-  { code: 'contraindic', label: '存在俯卧位禁忌症' },
-  { code: 'terminal', label: '终末期或家属放弃积极治疗' },
-  { code: 'data_error', label: 'PEEP或氧疗途径记录错误' },
-  { code: 'other', label: '其他' },
-];
-const EXCLUSION_SUPPORTED_CODES = ['ICU-08'];
+const EXCL_REASONS_MAP = {
+  'ICU-08': [
+    { code: 'non_ards', label: '非ARDS原因低氧' },
+    { code: 'unstable_gas', label: '氧合数据非稳定状态' },
+    { code: 'contraindic', label: '存在俯卧位禁忌症' },
+    { code: 'terminal', label: '终末期或家属放弃积极治疗' },
+    { code: 'data_error', label: 'PEEP或氧疗途径记录错误' },
+    { code: 'other', label: '其他' },
+  ],
+  'ICU-05': [
+    { code: 'not_septic_shock', label: '非脓毒性休克' },
+    { code: 'outside_treated', label: '外院已治疗' },
+    { code: 'dnr', label: '放弃积极治疗' },
+    { code: 't0_wrong', label: 'T0锚点错误' },
+    { code: 'data_error', label: '数据错误' },
+    { code: 'other', label: '其他' },
+  ],
+};
+const EXCL_REASONS = computed(() => {
+  const code = props.data?.code || ''
+  if (code.startsWith('ICU-05')) return EXCL_REASONS_MAP['ICU-05']
+  return EXCL_REASONS_MAP[code] || EXCL_REASONS_MAP['ICU-08']
+});
+const EXCLUSION_SUPPORTED_CODES = ['ICU-08', 'ICU-05-1h', 'ICU-05-3h', 'ICU-05-6h'];
 const canExclude = computed(() => EXCLUSION_SUPPORTED_CODES.includes(props.data?.code));
 const excludedCount = computed(() => (props.data?.patients || []).filter(p => p.excluded).length);
 const patientTypeFilter = ref('');
@@ -138,7 +210,7 @@ const filteredPatients = computed(() => {
 });
 
 function getReasonLabel(code) {
-  return EXCL_REASONS.find(r => r.code === code)?.label || code;
+  return EXCL_REASONS.value.find(r => r.code === code)?.label || code;
 }
 
 function handleExclude(p) {
@@ -176,6 +248,23 @@ async function handleRestore(p) {
   } catch (e) {
     console.error('Restore failed:', e);
   }
+}
+
+// ── ICU-05 Bundle详情 ──
+const isIcu05 = computed(() => props.data?.code?.startsWith('ICU-05'));
+const showGuide = ref(false);
+const expandedRows = ref(new Set());
+
+function toggleExpand(patientId) {
+  if (expandedRows.value.has(patientId)) {
+    expandedRows.value.delete(patientId);
+  } else {
+    expandedRows.value.add(patientId);
+  }
+}
+
+function isExpanded(patientId) {
+  return expandedRows.value.has(patientId);
 }
 
 // ── 共享列定义 ──
@@ -307,4 +396,93 @@ tr.excluded-row td { text-decoration: line-through; }
 .filter-btn:hover { border-color: var(--brand); color: var(--brand); }
 .filter-btn.active { background: var(--brand); color: #fff; border-color: var(--brand); }
 .filter-count { margin-left: auto; font-size: var(--fs-caption); color: var(--text-sub); }
+
+/* ICU-05 Bundle详情展开行样式 */
+.clickable-row { cursor: pointer; }
+.clickable-row:hover { background: var(--bg-hover); }
+.expand-cell { width: 30px; text-align: center; padding: 9px 6px !important; }
+.expand-icon {
+  display: inline-block;
+  font-size: 10px;
+  color: var(--text-sub);
+  transition: transform 0.2s ease;
+}
+.expand-icon.expanded { transform: rotate(90deg); }
+.bundle-detail-row { background: var(--bg-subtle); }
+.bundle-detail-row td { padding: 0 !important; border-bottom: 2px solid var(--border); }
+
+/* ICU-05 指标说明面板 */
+.bundle-guide {
+  background: var(--bg-surface);
+  border: 1px solid var(--border);
+  border-radius: 8px;
+  margin-bottom: 12px;
+  overflow: hidden;
+}
+
+.guide-title {
+  display: flex;
+  justify-content: space-between;
+  align-items: center;
+  padding: 12px 16px;
+  cursor: pointer;
+  font-weight: 600;
+  color: var(--text-title);
+  background: var(--bg-subtle);
+}
+
+.guide-title:hover {
+  background: var(--bg-hover);
+}
+
+.guide-toggle {
+  color: var(--text-sub);
+  font-size: 0.85em;
+}
+
+.guide-content {
+  padding: 16px;
+  display: flex;
+  flex-direction: column;
+  gap: 12px;
+}
+
+.guide-section {
+  display: flex;
+  align-items: baseline;
+  gap: 12px;
+}
+
+.guide-label {
+  font-weight: 600;
+  color: var(--text-sub);
+  min-width: 80px;
+  white-space: nowrap;
+}
+
+.guide-text {
+  color: var(--text-body);
+  font-size: 0.9em;
+}
+
+.guide-flow {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  flex-wrap: wrap;
+}
+
+.flow-step {
+  background: var(--brand-weak);
+  color: var(--brand);
+  padding: 4px 10px;
+  border-radius: 6px;
+  font-size: 0.85em;
+  font-weight: 500;
+}
+
+.flow-arrow {
+  color: var(--text-sub);
+  font-size: 0.85em;
+}
 </style>

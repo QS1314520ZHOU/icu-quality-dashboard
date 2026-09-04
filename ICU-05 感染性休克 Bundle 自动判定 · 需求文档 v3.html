@@ -1,0 +1,878 @@
+<html><head><meta http-equiv="Content-Type" content="text/html; charset=utf-8"/><title>ICU-05 感染性休克 Bundle 自动判定 · 需求文档 v3</title><meta name="data-notion-page-icon" content="🩺"/><link rel="icon" href="data:image/svg+xml,%3Csvg%20xmlns%3D%22http%3A%2F%2Fwww.w3.org%2F2000%2Fsvg%22%20viewBox%3D%220%200%20100%20100%22%3E%3Ctext%20y%3D%22.9em%22%20font-size%3D%2290%22%3E%F0%9F%A9%BA%3C%2Ftext%3E%3C%2Fsvg%3E"/><style>
+/* cspell:disable-file */
+/* webkit printing magic: print all background colors */
+html {
+	-webkit-print-color-adjust: exact;
+}
+* {
+	box-sizing: border-box;
+	-webkit-print-color-adjust: exact;
+}
+
+html,
+body {
+	margin: 0;
+	padding: 0;
+}
+@media only screen {
+	body {
+		margin: 2em auto;
+		max-width: 900px;
+		color: rgb(55, 53, 47);
+	}
+}
+
+body {
+	line-height: 1.5;
+	white-space: pre-wrap;
+}
+
+a,
+a.visited {
+	color: inherit;
+	text-decoration: underline;
+}
+
+.pdf-relative-link-path {
+	font-size: 80%;
+	color: #444;
+}
+
+h1,
+h2,
+h3 {
+	letter-spacing: -0.01em;
+	line-height: 1.2;
+	font-weight: 600;
+	margin-bottom: 0;
+}
+
+/* Override strong tags inside headings to maintain consistent weight */
+h1 strong,
+h2 strong,
+h3 strong {
+	font-weight: 600;
+}
+
+.page-title {
+	font-size: 2.5rem;
+	font-weight: 700;
+	margin-top: 0;
+	margin-bottom: 0.75em;
+}
+
+h1 {
+	font-size: 1.875rem;
+	margin-top: 1.875rem;
+}
+
+h2 {
+	font-size: 1.5rem;
+	margin-top: 1.5rem;
+}
+
+h3 {
+	font-size: 1.25rem;
+	margin-top: 1.25rem;
+}
+
+.source {
+	border: 1px solid #ddd;
+	border-radius: 3px;
+	padding: 1.5em;
+	word-break: break-all;
+}
+
+.callout {
+	border-radius: 10px;
+	padding: 1rem;
+}
+
+/* For default-background callouts, render the border outline. */
+.callout.block-color-default_background {
+	border: 1px solid rgba(55, 53, 47, 0.09);
+}
+
+figure {
+	margin: 1.25em 0;
+	page-break-inside: avoid;
+}
+
+/*
+ * Toggles and callouts hold arbitrary content, so they can easily be taller
+ * than a page. They must stay breakable: avoiding breaks inside them makes
+ * Chromium push the whole block onto the next page, which leaves the previous
+ * page mostly empty before every long toggle.
+ */
+details,
+aside {
+	margin: 1.25em 0;
+}
+
+/* Keep a toggle's title on the same page as the start of its content. */
+summary {
+	page-break-after: avoid;
+	break-after: avoid;
+}
+
+/*
+ * Toggle headings render as <h1/h2/h3 style="display:inline-block"> inside
+ * <summary>. Without this reset, the heading's margin-top pushes it below the
+ * ::marker (▼), so the triangle and the title appear on separate lines.
+ */
+summary h1,
+summary h2,
+summary h3,
+summary h4 {
+	margin-top: 0;
+}
+
+figcaption {
+	opacity: 0.5;
+	font-size: 85%;
+	margin-top: 0.5em;
+}
+
+mark {
+	background-color: transparent;
+}
+
+.indented {
+	padding-left: 1.5em;
+}
+
+hr {
+	background: transparent;
+	display: block;
+	width: 100%;
+	height: 1px;
+	visibility: visible;
+	border: none;
+	border-bottom: 1px solid rgba(55, 53, 47, 0.09);
+}
+
+img {
+	max-width: 100%;
+}
+
+@media only print {
+	img {
+		max-height: 100vh;
+		object-fit: contain;
+	}
+
+	table.collection-content {
+		width: 100%;
+		table-layout: fixed;
+	}
+
+	table.collection-content th,
+	table.collection-content td {
+		overflow-wrap: anywhere;
+	}
+
+	table.collection-content td > .user,
+	table.collection-content td > time {
+		white-space: pre-wrap;
+	}
+}
+
+@page {
+	margin: 1in;
+}
+
+.collection-content-wrapper {
+	overflow-x: auto;
+}
+
+@media only print {
+	.collection-content-wrapper {
+		overflow-x: visible;
+	}
+}
+
+.collection-content {
+	font-size: 0.875rem;
+}
+
+.collection-content td {
+	white-space: pre-wrap;
+	word-break: break-word;
+}
+
+.column-list {
+	display: flex;
+	gap: 46px;
+}
+
+.column {
+	min-width: 0;
+	overflow: hidden;
+}
+
+.column > *:first-child {
+	margin-top: 0;
+}
+
+.table_of_contents-item {
+	display: block;
+	font-size: 0.875rem;
+	line-height: 1.3;
+	padding-inline: 0.125rem;
+	padding-block: 0.375rem;
+}
+
+.table_of_contents-indent-1 {
+	margin-left: 1.5rem;
+}
+
+.table_of_contents-indent-2 {
+	margin-left: 3rem;
+}
+
+.table_of_contents-indent-3 {
+	margin-left: 4.5rem;
+}
+
+.table_of_contents-link {
+	text-decoration: none;
+	opacity: 0.7;
+	border-bottom: 1px solid rgba(55, 53, 47, 0.18);
+}
+
+table,
+th,
+td {
+	border: 1px solid rgba(55, 53, 47, 0.09);
+}
+
+table {
+	border-collapse: collapse;
+	border-left: none;
+	border-right: none;
+}
+
+th,
+td {
+	font-weight: normal;
+	padding: 0.25em 0.5em;
+	line-height: 1.5;
+	min-height: 1.5em;
+	text-align: left;
+}
+
+th {
+	color: rgba(55, 53, 47, 0.6);
+}
+
+ol,
+ul {
+	margin: 0;
+	margin-block-start: 0.6em;
+	margin-block-end: 0.6em;
+}
+
+li > ol:first-child,
+li > ul:first-child {
+	margin-block-start: 0.6em;
+}
+
+ul > li {
+	list-style: disc;
+}
+
+ul.to-do-list {
+	padding-inline-start: 0;
+}
+
+ul.to-do-list > li {
+	list-style: none;
+}
+
+.to-do-children-checked {
+	text-decoration: line-through;
+	opacity: 0.375;
+}
+
+ul.toggle > li {
+	list-style: none;
+}
+
+ul {
+	padding-inline-start: 1.7em;
+}
+
+ul > li {
+	padding-left: 0.1em;
+}
+
+ol {
+	padding-inline-start: 1.6em;
+}
+
+ol.numbered-list.numbered-list-digits-2 {
+	padding-inline-start: 2em;
+}
+
+ol.numbered-list.numbered-list-digits-3plus {
+	padding-inline-start: 2.4em;
+}
+
+ol > li {
+	padding-left: 0.2em;
+}
+
+.mono ol {
+	padding-inline-start: 2em;
+}
+
+.mono ol > li {
+	text-indent: -0.4em;
+}
+
+.toggle {
+	padding-inline-start: 0em;
+	list-style-type: none;
+}
+
+/* Indent toggle children */
+.toggle > li > details {
+	padding-left: 1.7em;
+}
+
+.toggle > li > details > summary {
+	margin-left: -1.1em;
+}
+
+.selected-value {
+	display: inline-block;
+	padding: 0 0.5em;
+	background: rgba(206, 205, 202, 0.5);
+	border-radius: 3px;
+	margin-right: 0.5em;
+	margin-top: 0.3em;
+	margin-bottom: 0.3em;
+	white-space: nowrap;
+}
+
+.collection-title {
+	display: inline-block;
+	margin-right: 1em;
+}
+
+.page-description {
+	margin-bottom: 2em;
+}
+
+.simple-table {
+	margin-top: 1em;
+	font-size: 0.875rem;
+	empty-cells: show;
+}
+.simple-table td {
+	height: 29px;
+	min-width: 120px;
+}
+
+.simple-table th {
+	height: 29px;
+	min-width: 120px;
+}
+
+.simple-table-header-color {
+	background: rgb(247, 246, 243);
+	color: black;
+}
+.simple-table-header {
+	font-weight: 500;
+}
+
+time {
+	opacity: 0.5;
+}
+
+.icon {
+	display: inline-flex;
+	align-items: center;
+	justify-content: center;
+	max-width: 1.2em;
+	max-height: 1.2em;
+	text-decoration: none;
+	vertical-align: text-bottom;
+	margin-right: 0.5em;
+}
+
+/*
+ * Render emoji icons using a ::before pseudo-element to keep the glyph
+ * out of the DOM textContent traversal. This avoids double-rendering icons
+ * in callouts and page titles.
+ * NOTE(slim/html-export-pseudo-icons): I can't tagref this because it will
+ * flag as a duplicate tag after codegen.
+ */
+.icon[data-emoji]::before {
+	content: attr(data-emoji);
+}
+
+img.icon {
+	border-radius: 3px;
+}
+
+.callout img.notion-static-icon {
+	width: 1em;
+	height: 1em;
+}
+
+.callout p {
+	margin: 0;
+}
+
+.callout h1,
+.callout h2,
+.callout h3 {
+	margin: 0 0 0.6rem;
+}
+
+.user-icon {
+	width: 1.5em;
+	height: 1.5em;
+	border-radius: 100%;
+	margin-right: 0.5rem;
+}
+
+.user-icon-inner {
+	font-size: 0.8em;
+}
+
+.text-icon {
+	border: 1px solid #000;
+	text-align: center;
+}
+
+.page-cover-image {
+	display: block;
+	object-fit: cover;
+	width: 100%;
+	max-height: 30vh;
+}
+
+.page-header-icon {
+	font-size: 3rem;
+	margin-bottom: 1rem;
+}
+
+.page-header-icon-with-cover {
+	margin-top: -0.72em;
+	margin-left: 0.07em;
+}
+
+.page-header-icon img {
+	border-radius: 3px;
+}
+
+.link-to-page {
+	margin: 1em 0;
+	padding: 0;
+	border: none;
+	font-weight: 500;
+}
+
+p > .user {
+	opacity: 0.5;
+}
+
+td > .user,
+td > time {
+	white-space: nowrap;
+}
+
+input[type="checkbox"] {
+	margin-right: 0.4em;
+	vertical-align: middle;
+}
+
+p {
+	margin-top: 0.5em;
+	margin-bottom: 0.5em;
+}
+
+.image {
+	border: none;
+	margin: 1.5em 0;
+	padding: 0;
+	border-radius: 0;
+	text-align: center;
+}
+
+.code,
+code {
+	background: rgba(135, 131, 120, 0.15);
+	border-radius: 3px;
+	padding: 0.2em 0.4em;
+	border-radius: 3px;
+	font-size: 85%;
+	tab-size: 2;
+}
+
+code {
+	color: #eb5757;
+}
+
+.code {
+	padding: 1.5em 1em;
+}
+
+.code-wrap {
+	white-space: pre-wrap;
+	word-break: break-all;
+}
+
+.code > code {
+	background: none;
+	padding: 0;
+	font-size: 100%;
+	color: inherit;
+}
+
+blockquote {
+	font-size: 1em;
+	margin: 1em 0;
+	padding-left: 1em;
+	border-left: 3px solid rgb(55, 53, 47);
+}
+
+blockquote.quote-large {
+	font-size: 1.25em;
+}
+
+.bookmark {
+	text-decoration: none;
+	max-height: 8em;
+	padding: 0;
+	display: flex;
+	width: 100%;
+	align-items: stretch;
+}
+
+.bookmark-title {
+	font-size: 0.85em;
+	overflow: hidden;
+	text-overflow: ellipsis;
+	height: 1.75em;
+	white-space: nowrap;
+}
+
+.bookmark-text {
+	display: flex;
+	flex-direction: column;
+}
+
+.bookmark-info {
+	flex: 4 1 180px;
+	padding: 12px 14px 14px;
+	display: flex;
+	flex-direction: column;
+	justify-content: space-between;
+}
+
+.bookmark-image {
+	width: 33%;
+	flex: 1 1 180px;
+	display: block;
+	position: relative;
+	object-fit: cover;
+	border-radius: 1px;
+}
+
+.bookmark-description {
+	color: rgba(55, 53, 47, 0.6);
+	font-size: 0.75em;
+	overflow: hidden;
+	max-height: 4.5em;
+	word-break: break-word;
+}
+
+.bookmark-href {
+	font-size: 0.75em;
+	margin-top: 0.25em;
+}
+
+.tab {
+	margin: 1.25em 0;
+	padding-inline: 1rem;
+	border: 1px solid rgba(55, 53, 47, 0.09);
+}
+
+.sans { font-family: ui-sans-serif, -apple-system, BlinkMacSystemFont, "Segoe UI Variable Display", "Segoe UI", Helvetica, "Apple Color Emoji", "Noto Sans Arabic", "Noto Sans Hebrew", Arial, sans-serif, "Segoe UI Emoji", "Segoe UI Symbol"; }
+.code { font-family: "SFMono-Regular", Menlo, Consolas, "PT Mono", "Liberation Mono", Courier, monospace; }
+.serif { font-family: Lyon-Text, Georgia, ui-serif, serif; }
+.mono { font-family: iawriter-mono, Nitti, Menlo, Courier, monospace; }
+.pdf .sans { font-family: Inter, ui-sans-serif, -apple-system, BlinkMacSystemFont, "Segoe UI Variable Display", "Segoe UI", Helvetica, "Apple Color Emoji", "Noto Sans Arabic", "Noto Sans Hebrew", Arial, sans-serif, "Segoe UI Emoji", "Segoe UI Symbol", 'Twemoji', 'Noto Color Emoji', 'Noto Sans CJK JP'; }
+.pdf:lang(zh-CN) .sans { font-family: Inter, ui-sans-serif, -apple-system, BlinkMacSystemFont, "Segoe UI Variable Display", "Segoe UI", Helvetica, "Apple Color Emoji", "Noto Sans Arabic", "Noto Sans Hebrew", Arial, sans-serif, "Segoe UI Emoji", "Segoe UI Symbol", 'Twemoji', 'Noto Color Emoji', 'Noto Sans CJK SC'; }
+.pdf:lang(zh-TW) .sans { font-family: Inter, ui-sans-serif, -apple-system, BlinkMacSystemFont, "Segoe UI Variable Display", "Segoe UI", Helvetica, "Apple Color Emoji", "Noto Sans Arabic", "Noto Sans Hebrew", Arial, sans-serif, "Segoe UI Emoji", "Segoe UI Symbol", 'Twemoji', 'Noto Color Emoji', 'Noto Sans CJK TC'; }
+.pdf:lang(ko-KR) .sans { font-family: Inter, ui-sans-serif, -apple-system, BlinkMacSystemFont, "Segoe UI Variable Display", "Segoe UI", Helvetica, "Apple Color Emoji", "Noto Sans Arabic", "Noto Sans Hebrew", Arial, sans-serif, "Segoe UI Emoji", "Segoe UI Symbol", 'Twemoji', 'Noto Color Emoji', 'Noto Sans CJK KR'; }
+.pdf .code { font-family: Source Code Pro, "SFMono-Regular", Menlo, Consolas, "PT Mono", "Liberation Mono", Courier, monospace, 'Twemoji', 'Noto Color Emoji', 'Noto Sans Mono CJK JP'; }
+.pdf:lang(zh-CN) .code { font-family: Source Code Pro, "SFMono-Regular", Menlo, Consolas, "PT Mono", "Liberation Mono", Courier, monospace, 'Twemoji', 'Noto Color Emoji', 'Noto Sans Mono CJK SC'; }
+.pdf:lang(zh-TW) .code { font-family: Source Code Pro, "SFMono-Regular", Menlo, Consolas, "PT Mono", "Liberation Mono", Courier, monospace, 'Twemoji', 'Noto Color Emoji', 'Noto Sans Mono CJK TC'; }
+.pdf:lang(ko-KR) .code { font-family: Source Code Pro, "SFMono-Regular", Menlo, Consolas, "PT Mono", "Liberation Mono", Courier, monospace, 'Twemoji', 'Noto Color Emoji', 'Noto Sans Mono CJK KR'; }
+.pdf .serif { font-family: PT Serif, Lyon-Text, Georgia, ui-serif, serif, 'Twemoji', 'Noto Color Emoji', 'Noto Serif CJK JP'; }
+.pdf:lang(zh-CN) .serif { font-family: PT Serif, Lyon-Text, Georgia, ui-serif, serif, 'Twemoji', 'Noto Color Emoji', 'Noto Serif CJK SC'; }
+.pdf:lang(zh-TW) .serif { font-family: PT Serif, Lyon-Text, Georgia, ui-serif, serif, 'Twemoji', 'Noto Color Emoji', 'Noto Serif CJK TC'; }
+.pdf:lang(ko-KR) .serif { font-family: PT Serif, Lyon-Text, Georgia, ui-serif, serif, 'Twemoji', 'Noto Color Emoji', 'Noto Serif CJK KR'; }
+.pdf .mono { font-family: PT Mono, iawriter-mono, Nitti, Menlo, Courier, monospace, 'Twemoji', 'Noto Color Emoji', 'Noto Sans Mono CJK JP'; }
+.pdf:lang(zh-CN) .mono { font-family: PT Mono, iawriter-mono, Nitti, Menlo, Courier, monospace, 'Twemoji', 'Noto Color Emoji', 'Noto Sans Mono CJK SC'; }
+.pdf:lang(zh-TW) .mono { font-family: PT Mono, iawriter-mono, Nitti, Menlo, Courier, monospace, 'Twemoji', 'Noto Color Emoji', 'Noto Sans Mono CJK TC'; }
+.pdf:lang(ko-KR) .mono { font-family: PT Mono, iawriter-mono, Nitti, Menlo, Courier, monospace, 'Twemoji', 'Noto Color Emoji', 'Noto Sans Mono CJK KR'; }
+.highlight-default {
+	color: rgba(44, 44, 43, 1);
+}
+.highlight-gray {
+	color: rgba(125, 122, 117, 1);
+	fill: rgba(125, 122, 117, 1);
+}
+.highlight-brown {
+	color: rgba(159, 118, 90, 1);
+	fill: rgba(159, 118, 90, 1);
+}
+.highlight-orange {
+	color: rgba(210, 123, 45, 1);
+	fill: rgba(210, 123, 45, 1);
+}
+.highlight-yellow {
+	color: rgba(203, 148, 52, 1);
+	fill: rgba(203, 148, 52, 1);
+}
+.highlight-teal {
+	color: rgba(80, 148, 110, 1);
+	fill: rgba(80, 148, 110, 1);
+}
+.highlight-blue {
+	color: rgba(56, 125, 201, 1);
+	fill: rgba(56, 125, 201, 1);
+}
+.highlight-purple {
+	color: rgba(154, 107, 180, 1);
+	fill: rgba(154, 107, 180, 1);
+}
+.highlight-pink {
+	color: rgba(193, 76, 138, 1);
+	fill: rgba(193, 76, 138, 1);
+}
+.highlight-red {
+	color: rgba(207, 81, 72, 1);
+	fill: rgba(207, 81, 72, 1);
+}
+.highlight-default_background {
+	color: rgba(44, 44, 43, 1);
+}
+.highlight-gray_background {
+	background: rgba(42, 28, 0, 0.07);
+}
+.highlight-brown_background {
+	background: rgba(139, 46, 0, 0.086);
+}
+.highlight-orange_background {
+	background: rgba(224, 101, 1, 0.129);
+}
+.highlight-yellow_background {
+	background: rgba(211, 168, 0, 0.137);
+}
+.highlight-teal_background {
+	background: rgba(0, 100, 45, 0.09);
+}
+.highlight-blue_background {
+	background: rgba(0, 124, 215, 0.094);
+}
+.highlight-purple_background {
+	background: rgba(102, 0, 178, 0.078);
+}
+.highlight-pink_background {
+	background: rgba(197, 0, 93, 0.086);
+}
+.highlight-red_background {
+	background: rgba(223, 22, 0, 0.094);
+}
+.block-color-default {
+	color: inherit;
+	fill: inherit;
+}
+.block-color-gray {
+	color: rgba(125, 122, 117, 1);
+	fill: rgba(125, 122, 117, 1);
+}
+.block-color-brown {
+	color: rgba(159, 118, 90, 1);
+	fill: rgba(159, 118, 90, 1);
+}
+.block-color-orange {
+	color: rgba(210, 123, 45, 1);
+	fill: rgba(210, 123, 45, 1);
+}
+.block-color-yellow {
+	color: rgba(203, 148, 52, 1);
+	fill: rgba(203, 148, 52, 1);
+}
+.block-color-teal {
+	color: rgba(80, 148, 110, 1);
+	fill: rgba(80, 148, 110, 1);
+}
+.block-color-blue {
+	color: rgba(56, 125, 201, 1);
+	fill: rgba(56, 125, 201, 1);
+}
+.block-color-purple {
+	color: rgba(154, 107, 180, 1);
+	fill: rgba(154, 107, 180, 1);
+}
+.block-color-pink {
+	color: rgba(193, 76, 138, 1);
+	fill: rgba(193, 76, 138, 1);
+}
+.block-color-red {
+	color: rgba(207, 81, 72, 1);
+	fill: rgba(207, 81, 72, 1);
+}
+.block-color-default_background {
+	color: inherit;
+	fill: inherit;
+}
+.block-color-gray_background {
+	background: rgba(240, 239, 237, 1);
+}
+.block-color-brown_background {
+	background: rgba(245, 237, 233, 1);
+}
+.block-color-orange_background {
+	background: rgba(251, 235, 222, 1);
+}
+.block-color-yellow_background {
+	background: rgba(249, 243, 220, 1);
+}
+.block-color-teal_background {
+	background: rgba(232, 241, 236, 1);
+}
+.block-color-blue_background {
+	background: rgba(229, 242, 252, 1);
+}
+.block-color-purple_background {
+	background: rgba(243, 235, 249, 1);
+}
+.block-color-pink_background {
+	background: rgba(250, 233, 241, 1);
+}
+.block-color-red_background {
+	background: rgba(252, 233, 231, 1);
+}
+.select-value-color-default { background-color: rgba(42, 28, 0, 0.07); }
+.select-value-color-gray { background-color: rgba(28, 19, 1, 0.11); }
+.select-value-color-brown { background-color: rgba(127, 51, 0, 0.156); }
+.select-value-color-orange { background-color: rgba(196, 88, 0, 0.203); }
+.select-value-color-yellow { background-color: rgba(209, 156, 0, 0.282); }
+.select-value-color-green { background-color: rgba(0, 96, 38, 0.156); }
+.select-value-color-blue { background-color: rgba(0, 118, 217, 0.203); }
+.select-value-color-purple { background-color: rgba(92, 0, 163, 0.141); }
+.select-value-color-pink { background-color: rgba(183, 0, 78, 0.152); }
+.select-value-color-red { background-color: rgba(206, 24, 0, 0.164); }
+
+.checkbox {
+	display: inline-flex;
+	vertical-align: text-bottom;
+	width: 16;
+	height: 16;
+	background-size: 16px;
+	margin-left: 2px;
+	margin-right: 5px;
+}
+
+.checkbox-on {
+	background-image: url("data:image/svg+xml;charset=UTF-8,%3Csvg%20width%3D%2216%22%20height%3D%2216%22%20viewBox%3D%220%200%2016%2016%22%20fill%3D%22none%22%20xmlns%3D%22http%3A%2F%2Fwww.w3.org%2F2000%2Fsvg%22%3E%0A%3Crect%20width%3D%2216%22%20height%3D%2216%22%20fill%3D%22%2358A9D7%22%2F%3E%0A%3Cpath%20d%3D%22M6.71429%2012.2852L14%204.9995L12.7143%203.71436L6.71429%209.71378L3.28571%206.2831L2%207.57092L6.71429%2012.2852Z%22%20fill%3D%22white%22%2F%3E%0A%3C%2Fsvg%3E");
+}
+
+.checkbox-off {
+	background-image: url("data:image/svg+xml;charset=UTF-8,%3Csvg%20width%3D%2216%22%20height%3D%2216%22%20viewBox%3D%220%200%2016%2016%22%20fill%3D%22none%22%20xmlns%3D%22http%3A%2F%2Fwww.w3.org%2F2000%2Fsvg%22%3E%0A%3Crect%20x%3D%220.75%22%20y%3D%220.75%22%20width%3D%2214.5%22%20height%3D%2214.5%22%20fill%3D%22white%22%20stroke%3D%22%2336352F%22%20stroke-width%3D%221.5%22%2F%3E%0A%3C%2Fsvg%3E");
+}
+	
+</style><style>@import url('https://cdn.jsdelivr.net/npm/katex@0.16.25/dist/katex-swap.min.css')</style></head><body><article id="b5cca5b8-c9dc-4d6c-be4e-797c39439891" class="page sans" data-notion-page-icon="🩺"><header><div class="page-header-icon undefined"><span class="icon" data-emoji="🩺"></span></div><h1 class="page-title" dir="auto">ICU-05 感染性休克 Bundle 自动判定 · 需求文档 v3</h1><p class="page-description" dir="auto"></p></header><div class="page-body"><aside class="block-color-blue_background callout" data-notion-callout="" data-notion-callout-icon="🎯" data-notion-callout-background="blue_background" style="white-space:pre-wrap;display:flex" id="5fc2e41d-bfb7-4db6-aa54-1a079b65ce97" dir="ltr"><div style="font-size:1.5em"><span class="icon" data-emoji="🎯"></span></div><div style="width:100%"><p id="f0866c5a-af12-4fa2-a5a2-4a4ee3c4e084" class="" dir="auto">一页速览</p><ul id="df5b3a79-d291-44d7-84fe-d7cae60f454f" class="bulleted-list" dir="auto"><li style="list-style-type:disc">分母：入院 24h 内进 ICU（入科类型 = 入院 / 手术入院 / 外院）且确诊脓毒性休克</li></ul><ul id="13565623-e08d-4c82-9599-a13a7244f346" class="bulleted-list" dir="auto"><li style="list-style-type:disc">T0：入科后 <code>VI_ICU_ZYYZ</code> 第一条医嘱 <code>orderTime</code></li></ul><ul id="c2c8f711-3613-496e-b9ae-451a7e3b1c21" class="bulleted-list" dir="auto"><li style="list-style-type:disc">判定：全自动计算 + 三层人工覆盖（病例 / 判定项 / SOFA 分项）</li></ul><ul id="9a5608bd-91a8-4f26-b9d6-16474865da08" class="bulleted-list" dir="auto"><li style="list-style-type:disc">感染部位：人工选择，<strong>落库持久化</strong>，不阻塞分母</li></ul><ul id="5d0f0067-668c-4e93-8899-cdd9ff4fe495" class="bulleted-list" dir="auto"><li style="list-style-type:disc">去甲肾上腺素：<strong>按碱基计，换算系数 1.0，不除 2</strong>（主任定）</li></ul><ul id="007afc3b-f8c1-466f-920c-0ff86e1fd896" class="bulleted-list" dir="auto"><li style="list-style-type:disc">SOFA / SOFA-2：双版本并行，<strong>仅辅助展示，永不作为任何指标分子分母</strong></li></ul></div></aside><p id="57c500e5-39d2-4ec9-8bb0-259a7eafa46b" class="" dir="auto">本文档替换 v2 的 §4 §5 §12 §13，新增「感染部位入库」与「三层人工覆盖」。v2 的 §1 §2 §3 §8 §9 §10 §11 原样有效。</p><h2 id="45d9cc81-82d3-436c-aacb-6222c5733196" class="" dir="auto">一、总流程</h2><script src="https://cdnjs.cloudflare.com/ajax/libs/prism/1.29.0/prism.min.js" integrity="sha512-7Z9J3l1+EYfeaPKcGXu3MS/7T+w19WtKQY/n+xzmw4hZhJ9tyYmcUS+4QqAlzhicE5LAfMQSF3iFTK9bQdTxXg==" crossorigin="anonymous" referrerPolicy="no-referrer"></script><link rel="stylesheet" href="https://cdnjs.cloudflare.com/ajax/libs/prism/1.29.0/themes/prism.min.css" integrity="sha512-tN7Ec6zAFaVSG3TpNAKtk4DOHNpSwKHxxrsiw4GHKESGPs5njn/0sMCUMl2svV4wo4BK/rCP7juYz+zx+l6oeQ==" crossorigin="anonymous" referrerPolicy="no-referrer"/><pre id="7ce6118a-4766-4e49-851d-cadbc2eb3974" class="code code-wrap" data-notion-code-syntax="mermaid"><code class="language-mermaid" style="white-space:pre-wrap;word-break:break-all">flowchart TD
+    A[&quot;SmartCare patient 表&quot;] --&gt; B{&quot;入院到入ICU 小于24小时&quot;}
+    B -- 否 --&gt; B1[&quot;不进候选池&lt;br/&gt;详情单列落选原因&quot;]
+    B -- 是 --&gt; B2{&quot;入科类型在 入院/手术入院/外院 内&quot;}
+    B2 -- 否 --&gt; B1
+    B2 -- 是 --&gt; C[&quot;T0 解析&lt;br/&gt;VI_ICU_ZYYZ 第一条医嘱 orderTime&quot;]
+    C --&gt; D[&quot;脓毒症器官障碍&lt;br/&gt;S1 S2 S3 S4 任一成立&quot;]
+    D -- 全不成立 --&gt; D1[&quot;不进分母&quot;]
+    D -- 成立 --&gt; E{&quot;感染证据 I1 I2 I3 任一&quot;}
+    E -- 无 --&gt; E1[&quot;疑似待复核&lt;br/&gt;标黄不进分母&quot;]
+    E -- 有 --&gt; F{&quot;脓毒性休克&lt;br/&gt;K1 且 K2&quot;}
+    F -- 不成立 --&gt; D1
+    F -- 成立 --&gt; G[&quot;进入分母&quot;]
+    G --&gt; H[&quot;Bundle 1h / 3h / 6h 判定&quot;]
+    H --&gt; I[&quot;三层人工覆盖&quot;]
+    I --&gt; J[&quot;指标值 = 分子 / 分母&quot;]</code></pre><h2 id="053e4630-26dc-478b-9426-065966f79cf5" class="" dir="auto">二、判定项总表</h2><p id="6bb0475c-4f7b-40b9-8716-6a1dc9d8ecad" class="" dir="auto">所有判定项取值只能是 <code>true</code> / <code>false</code> / <code>null</code>。<code>null</code> 显示灰色「—」，<strong>严禁当 false 参与完成计算</strong>。</p><table id="b3425860-5885-421e-a987-ea37ef61ff7e" class="simple-table" dir="ltr"><thead class="simple-table-header"><tr id="f6721953-66aa-42f6-abb7-e7f941fc7808" dir="ltr"><th id="oMjN" class="simple-table-header-color simple-table-header">ID</th><th id="OzBI" class="simple-table-header-color simple-table-header">判定项</th><th id="KTTV" class="simple-table-header-color simple-table-header">数据源</th><th id="ZMWK" class="simple-table-header-color simple-table-header">取值口径</th><th id="Gj{L" class="simple-table-header-color simple-table-header">阈值 / 条件</th><th id="EfAS" class="simple-table-header-color simple-table-header">人工可覆盖</th><th id="Ug=h" class="simple-table-header-color simple-table-header">缺失处理</th></tr></thead><tbody><tr id="968fdaaf-2355-4175-90db-1894a36b8130" dir="ltr"><td id="oMjN" class="">S1</td><td id="OzBI" class="">氧合指数</td><td id="KTTV" class="">血气 <code>param_bg_P/Fratio</code></td><td id="ZMWK" class="">窗口内<strong>最低值</strong></td><td id="Gj{L" class="">&lt; 300</td><td id="EfAS" class="">✅ L2</td><td id="Ug=h" class=""><code>null</code></td></tr><tr id="2332adc5-9bf1-432c-a9d5-2584b95cf2a2" dir="ltr"><td id="oMjN" class="">S2</td><td id="OzBI" class="">GCS</td><td id="KTTV" class="">评分表数字总分优先，bedside 编码兜底</td><td id="ZMWK" class="">窗口内<strong>最低值</strong></td><td id="Gj{L" class="">&lt; 13</td><td id="EfAS" class="">✅ L2</td><td id="Ug=h" class=""><code>null</code></td></tr><tr id="1deabbb4-20a6-4dc0-9491-fa89bbbf3709" dir="ltr"><td id="oMjN" class="">S3</td><td id="OzBI" class="">平均动脉压</td><td id="KTTV" class="">有创 + 无创混合</td><td id="ZMWK" class="">窗口内<strong>最低值</strong></td><td id="Gj{L" class="">&lt; 70 mmHg</td><td id="EfAS" class="">✅ L2</td><td id="Ug=h" class=""><code>null</code></td></tr><tr id="25b4ab0d-b719-42dc-b7ff-4a83af21c959" dir="ltr"><td id="oMjN" class="">S4</td><td id="OzBI" class="">血管活性药</td><td id="KTTV" class="">执行用药（<strong>有执行</strong>）</td><td id="ZMWK" class=""><code>VASO_WIDE</code> 宽口径</td><td id="Gj{L" class="">存在即成立</td><td id="EfAS" class="">✅ L2</td><td id="Ug=h" class=""><code>false</code></td></tr><tr id="620ff71c-ff4a-49b3-bf22-8a4fb611a0cf" dir="ltr"><td id="oMjN" class="">I1</td><td id="OzBI" class="">诊断含感染关键词</td><td id="KTTV" class="">入院 / 入科 / 病程诊断</td><td id="ZMWK" class="">关键词匹配</td><td id="Gj{L" class="">命中即成立</td><td id="EfAS" class="">✅ L2</td><td id="Ug=h" class=""><code>false</code></td></tr><tr id="caf960fa-8f92-49bc-b748-59540d94cd7a" dir="ltr"><td id="oMjN" class="">I2</td><td id="OzBI" class="">抗感染治疗执行</td><td id="KTTV" class="">执行用药 + 药物字典「抗生素」</td><td id="ZMWK" class="">窗口内有执行</td><td id="Gj{L" class="">存在即成立</td><td id="EfAS" class="">✅ L2</td><td id="Ug=h" class=""><code>false</code></td></tr><tr id="2d38ddcc-25d7-4e94-b60a-2015b4c91aa7" dir="ltr"><td id="oMjN" class="">I3</td><td id="OzBI" class="">病原学送检</td><td id="KTTV" class="">复用 ICU-06 送检识别</td><td id="ZMWK" class="">窗口内有送检</td><td id="Gj{L" class="">存在即成立</td><td id="EfAS" class="">✅ L2</td><td id="Ug=h" class=""><code>false</code></td></tr><tr id="53f92a15-2f55-4f7f-a36e-690c043d9291" dir="ltr"><td id="oMjN" class="">K1</td><td id="OzBI" class="">血乳酸（<strong>标本类型未知</strong>）</td><td id="KTTV" class="">血气 <code>param_bg_Lac</code></td><td id="ZMWK" class="">窗口内取值</td><td id="Gj{L" class="">≥ 2 mmol/L</td><td id="EfAS" class="">✅ L2</td><td id="Ug=h" class=""><code>null</code></td></tr><tr id="9937f462-7c21-4ef4-bb7c-8c31d0817193" dir="ltr"><td id="oMjN" class="">K2</td><td id="OzBI" class="">是否需要升压</td><td id="KTTV" class="">执行用药（<strong>有执行</strong>）</td><td id="ZMWK" class=""><code>VASO_WIDE</code> 宽口径</td><td id="Gj{L" class="">存在即成立</td><td id="EfAS" class="">✅ L2</td><td id="Ug=h" class=""><code>false</code></td></tr><tr id="d01f2962-802e-4035-9879-74dbb437efad" dir="ltr"><td id="oMjN" class="">A1</td><td id="OzBI" class="">乳酸测定</td><td id="KTTV" class="">血气 <code>param_bg_Lac</code></td><td id="ZMWK" class="">窗口内<strong>最早一条</strong>，同时记最高值</td><td id="Gj{L" class="">取到值即达标</td><td id="EfAS" class="">✅ L2</td><td id="Ug=h" class=""><code>null</code> → <code>DATA_MISSING_LAC</code></td></tr><tr id="a8c50d63-bf7e-4b03-8d30-9a35e419487a" dir="ltr"><td id="oMjN" class="">B1</td><td id="OzBI" class="">抗菌药物执行时间</td><td id="KTTV" class="">执行用药 <code>开始时间</code></td><td id="ZMWK" class="">窗口内<strong>倒序取第一条</strong></td><td id="Gj{L" class="">有值</td><td id="EfAS" class="">✅ L2</td><td id="Ug=h" class=""><code>null</code> → <code>AB_MISSING</code></td></tr><tr id="5ec45841-0e83-462d-b293-0e21af2a5070" dir="ltr"><td id="oMjN" class="">B2</td><td id="OzBI" class="">血培养执行时间</td><td id="KTTV" class="">医嘱关键字【血培养】的 <code>reviewTime</code></td><td id="ZMWK" class="">窗口内<strong>倒序取第一条</strong></td><td id="Gj{L" class="">有值</td><td id="EfAS" class="">✅ L2</td><td id="Ug=h" class=""><code>null</code> → <code>BC_MISSING</code></td></tr><tr id="c3979579-244f-4229-8486-bb7bc1543314" dir="ltr"><td id="oMjN" class="">B3</td><td id="OzBI" class="">第二步达标</td><td id="KTTV" class="">派生</td><td id="ZMWK" class="">B1 有值 且 B2 有值 且 <strong>B1 晚于 B2</strong></td><td id="Gj{L" class="">—</td><td id="EfAS" class="">✅ L2</td><td id="Ug=h" class=""><code>null</code></td></tr><tr id="b52ddd74-8362-4e06-b8cf-82a6f8ea41ef" dir="ltr"><td id="oMjN" class="">C1</td><td id="OzBI" class="">MAP 低于 70（<strong>触发项</strong>）</td><td id="KTTV" class="">有创 + 无创混合</td><td id="ZMWK" class="">窗口内<strong>最低值</strong></td><td id="Gj{L" class="">&lt; 70 → 打钩</td><td id="EfAS" class="">✅ L2</td><td id="Ug=h" class=""><code>null</code></td></tr><tr id="da0796ff-280d-483e-ba8e-8c3e9c42d3a1" dir="ltr"><td id="oMjN" class="">C2</td><td id="OzBI" class="">血乳酸 ≥ 4（<strong>触发项</strong>）</td><td id="KTTV" class="">血气 <code>param_bg_Lac</code></td><td id="ZMWK" class="">窗口内<strong>最高值</strong></td><td id="Gj{L" class="">≥ 4 → 打钩并显示数值</td><td id="EfAS" class="">✅ L2</td><td id="Ug=h" class=""><code>null</code></td></tr><tr id="001b6dd0-da23-4e99-a4b5-792621806b52" dir="ltr"><td id="oMjN" class="">C3-1h</td><td id="OzBI" class="">1h 内有液体执行</td><td id="KTTV" class="">执行用药</td><td id="ZMWK" class="">开始时间在 <code>[T0, T0+1h]</code></td><td id="Gj{L" class="">有执行 → 打钩</td><td id="EfAS" class="">✅ L2</td><td id="Ug=h" class=""><code>null</code></td></tr><tr id="ae64861f-cb79-431a-b72c-2fea52e3f669" dir="ltr"><td id="oMjN" class="">C3-3h</td><td id="OzBI" class="">液体量 ≥ 1500ml</td><td id="KTTV" class="">执行用药累加</td><td id="ZMWK" class="">开始时间在 <code>[T0, T0+3h]</code></td><td id="Gj{L" class="">≥ 1500ml → 打钩</td><td id="EfAS" class="">✅ L2</td><td id="Ug=h" class=""><code>null</code></td></tr></tbody></table><aside class="block-color-yellow_background callout" data-notion-callout="" data-notion-callout-icon="⚠️" data-notion-callout-background="yellow_background" style="white-space:pre-wrap;display:flex" id="9a4b0c7c-c40a-4ff8-843e-8dade4db63d9" dir="ltr"><div style="font-size:1.5em"><span class="icon" data-emoji="⚠️"></span></div><div style="width:100%"><p id="e51ec539-5603-4063-a322-49a9c653f92b" class="" dir="auto">语义提醒：<strong>第一步 A1 打钩 = 达标；第三步 C1 / C2 打钩 = 存在异常（触发）</strong>。两者语义相反，代码禁止共用判定函数。</p></div></aside><h3 id="7195db25-cdab-4b8d-aabb-8ca454641b73" class="" dir="auto">血管活性药必须两层口径</h3><table id="95eae62f-874d-47c2-b340-74b6d9e7df86" class="simple-table" dir="ltr"><thead class="simple-table-header"><tr id="07ff02ac-65d7-41b1-8ca9-6dba02f8013c" dir="ltr"><th id="G&lt;qi" class="simple-table-header-color simple-table-header">层</th><th id="HZjd" class="simple-table-header-color simple-table-header">名称</th><th id="@H:G" class="simple-table-header-color simple-table-header">来源</th><th id="VdcR" class="simple-table-header-color simple-table-header">用途</th><th id="aR?_" class="simple-table-header-color simple-table-header">错药后果</th><th id="ej&lt;{" class="simple-table-header-color simple-table-header">人工覆盖能否救</th></tr></thead><tbody><tr id="3272d7ca-71e5-4bfd-bcf4-db199b2bba8d" dir="ltr"><td id="G&lt;qi" class="">宽</td><td id="HZjd" class=""><code>VASO_WIDE</code></td><td id="@H:G" class="">医院字典 <code>classification == &#x27;血管活性&#x27;</code></td><td id="VdcR" class="">S4 / K2 判「在不在用」</td><td id="aR?_" class="">假阳性 → 分母虚高</td><td id="ej&lt;{" class="">✅ 能，属个案</td></tr><tr id="d456c1dd-44df-4513-bee0-5156f832f94b" dir="ltr"><td id="G&lt;qi" class="">严</td><td id="HZjd" class=""><code>VASO_STRICT</code></td><td id="@H:G" class="">SOFA-2 白名单 8 种</td><td id="VdcR" class=""><strong>只有它能进 SOFA 循环分项剂量计算</strong></td><td id="aR?_" class="">假剂量 → 系统性偏差</td><td id="ej&lt;{" class="">❌ 救不了</td></tr></tbody></table><p id="3a9e59ee-672f-482c-ba50-ef8c1b6a1b65" class="" dir="auto"><code>VASO_STRICT</code> = norepinephrine / epinephrine / dopamine / dobutamine / vasopressin / phenylephrine / milrinone / isoproterenol</p><p id="6e2a6bff-a3d5-4c5b-9965-530c56730cba" class="" dir="auto">字典里那几个错药<strong>不需要提前查</strong>：代码对 <code>VASO_WIDE</code> 减 <code>VASO_STRICT</code> 求差集，报告里自动打印清单给药师。</p><h2 id="2a1faa0c-8b62-41ea-b4f3-6350663d3805" class="" dir="auto">三、Bundle 时间窗</h2><pre id="132ed80d-e5bb-449b-b18f-6a7431b2b6c2" class="code code-wrap" data-notion-code-syntax="mermaid"><code class="language-mermaid" style="white-space:pre-wrap;word-break:break-all">flowchart LR
+    T0[&quot;T0 确诊时刻&quot;] --&gt; W1[&quot;1h 窗口&quot;]
+    W1 --&gt; W3[&quot;3h 窗口&quot;]
+    W3 --&gt; W6[&quot;6h 窗口&quot;]
+    W1 --&gt; R1[&quot;A1 乳酸 / B1 抗生素 / B2 血培养&lt;br/&gt;C1 MAP / C2 乳酸4 / C3 有液体执行&quot;]
+    W3 --&gt; R3[&quot;同上，C3 改为 液体量大于等于1500ml&quot;]
+    W6 --&gt; R6[&quot;复苏目标评估&lt;br/&gt;沿用最初版规则，本次不改造&quot;]</code></pre><h2 id="791c663c-e26c-4ba3-8fd0-1a68eca658c6" class="" dir="auto">四、完成判定决策树</h2><pre id="600981f7-972c-47d7-9142-3bc675704881" class="code code-wrap" data-notion-code-syntax="mermaid"><code class="language-mermaid" style="white-space:pre-wrap;word-break:break-all">flowchart TD
+    A[&quot;第一步 A1&quot;] --&gt; B[&quot;第二步 B3&quot;]
+    B --&gt; T{&quot;第三步是否触发&lt;br/&gt;C1 或 C2&quot;}
+    T -- 未触发 --&gt; N[&quot;第三步视为达标&lt;br/&gt;finish_path = not_triggered&quot;]
+    T -- 已触发 --&gt; C3{&quot;C3 液体是否达标&quot;}
+    C3 -- 是 --&gt; Y[&quot;第三步达标&lt;br/&gt;finish_path = triggered&quot;]
+    C3 -- 否 --&gt; F[&quot;第三步不达标&quot;]
+    N --&gt; FIN{&quot;三步是否全达标&quot;}
+    Y --&gt; FIN
+    F --&gt; FIN
+    FIN -- 是 --&gt; OK[&quot;finish = true&quot;]
+    FIN -- 否 --&gt; NG[&quot;finish = false&lt;br/&gt;输出原因码清单&quot;]</code></pre><p id="fd175b72-8c06-4d37-97e5-8a5d57714b65" class="" dir="auto">规则式写法：</p><script src="https://cdnjs.cloudflare.com/ajax/libs/prism/1.29.0/components/prism-jsx.min.js" integrity="sha512-m3JYEI6gx5fh9jF10FjGoMzVKcV2N6nchcDcqPCdI1L3R2WQV7br2XVNR8iTLb2daOMRl3zldbcfT40xU2ntVw==" crossorigin="anonymous" referrerPolicy="no-referrer"></script><pre id="8ae29c59-0233-4a9f-a50a-4e9cd8cb95e7" class="code code-wrap" data-notion-code-syntax="jsx"><code class="language-jsx" style="white-space:pre-wrap;word-break:break-all">第一步达标 = A1
+第二步达标 = B3
+第三步达标 = (C1 或 C2) ? C3 : 视为达标
+finish     = 第一步达标 且 第二步达标 且 第三步达标</code></pre><h2 id="fe74fafc-5950-44eb-afac-aba485981a9d" class="" dir="auto">五、感染部位人工确认与入库（新增）</h2><p id="6a85fce2-d00e-44a8-8630-a8913213f705" class="" dir="auto">库中<strong>完全没有</strong>感染部位记录，必须新建人工字段并持久化。</p><h3 id="836575ab-bca5-425e-85a1-1d60e582ef4b" class="" dir="auto">5.1 十一个部位选项</h3><table id="41fca7ac-b2fc-47b8-a223-507e14a9b05f" class="simple-table" dir="ltr"><thead class="simple-table-header"><tr id="9af746b9-1ef9-4e0d-94d7-6843528a3622" dir="ltr"><th id="jahy" class="simple-table-header-color simple-table-header">值</th><th id="CU\&lt;" class="simple-table-header-color simple-table-header">显示</th><th id="gn{A" class="simple-table-header-color simple-table-header">值</th><th id="Oso?" class="simple-table-header-color simple-table-header">显示</th></tr></thead><tbody><tr id="c341fe35-dcae-4e5b-b71a-ca4de6ca5f20" dir="ltr"><td id="jahy" class=""><code>lung</code></td><td id="CU\&lt;" class="">肺部</td><td id="gn{A" class=""><code>cns</code></td><td id="Oso?" class="">中枢神经</td></tr><tr id="0c7819d0-5c2f-427d-8f62-889676565e88" dir="ltr"><td id="jahy" class=""><code>abdomen</code></td><td id="CU\&lt;" class="">腹腔</td><td id="gn{A" class=""><code>bone_joint</code></td><td id="Oso?" class="">骨与关节</td></tr><tr id="fcc250ae-f83c-47eb-9109-6a26b76f8965" dir="ltr"><td id="jahy" class=""><code>urinary</code></td><td id="CU\&lt;" class="">泌尿道</td><td id="gn{A" class=""><code>surgical_site</code></td><td id="Oso?" class="">手术切口</td></tr><tr id="579cc608-8529-4992-9b62-1f1d6165cb4c" dir="ltr"><td id="jahy" class=""><code>bloodstream_catheter</code></td><td id="CU\&lt;" class="">血流（导管相关）</td><td id="gn{A" class=""><code>other</code></td><td id="Oso?" class="">其他</td></tr><tr id="f21ac34f-830f-4e8a-8469-0ee54fbf064d" dir="ltr"><td id="jahy" class=""><code>bloodstream_non_catheter</code></td><td id="CU\&lt;" class="">血流（非导管）</td><td id="gn{A" class=""><code>unknown</code></td><td id="Oso?" class="">不明确</td></tr><tr id="6ddb08c4-0fee-48aa-ab23-6ec8c167c56f" dir="ltr"><td id="jahy" class=""><code>skin_soft_tissue</code></td><td id="CU\&lt;" class="">皮肤软组织</td><td id="gn{A" class=""></td><td id="Oso?" class=""></td></tr></tbody></table><h3 id="f1f3326d-0fe9-4aa3-b49b-f7d14c42e8a2" class="" dir="auto">5.2 集合 <code>icu_infection_site</code></h3><table id="8b2c7cc7-77e5-484d-9fe3-c0ddfeaa6d90" class="simple-table" dir="ltr"><thead class="simple-table-header"><tr id="0eb82133-bc3f-452b-9c0e-ff08dd0990f2" dir="ltr"><th id="N]?L" class="simple-table-header-color simple-table-header">字段</th><th id="GI&gt;A" class="simple-table-header-color simple-table-header">类型</th><th id="\JVj" class="simple-table-header-color simple-table-header">说明</th></tr></thead><tbody><tr id="e8d2727a-f278-40d8-a23b-f74ee117153a" dir="ltr"><td id="N]?L" class=""><code>_id</code></td><td id="GI&gt;A" class="">ObjectId</td><td id="\JVj" class=""></td></tr><tr id="fb8e5315-6d8b-4746-bae6-4af626cf6b86" dir="ltr"><td id="N]?L" class=""><code>indicator_code</code></td><td id="GI&gt;A" class="">string</td><td id="\JVj" class="">固定 <code>ICU-05</code></td></tr><tr id="bd5ca3c4-7383-413e-8dad-4cff7b41b856" dir="ltr"><td id="N]?L" class=""><code>exclusion_key</code></td><td id="GI&gt;A" class="">string</td><td id="\JVj" class="">复用 <code>build_exclusion_key(pid, event_time)</code>，<strong>入参签名禁改</strong></td></tr><tr id="9da54473-a603-4721-a743-2afcd8d5a24e" dir="ltr"><td id="N]?L" class=""><code>pid</code></td><td id="GI&gt;A" class="">string</td><td id="\JVj" class="">SmartCare patient <code>_id</code></td></tr><tr id="64a18cc8-a9c1-4e44-8a97-2c3653c07ea0" dir="ltr"><td id="N]?L" class=""><code>disease_id</code></td><td id="GI&gt;A" class="">string</td><td id="\JVj" class="">脓毒性休克诊断记录 id</td></tr><tr id="95de128f-b92b-4a4d-85aa-22ad888d6958" dir="ltr"><td id="N]?L" class=""><code>period</code></td><td id="GI&gt;A" class="">string</td><td id="\JVj" class=""><code>YYYY-MM</code></td></tr><tr id="09f2090f-3d56-49e0-8298-108397cd4525" dir="ltr"><td id="N]?L" class=""><code>dept_code</code></td><td id="GI&gt;A" class="">string</td><td id="\JVj" class=""></td></tr><tr id="d4f5e8be-6aee-478f-9dca-b89ed86d724a" dir="ltr"><td id="N]?L" class=""><code>patient_name</code></td><td id="GI&gt;A" class="">string</td><td id="\JVj" class="">冗余存，便于列表展示</td></tr><tr id="7675c349-01dc-42d7-9d2e-e10c22947e8a" dir="ltr"><td id="N]?L" class=""><code>primary_site</code></td><td id="GI&gt;A" class="">string</td><td id="\JVj" class="">11 选项之一，必填</td></tr><tr id="f1ac4824-4b26-409b-9000-55eb90892991" dir="ltr"><td id="N]?L" class=""><code>secondary_sites</code></td><td id="GI&gt;A" class="">array</td><td id="\JVj" class="">0 至多个，可空</td></tr><tr id="077c4476-2484-4277-a515-7f0a9689760d" dir="ltr"><td id="N]?L" class=""><code>evidence_type</code></td><td id="GI&gt;A" class="">string</td><td id="\JVj" class=""><code>diagnosis</code> / <code>imaging</code> / <code>microbiology</code> / <code>clinical</code></td></tr><tr id="c1da7da4-a371-4638-a70f-48e96b2477c0" dir="ltr"><td id="N]?L" class=""><code>evidence_text</code></td><td id="GI&gt;A" class="">string</td><td id="\JVj" class="">自由文本备注</td></tr><tr id="f4c88834-ecb5-4406-bf84-f22ec81965b2" dir="ltr"><td id="N]?L" class=""><code>confirmed_by</code></td><td id="GI&gt;A" class="">string</td><td id="\JVj" class="">操作人</td></tr><tr id="d7e69081-6ee0-4820-91b2-986b9677ec1f" dir="ltr"><td id="N]?L" class=""><code>confirmed_at</code></td><td id="GI&gt;A" class="">datetime</td><td id="\JVj" class=""></td></tr><tr id="d4ac96fe-1aab-4ac6-bf7c-767c1eb642f4" dir="ltr"><td id="N]?L" class=""><code>revoked_at</code></td><td id="GI&gt;A" class="">datetime | null</td><td id="\JVj" class="">默认 <code>null</code>，撤销只置此字段</td></tr><tr id="162eed64-04e1-4f22-9d5d-095fb210ae45" dir="ltr"><td id="N]?L" class=""><code>revoked_by</code></td><td id="GI&gt;A" class="">string | null</td><td id="\JVj" class=""></td></tr><tr id="849948c1-9c04-4a69-98c3-43ff6612d9fd" dir="ltr"><td id="N]?L" class=""><code>source</code></td><td id="GI&gt;A" class="">string</td><td id="\JVj" class=""><code>manual</code> / <code>auto_suggest</code></td></tr></tbody></table><p id="efb4376c-c9f9-49cc-8876-5e3de333277f" class="" dir="auto">索引（全部 <code>background=True</code>）：</p><table id="3b118cc1-a3f6-4687-b0e0-4d502559a840" class="simple-table" dir="ltr"><thead class="simple-table-header"><tr id="d7ec1f97-ae36-46d7-9c62-5c6c5089f5f1" dir="ltr"><th id="BaKc" class="simple-table-header-color simple-table-header">索引</th><th id="fP?;" class="simple-table-header-color simple-table-header">唯一</th></tr></thead><tbody><tr id="ebebfda7-03e0-41c2-a3d9-295de52354b6" dir="ltr"><td id="BaKc" class=""><code>(indicator_code, exclusion_key, revoked_at)</code></td><td id="fP?;" class="">✅ 唯一</td></tr><tr id="7cff336f-35d8-42cc-854c-4d412077677c" dir="ltr"><td id="BaKc" class=""><code>(period, dept_code)</code></td><td id="fP?;" class="">非唯一</td></tr><tr id="42fb20fb-f6d6-45dc-807d-f023d0b2c56d" dir="ltr"><td id="BaKc" class=""><code>(pid)</code></td><td id="fP?;" class="">非唯一</td></tr></tbody></table><h3 id="32ed6be2-addd-42e6-ac7d-84beaa164e50" class="" dir="auto">5.3 录入流程</h3><pre id="13be885b-3e5c-404f-8fd9-b55051f4e51b" class="code code-wrap" data-notion-code-syntax="mermaid"><code class="language-mermaid" style="white-space:pre-wrap;word-break:break-all">flowchart LR
+    A[&quot;详情页 Bundle 卡片顶部&quot;] --&gt; B[&quot;主部位下拉 11 选项&quot;]
+    B --&gt; C[&quot;副部位多选 可空&quot;]
+    C --&gt; D[&quot;证据类型 四选一&quot;]
+    D --&gt; E[&quot;备注自由文本&quot;]
+    E --&gt; F[&quot;POST /api/infection_site&quot;]
+    F --&gt; G[&quot;写入 icu_infection_site&lt;br/&gt;唯一索引防重复提交&quot;]
+    G --&gt; H[&quot;黄条消失&lt;br/&gt;移除 SITE_UNCONFIRMED 原因码&quot;]</code></pre><h3 id="9d79c724-d31d-449d-a98e-c6daf72fb041" class="" dir="auto">5.4 接口</h3><table id="7612621d-ceba-40b0-a93f-0edd97804eea" class="simple-table" dir="ltr"><thead class="simple-table-header"><tr id="8815cd25-c6e6-4805-83c2-444e0e8cea92" dir="ltr"><th id="\?&lt;:" class="simple-table-header-color simple-table-header">方法</th><th id="g_wq" class="simple-table-header-color simple-table-header">路径</th><th id="SyP^" class="simple-table-header-color simple-table-header">说明</th></tr></thead><tbody><tr id="6091a415-028e-4932-ae3c-fea9546bf781" dir="ltr"><td id="\?&lt;:" class="">GET</td><td id="g_wq" class=""><code>/api/infection_site</code></td><td id="SyP^" class="">参数 <code>period</code>、<code>icu_unit</code>、可选 <code>exclusion_key</code>；返回未撤销记录</td></tr><tr id="dc4969c0-ced3-4523-b2cd-eac7535f40b5" dir="ltr"><td id="\?&lt;:" class="">POST</td><td id="g_wq" class=""><code>/api/infection_site</code></td><td id="SyP^" class="">body 含 <code>exclusion_key</code>、<code>pid</code>、<code>primary_site</code>、<code>secondary_sites</code>、<code>evidence_type</code>、<code>evidence_text</code>、<code>operator</code></td></tr><tr id="fa8bb782-4bd7-4bcc-8eb3-fde2401caa17" dir="ltr"><td id="\?&lt;:" class="">DELETE</td><td id="g_wq" class=""><code>/api/infection_site/{id}</code></td><td id="SyP^" class="">撤销，只置 <code>revoked_at</code> / <code>revoked_by</code>，<strong>不删记录</strong></td></tr></tbody></table><aside class="block-color-teal_background callout" data-notion-callout="" data-notion-callout-icon="🔑" data-notion-callout-background="teal_background" style="white-space:pre-wrap;display:flex" id="27c42071-8c5f-495d-bb8b-37ee305e976c" dir="ltr"><div style="font-size:1.5em"><span class="icon" data-emoji="🔑"></span></div><div style="width:100%"><p id="c6431150-978f-4972-af0e-afa293eb865a" class="" dir="auto"><code><strong>SITE_REQUIRED</strong></code><strong> 默认改为 </strong><code><strong>False</strong></code> —— 感染部位不阻塞分母，未确认只标黄 + 出 <code>SITE_UNCONFIRMED</code> 原因码，并单独统计「部位未确认率」。若设为 <code>True</code>，没人录入时分母会直接空掉，指标不可用。</p></div></aside><h2 id="fe8dca0c-bd59-4c0c-a31a-cc03fb391dc4" class="" dir="auto">六、三层人工覆盖</h2><h3 id="dae99281-852c-4fca-88b4-de874c253eb9" class="" dir="auto">6.1 三层定义</h3><table id="8f9a5ed5-2abe-46dd-b8ad-d8d94e78a1cc" class="simple-table" dir="ltr"><thead class="simple-table-header"><tr id="e5f01bd4-9829-4493-badb-4877a4306132" dir="ltr"><th id="csJC" class="simple-table-header-color simple-table-header">层</th><th id="zQ&lt;&lt;" class="simple-table-header-color simple-table-header"><code>scope</code></th><th id="xSSh" class="simple-table-header-color simple-table-header">覆盖对象</th><th id="`pZH" class="simple-table-header-color simple-table-header"><code>target_id</code> 取值</th></tr></thead><tbody><tr id="3c5df04c-751d-4736-bba1-e6b9af1dfe04" dir="ltr"><td id="csJC" class="">L1</td><td id="zQ&lt;&lt;" class=""><code>case</code></td><td id="xSSh" class="">整例进 / 出分母</td><td id="`pZH" class="">留空</td></tr><tr id="3f3665f4-4d79-467a-8a10-71b68ffbf176" dir="ltr"><td id="csJC" class="">L2</td><td id="zQ&lt;&lt;" class=""><code>judgement</code></td><td id="xSSh" class="">单个判定项布尔值</td><td id="`pZH" class=""><code>S1 S2 S3 S4 I1 I2 I3 K1 K2 A1 B1 B2 B3 C1 C2 C3</code></td></tr><tr id="68d8f436-5b43-4e98-bae6-dee617bf9c70" dir="ltr"><td id="csJC" class="">L3</td><td id="zQ&lt;&lt;" class=""><code>sofa_component</code></td><td id="xSSh" class="">单个器官分数</td><td id="`pZH" class=""><code>respiratory brain hemostasis liver kidney cardiovascular</code></td></tr></tbody></table><h3 id="d5b9185e-140a-42c3-92bf-f3e921df23b1" class="" dir="auto">6.2 应用时机（必须分开，不可合并）</h3><pre id="8d2ef63f-7064-4f68-a33e-b4d9360ad5df" class="code code-wrap" data-notion-code-syntax="mermaid"><code class="language-mermaid" style="white-space:pre-wrap;word-break:break-all">flowchart TD
+    A[&quot;自动计算全部判定项&quot;] --&gt; B[&quot;L2 覆盖单项布尔值&quot;]
+    B --&gt; C[&quot;重走完成判定链&quot;]
+    C --&gt; D[&quot;SOFA 各分项算分&quot;]
+    D --&gt; E[&quot;L3 覆盖单器官分&quot;]
+    E --&gt; F[&quot;重新求 SOFA 总分&quot;]
+    F --&gt; G[&quot;分母集合构建完成&quot;]
+    G --&gt; H[&quot;L1 过滤整例并从分子移除&quot;]
+    H --&gt; I[&quot;写入 summary&quot;]</code></pre><h3 id="3cb92d15-dab6-4854-85bc-f1bb48acc1de" class="" dir="auto">6.3 集合 <code>icu_manual_override</code></h3><p id="c7ae152f-9bd9-475e-8b67-578b6c2c8dfa" class="" dir="auto">字段：<code>_id</code> <code>scope</code> <code>indicator_code</code> <code>exclusion_key</code> <code>period</code> <code>dept_code</code> <code>patient_id</code> <code>patient_name</code> <code>target_id</code> <code>auto_value</code> <code>manual_value</code> <code>reason_code</code> <code>reason_text</code> <code>operator</code> <code>created_at</code> <code>revoked_at</code> <code>revoked_by</code></p><p id="df643fad-2187-461b-b8d1-75e9951acaff" class="" dir="auto">索引：<code>(indicator_code, period, dept_code)</code> / <code>(exclusion_key)</code> / <code>(scope, target_id)</code> 均非唯一；<code>(indicator_code, exclusion_key, scope, target_id, revoked_at)</code> <strong>唯一</strong></p><h3 id="050e9cf9-1ca5-4220-bfc9-49e56e4f0b87" class="" dir="auto">6.4 原因码分组</h3><table id="d073a6ac-258d-4e8b-9cd5-7f83281f0f1f" class="simple-table" dir="ltr"><thead class="simple-table-header"><tr id="22890ea7-7101-4be7-96ec-05c953b123e8" dir="ltr"><th id="`eSy" class="simple-table-header-color simple-table-header">指标</th><th id="A_\n" class="simple-table-header-color simple-table-header">原因码</th></tr></thead><tbody><tr id="8a281307-16bd-4301-b7dd-59fc52178d1a" dir="ltr"><td id="`eSy" class="">ICU-05-*</td><td id="A_\n" class=""><code>not_septic_shock</code> 非脓毒性休克 / <code>outside_treated</code> 外院已治疗 / <code>dnr</code> 放弃积极治疗 / <code>t0_wrong</code> T0 锚点错误 / <code>data_error</code> 数据错误 / <code>other</code></td></tr><tr id="6c47329c-4919-426a-b305-8e2a56e7d7b3" dir="ltr"><td id="`eSy" class="">ICU-08</td><td id="A_\n" class=""><code>non_ards</code> / <code>unstable_gas</code> / <code>contraindic</code> / <code>terminal</code> / <code>data_error</code> / <code>other</code></td></tr><tr id="eb3ea0a6-cad9-42b1-850e-b066e08115c7" dir="ltr"><td id="`eSy" class="">ICU-09 / 10</td><td id="A_\n" class=""><code>short_stay</code> / <code>death_or_withdraw</code> / <code>data_error</code> / <code>other</code></td></tr><tr id="b1107c44-a7fc-45d7-9a9d-2ff3100f3d41" dir="ltr"><td id="`eSy" class="">SOFA</td><td id="A_\n" class=""><code>chronic_baseline</code> / <code>clinical_mismatch</code> / <code>data_error</code> / <code>ceiling</code> / <code>other</code></td></tr></tbody></table><aside class="block-color-red_background callout" data-notion-callout="" data-notion-callout-icon="🛡️" data-notion-callout-background="red_background" style="white-space:pre-wrap;display:flex" id="63312ebe-0d6e-4823-a36c-a1f023f6739c" dir="ltr"><div style="font-size:1.5em"><span class="icon" data-emoji="🛡️"></span></div><div style="width:100%"><p id="99f4c302-467e-4399-baa3-07218134fa10" class="" dir="auto">铁律</p><ul id="09cb2dc9-fd40-485b-a689-1678d75c181b" class="bulleted-list" dir="auto"><li style="list-style-type:disc">永不修改或删除自动值，覆盖值另存</li></ul><ul id="78363bc4-49cc-4bbb-a50c-756eeb32da25" class="bulleted-list" dir="auto"><li style="list-style-type:disc">撤销只置 <code>revoked_at</code>，不删记录</li></ul><ul id="429a930f-c191-47be-b8f8-aeb39573db5e" class="bulleted-list" dir="auto"><li style="list-style-type:disc"><code>getExclReasons</code> 找不到分组时返回通用四项，<strong>不抛异常</strong></li></ul><ul id="10217987-0224-4361-8db5-8e4dc89900cd" class="bulleted-list" dir="auto"><li style="list-style-type:disc">前端删除 <code>EXCLUSION_SUPPORTED_CODES</code> 白名单（原来只允许 ICU-08）</li></ul><ul id="e21a9602-e52d-4176-b332-d3d70864583f" class="bulleted-list" dir="auto"><li style="list-style-type:disc"><code>summary.py::_compute_one</code> 必须把 <code>excluded_num</code> / <code>excluded_den</code> / <code>override_count</code> <strong>显式写进 upsert doc</strong>，否则被 pop 静默丢失</li></ul><ul id="918cfef1-d31d-4d26-bbdf-7950c387a7f1" class="bulleted-list" dir="auto"><li style="list-style-type:disc"><code>_read_detail_cache</code> / <code>_write_detail_cache</code> 的 <code>CACHE_VERSION</code> 前缀 +1</li></ul></div></aside><p id="77678ac8-d3af-48ce-9354-ba31e33bbad4" class="" dir="auto"><strong>人工覆盖率 = 最强的算法质量指标。</strong> 上线后按 <code>scope</code> / <code>target_id</code> 统计，某项超 20% 标红，即下一个修复优先级。新增 <code>GET /api/override_stats</code>。</p><h2 id="ed68f325-a0ac-414a-8260-abb759bd80c8" class="" dir="auto">七、SOFA 自动评分</h2><h3 id="aea334d6-692c-4b29-988c-3b266f230c3a" class="" dir="auto">7.1 呼吸支持三列映射（HFNC 是唯一分歧点）</h3><table id="fdc48364-5717-4f46-8770-5ef00b7ced28" class="simple-table" dir="ltr"><thead class="simple-table-header"><tr id="4fda5eed-6633-4653-b2d2-bb5c7a0743cc" dir="ltr"><th id="q?aP" class="simple-table-header-color simple-table-header">原始值</th><th id="\V=a" class="simple-table-header-color simple-table-header">条数</th><th id="[bIc" class="simple-table-header-color simple-table-header"><code>classic_advanced</code></th><th id="bCt{" class="simple-table-header-color simple-table-header"><code>sofa2_advanced</code></th><th id="?Rcg" class="simple-table-header-color simple-table-header"><code>icu08_arm</code></th></tr></thead><tbody><tr id="842ad1b5-6904-49d5-844d-886204be1e71" dir="ltr"><td id="q?aP" class="">管辅 / 切辅 / 有创</td><td id="\V=a" class="">56,712 / 24,946 / 3,074</td><td id="[bIc" class="">✅</td><td id="bCt{" class="">✅</td><td id="?Rcg" class="">invasive</td></tr><tr id="159ae478-bc29-4012-9ca5-14320e66351b" dir="ltr"><td id="q?aP" class="">无创 / 无创呼吸机</td><td id="\V=a" class="">3,358 / 2,222</td><td id="[bIc" class="">✅</td><td id="bCt{" class="">✅</td><td id="?Rcg" class="">noninvasive</td></tr><tr id="575df03f-b537-4904-9543-9fdf0739671d" dir="ltr"><td id="q?aP" class=""><strong>高流量 / 管高 / 切高</strong></td><td id="\V=a" class="">6,830 / 9,559 / 8,809</td><td id="[bIc" class=""><strong>❌</strong></td><td id="bCt{" class=""><strong>✅</strong></td><td id="?Rcg" class="">hfnc</td></tr><tr id="c5820d99-9a8f-422f-84e4-4652603d2812" dir="ltr"><td id="q?aP" class="">管氧 / 切氧 / 管文 / 切文 / T管 / 带管自主</td><td id="\V=a" class="">72,489 / 33,471 / 14,590 / 25,074 / 4,297 / 680</td><td id="[bIc" class="">❌</td><td id="bCt{" class="">❌</td><td id="?Rcg" class="">invasive</td></tr><tr id="cf707170-ac08-4996-b938-8a2b4a95d2db" dir="ltr"><td id="q?aP" class="">无 / 自主呼吸</td><td id="\V=a" class="">1,686,026 / 505,918</td><td id="[bIc" class="">❌</td><td id="bCt{" class="">❌</td><td id="?Rcg" class="">none</td></tr><tr id="0af06249-f67d-424e-b8cd-dd937d935c70" dir="ltr"><td id="q?aP" class="">鼻导管 / 鼻塞 / 面罩 / 鼻罩 / 箱氧</td><td id="\V=a" class="">31,946 / 20,584 / 12,663 / 792 / 1,646</td><td id="[bIc" class="">❌</td><td id="bCt{" class="">❌</td><td id="?Rcg" class="">none</td></tr><tr id="b14cedd8-2f29-44e6-b113-1c9b4d0f5801" dir="ltr"><td id="q?aP" class="">ECMO（<code>tubeExe</code>）</td><td id="\V=a" class="">100+</td><td id="[bIc" class="">✅</td><td id="bCt{" class="">✅ 呼吸与循环双 4 分</td><td id="?Rcg" class="">—</td></tr><tr id="5d76128e-f478-4bba-9c3e-4b28f709d75a" dir="ltr"><td id="q?aP" class="">51 种组合值</td><td id="\V=a" class="">各 ≤ 850</td><td id="[bIc" class="">取组合内最高级别</td><td id="bCt{" class="">同</td><td id="?Rcg" class="">同</td></tr></tbody></table><p id="4da959ce-7da1-4c09-b858-c3b7bd1fddde" class="" dir="auto">组合优先级 <code>ECMO &gt; IMV &gt; NIV/CPAP/BiPAP &gt; HFNC &gt; NONE</code>。<strong>未在表中的取值不许兜底成 NONE，必须返回 </strong><code><strong>unknown</strong></code><strong> 并记 </strong><code><strong>data_quality_flags</strong></code><strong>。</strong></p><p id="48930b95-307a-4228-99e9-0bded9f8979c" class="" dir="auto">三列<strong>禁止共用函数</strong>：<code>classic_advanced</code> 只喂经典 SOFA 门控，<code>sofa2_advanced</code> 只喂 SOFA-2，<code>icu08_arm</code> 只做 ARDS 俯卧位分臂。</p><h3 id="4274fe24-45cd-46fb-8bd2-2fadd7a9d895" class="" dir="auto">7.2 两版本单位基准不同</h3><table id="007de564-ae34-4ee4-865a-ef508a19a67a" class="simple-table" dir="ltr"><thead class="simple-table-header"><tr id="fa4a5703-0988-45a0-ac47-7d785a9aebc1" dir="ltr"><th id="wD?a" class="simple-table-header-color simple-table-header">项</th><th id="|Q\}" class="simple-table-header-color simple-table-header">经典 SOFA 1996</th><th id="B}mX" class="simple-table-header-color simple-table-header">SOFA-2 2025</th></tr></thead><tbody><tr id="d71961d2-baf1-49d5-9663-fc0dfc640fc3" dir="ltr"><td id="wD?a" class="">胆红素</td><td id="|Q\}" class=""><strong>μmol/L</strong>（&lt;20 / &lt;33 / &lt;102 / &lt;204）</td><td id="B}mX" class=""><strong>mg/dL</strong>（≤1.20 / ≤3.0 / ≤6.0 / ≤12.0）</td></tr><tr id="92afe0cf-051a-45d1-a477-5b2ca47342f0" dir="ltr"><td id="wD?a" class="">肌酐</td><td id="|Q\}" class=""><strong>μmol/L</strong>（&lt;110 / &lt;170 / &lt;300 / &lt;440）</td><td id="B}mX" class=""><strong>mg/dL</strong>（≤1.20 / ≤2.0 / ≤3.50）</td></tr><tr id="b93cb1a3-8573-44e4-977b-3d7f656f5e03" dir="ltr"><td id="wD?a" class="">尿量</td><td id="|Q\}" class=""><strong>mL/24h</strong></td><td id="B}mX" class=""><strong>mL/kg/h</strong></td></tr></tbody></table><p id="370d386d-c60f-4972-860d-6b3bd2785800" class="" dir="auto">单位转换必须按 variant 分别进行，共用一个函数会静默错 17 倍 / 88 倍。</p><h3 id="beced98b-3713-4c51-800f-72e8b1cb536b" class="" dir="auto">7.3 移植必修 13 条</h3><table id="6f7476d1-c8d7-4ec5-8a99-9fb6d35029c7" class="simple-table" dir="ltr"><thead class="simple-table-header"><tr id="4ed5c860-ae49-47f0-9f38-6e4561b542e3" dir="ltr"><th id="chjh" class="simple-table-header-color simple-table-header">#</th><th id="Gr\B" class="simple-table-header-color simple-table-header">问题</th><th id="VxST" class="simple-table-header-color simple-table-header">修正</th><th id="[SR`" class="simple-table-header-color simple-table-header">严重度</th><th id="`{Mo" class="simple-table-header-color simple-table-header">偏差方向</th></tr></thead><tbody><tr id="11cc03aa-5c3a-457d-b942-a69859cd4ca6" dir="ltr"><td id="chjh" class="">1</td><td id="Gr\B" class="">经典 SOFA 循环分项用通用剂量梯度，丢了 MAP&lt;70→1 与多巴胺分档</td><td id="VxST" class="">按 Vincent 1996 原文重写</td><td id="[SR`" class="">🔴</td><td id="`{Mo" class="">双向</td></tr><tr id="8f1c8d25-b093-4d4e-9cf6-6e5fc0fcc5b6" dir="ltr"><td id="chjh" class="">2</td><td id="Gr\B" class="">单位兜底 <code>or &quot;mg/dL&quot;</code>，且 <code>&quot;micromol&quot;</code> 不含子串 <code>&quot;umol&quot;</code></td><td id="VxST" class="">白名单 + 拒绝，不兜底</td><td id="[SR`" class="">🔴</td><td id="`{Mo" class="">低估 17 倍</td></tr><tr id="fd6ec8bb-22bb-4bb2-a63c-e371cc43a936" dir="ltr"><td id="chjh" class="">3</td><td id="Gr\B" class="">呼吸分项 PaO2 与 FiO2 各自独立取最差值，无配对约束</td><td id="VxST" class="">优先 <code>param_bg_P/Fratio</code>，回退时强制 30 分钟配对</td><td id="[SR`" class="">🔴</td><td id="`{Mo" class="">高估</td></tr><tr id="5bd6b459-b022-44ed-826e-56519eefd5a5" dir="ltr"><td id="chjh" class="">4</td><td id="Gr\B" class="">阈值表用整数闭区间，浮点值落空档（199.5、299.5）</td><td id="VxST" class="">统一改半开区间</td><td id="[SR`" class="">⚠️</td><td id="`{Mo" class="">不出分</td></tr><tr id="bfbdb87a-6b66-4b3d-9d5d-3f006193d223" dir="ltr"><td id="chjh" class="">5</td><td id="Gr\B" class=""><code>sofa.py</code> 取不到值时兜底塞 <code>value_number=0</code> 假 Observation</td><td id="VxST" class="">改 <code>make_missing_component</code></td><td id="[SR`" class="">🔴</td><td id="`{Mo" class="">低估</td></tr><tr id="7f03280d-e550-4f29-9225-a6e6eec01a41" dir="ltr"><td id="chjh" class="">6</td><td id="Gr\B" class="">SOFA-2 尿量第 1 分档是死代码（<code>hours</code> 恒 24）</td><td id="VxST" class="">标 <code>coarse_24h</code>，只能出 0/2/3</td><td id="[SR`" class="">⚠️</td><td id="`{Mo" class="">低估</td></tr><tr id="700c490b-307f-40dd-b371-14329f8ab998" dir="ltr"><td id="chjh" class="">7</td><td id="Gr\B" class="">RRT 准入漏一半（<code>cr_or_uo_met</code> 只赋肌酐，尿量条件没接）</td><td id="VxST" class="">补「或 尿量&lt;0.3 持续&gt;6h」</td><td id="[SR`" class="">🔴</td><td id="`{Mo" class="">低估</td></tr><tr id="7dc4ebe4-bd13-4799-985a-065894376c80" dir="ltr"><td id="chjh" class="">8</td><td id="Gr\B" class="">GCS 是编码字符串 <code>E1VTM1</code>，不是数字总分</td><td id="VxST" class="">解析 E/V/M，<code>V=T</code> 走 motor fallback</td><td id="[SR`" class="">🔴</td><td id="`{Mo" class="">报错或静默</td></tr><tr id="c28e9432-9cdb-466f-95a6-7f544c69788d" dir="ltr"><td id="chjh" class="">9</td><td id="Gr\B" class=""><strong>在用升压药但剂量算不出 → 循环分项得 0 分</strong></td><td id="VxST" class="">显式新增保底分支 <code>pts = max(pts, 2)</code></td><td id="[SR`" class="">🔴🔴🔴</td><td id="`{Mo" class=""><strong>低估最多 4 档</strong></td></tr><tr id="c8ddb123-f4b6-4811-9ab9-f535ceed2382" dir="ltr"><td id="chjh" class="">10</td><td id="Gr\B" class=""><code>salt_form</code> 传大写字符串匹配不上小写枚举，且 <code>.get(..., 1.0)</code> 静默兜底</td><td id="VxST" class="">传枚举成员 + 去掉默认值让它 <code>KeyError</code></td><td id="[SR`" class="">🔴🔴</td><td id="`{Mo" class="">静默 2 倍</td></tr><tr id="7355745a-d407-4ae1-885b-5353f7ebff25" dir="ltr"><td id="chjh" class="">11</td><td id="Gr\B" class=""><code>__post_init__</code> 在 pydantic <code>BaseModel</code> 上不执行，断言是死代码</td><td id="VxST" class="">改 <code>@field_validator</code> / <code>@model_validator</code></td><td id="[SR`" class="">🔴🔴</td><td id="`{Mo" class="">保护失效</td></tr><tr id="974fcf93-e1d7-44a1-b3ee-a064a410ca7d" dir="ltr"><td id="chjh" class="">12</td><td id="Gr\B" class=""><strong>经典 SOFA 呼吸分项完全不看呼吸支持</strong>，约 218,000 条常规氧疗记录会虚高</td><td id="VxST" class=""><code>_pao2_fio2_score</code> 增 <code>has_advanced_support</code> 入参，3/4 分门控</td><td id="[SR`" class="">🔴🔴</td><td id="`{Mo" class=""><strong>高估最多 2 档</strong></td></tr><tr id="32cf9971-39bd-460d-be24-5a9c2c931275" dir="ltr"><td id="chjh" class="">13</td><td id="Gr\B" class="">两版本 canonical_units 不同，白名单共用</td><td id="VxST" class="">按 variant 分别转换</td><td id="[SR`" class="">🔴🔴</td><td id="`{Mo" class="">低估 17/88 倍</td></tr></tbody></table><aside class="block-color-red_background callout" data-notion-callout="" data-notion-callout-icon="🔴" data-notion-callout-background="red_background" style="white-space:pre-wrap;display:flex" id="3e608525-23d1-4462-b182-fab755b13fd3" dir="ltr"><div style="font-size:1.5em"><span class="icon" data-emoji="🔴"></span></div><div style="width:100%"><p id="7234afa5-d225-40c4-a001-d274e86f75ae" class="" dir="auto">第 9 条与第 12 条<strong>方向相反</strong>（一个低估、一个高估），在总分里会互相抵消一部分。<strong>必须分项核对，不能只看总分对不对。</strong></p></div></aside><p id="109fec33-3f0c-4e56-bb7b-db8a9349cca5" class="" dir="auto">第 9 条补丁必须插在 <code>else: pts = 0</code> 之前：</p><pre id="bd681979-aa66-43d5-a4dd-3d74b0b51d1e" class="code code-wrap" data-notion-code-syntax="jsx"><code class="language-jsx" style="white-space:pre-wrap;word-break:break-all">if has_active_pressor and ne_epi_sum == 0 and not dose_known:
+    pts = max(pts, 2)
+    dq.append(&quot;vasopressor active but dose unresolved: &quot; + dose_unknown_reason)</code></pre><p id="20604ad6-7671-46ec-a903-333412622ac4" class="" dir="auto">第 12 条修法：</p><pre id="b939a65b-b7a1-402b-ac2a-297c3b77b7ac" class="code code-wrap" data-notion-code-syntax="jsx"><code class="language-jsx" style="white-space:pre-wrap;word-break:break-all">def _pao2_fio2_score(pao2, fio2, has_advanced_support):
+    ratio = pao2 / fio2 if fio2 &gt; 0 else 0
+    if ratio &gt;= 400:   return 0
+    elif ratio &gt;= 300: return 1
+    elif ratio &gt;= 200: return 2
+    elif ratio &gt;= 100: return 3 if has_advanced_support else 2
+    else:              return 4 if has_advanced_support else 2</code></pre><h3 id="ea3ba4b7-f609-46a2-83f3-bfbaa0c04628" class="" dir="auto">7.4 去甲肾上腺素剂量 · 唯一换算点</h3><p id="eb231120-9839-4740-a747-fbe19feea177" class="" dir="auto"><code>NE_LABEL_BASIS = &quot;base&quot;</code>（主任定：按去甲肾上腺素碱基计），换算系数 <strong>1.0</strong>，<strong>不除 2</strong>。</p><pre id="9ce9a266-3fea-402f-aac4-30e9358bc314" class="code code-wrap" data-notion-code-syntax="jsx"><code class="language-jsx" style="white-space:pre-wrap;word-break:break-all">_LIQUID_UNITS = {&quot;ml&quot;, &quot;mL&quot;, &quot;毫升&quot;}
+_DOSE_UNITS   = {&quot;mg&quot;, &quot;毫克&quot;}
+WEIGHT_MIN_KG, WEIGHT_MAX_KG = 20.0, 300.0
+NE_LABEL_BASIS = &quot;base&quot;
+_LABEL_TO_BASE = {&quot;base&quot;: 1.0, &quot;salt&quot;: 0.5}
+
+def ne_ugkgmin(action, weight_kg):
+    dq = []
+    if NE_LABEL_BASIS not in _LABEL_TO_BASE:
+        return None, [&quot;NE_LABEL_BASIS 未配置，拒绝计算&quot;]
+    if (action.get(&quot;doseUnit&quot;) or &quot;&quot;).strip() not in _DOSE_UNITS:
+        return None, [&quot;dose 单位不在白名单&quot;]
+    if (action.get(&quot;liquidUnit&quot;) or &quot;&quot;).strip() not in _LIQUID_UNITS:
+        return None, [&quot;liquidAmount 单位不在白名单&quot;]
+    liquid_ml = float(action.get(&quot;liquidAmount&quot;) or 0)
+    if liquid_ml &lt;= 0:
+        return None, [&quot;liquidAmount 为 0 或缺失，无法算浓度&quot;]
+    if not (WEIGHT_MIN_KG &lt;= (weight_kg or 0) &lt;= WEIGHT_MAX_KG):
+        return None, [&quot;体重超出 20 至 300 kg&quot;]
+    conc_ug_ml = float(action[&quot;dose&quot;]) / liquid_ml * 1000.0
+    val = conc_ug_ml * float(action[&quot;speed&quot;]) / 60.0 / weight_kg * _LABEL_TO_BASE[NE_LABEL_BASIS]
+    if val &gt; 2.0:
+        dq.append(&quot;NE 剂量异常高，需人工复核&quot;)
+    return val, dq</code></pre><p id="823fc8bf-62b2-4f18-8007-e4c48d784212" class="" dir="auto"><code>speed</code> 单位已确认为 <code>ml/h</code>，浓度必须<strong>逐医嘱</strong>从 <code>dose / liquidAmount</code> 计算，禁止硬编码常数。构造 <code>MedicationAdministration</code> 时 <code>salt_form</code> 固定传枚举成员 <code>NorepinephrineSaltForm.BASE</code>，<strong>永不改</strong>。</p><p id="f75cb50f-5e40-4cb4-aa1d-ae60b8ca0595" class="" dir="auto">体重回填：优先 <code>patient</code> 表，其次该病人最近一条合法体重，打 <code>weight_backfilled</code> 标记。</p><h3 id="bd0844d6-c140-4c2e-b691-cbc588cdf24f" class="" dir="auto">7.5 内核铁律（照搬，不得放宽）</h3><table id="c5c7947e-987e-4382-b6cf-2d6385721bbe" class="simple-table" dir="ltr"><thead class="simple-table-header"><tr id="013b05c2-d340-4243-818e-61dc9b2b84b9" dir="ltr"><th id="`bV|" class="simple-table-header-color simple-table-header">#</th><th id="vaBM" class="simple-table-header-color simple-table-header">铁律</th></tr></thead><tbody><tr id="165a2ef5-1d6c-4e06-8a4f-539e4ed3dc67" dir="ltr"><td id="`bV|" class="">1</td><td id="vaBM" class="">评分是纯函数，相同输入必得相同输出</td></tr><tr id="999b0ae6-ed13-4a7c-bc08-796915a923a4" dir="ltr"><td id="`bV|" class="">2</td><td id="vaBM" class="">内核不访问数据库，只接收已构建好的 observation 集合</td></tr><tr id="45f37fc4-e6bc-4b07-925f-9b69bdbaae30" dir="ltr"><td id="`bV|" class="">3</td><td id="vaBM" class="">内核不调用 <code>now()</code>，<code>evaluation_time</code> 必须由调用方显式传入</td></tr><tr id="683d37dc-4215-4782-8811-0877e4b4aa99" dir="ltr"><td id="`bV|" class="">4</td><td id="vaBM" class="">严禁使用 <code>observed_at</code> 晚于 <code>evaluation_time</code> 的数据</td></tr><tr id="3cf9a60e-cd57-4b8f-89cd-dedc0c0939d1" dir="ltr"><td id="`bV|" class="">5</td><td id="vaBM" class="">时间窗左开右闭 <code>(evaluation_time - lookback, evaluation_time]</code></td></tr><tr id="b3620577-8461-4cff-a1ed-d2aa6de266ea" dir="ltr"><td id="`bV|" class="">6</td><td id="vaBM" class="">所有 datetime 必须 timezone-aware</td></tr><tr id="0cb5076c-4220-4a50-9cf0-7fcda04d5287" dir="ltr"><td id="`bV|" class="">7</td><td id="vaBM" class="">每分项输出取值、单位、来源记录 ID、观测时间、缺失状态</td></tr><tr id="4a4416cc-1f3a-4e9b-bce3-0ff77f0d31be" dir="ltr"><td id="`bV|" class="">8</td><td id="vaBM" class="">每个评分独立 rulepack + 独立版本号 + content_hash</td></tr></tbody></table><h3 id="87c5c98c-ba54-4dcf-84c4-ce17867c76fa" class="" dir="auto">7.6 展示约束（硬性）</h3><ul id="02071e13-1203-4894-a25c-f9d5d262715c" class="bulleted-list" dir="auto"><li style="list-style-type:disc">两个 rulepack 恒为 <code>clinical_approval_status = not_approved</code>、<code>lifecycle_status = experimental</code></li></ul><ul id="046cffdd-36b7-4513-9cf2-85f22a7037fc" class="bulleted-list" dir="auto"><li style="list-style-type:disc"><strong>SOFA / SOFA-2 只能辅助展示与影子比对，不得作为任何质控指标分子分母的判定依据</strong></li></ul><ul id="2b060ff0-b638-4f5a-a31c-fb7d16465e01" class="bulleted-list" dir="auto"><li style="list-style-type:disc">详情页必须显示：评分版本号、rulepack 版本、<code>result_status</code>、<code>completeness</code>、缺失分项清单、「实验性」标识</li></ul><ul id="3dd7cb99-013b-4eac-886c-73df130a9895" class="bulleted-list" dir="auto"><li style="list-style-type:disc"><code>insufficient</code> 的评分不得触发任何临床提示</li></ul><ul id="c8d75c9b-da2c-4788-bb4d-4a16d81e208c" class="bulleted-list" dir="auto"><li style="list-style-type:disc">HFNC 病人两版本呼吸分不同，属<strong>预期差异</strong>，详情页固定说明，影子比对归因预先列入「算法版本不同」，不进异常清单</li></ul><h3 id="a577e4ae-ffbc-4818-9726-d4ace3858c8e" class="" dir="auto">7.7 SOFA 详情三层展开</h3><table id="b69efc73-1aad-405e-8d86-97df78c90abd" class="simple-table" dir="ltr"><thead class="simple-table-header"><tr id="42eed940-414f-465a-abbe-64892cfa3a64" dir="ltr"><th id="Rt?d" class="simple-table-header-color simple-table-header">层</th><th id="lg_J" class="simple-table-header-color simple-table-header">内容</th></tr></thead><tbody><tr id="b79272a6-7504-4eeb-8652-773d9776d1a6" dir="ltr"><td id="Rt?d" class="">第一层</td><td id="lg_J" class="">总分 + 6 分项条形图 + <code>result_status</code>  • 「实验性」角标</td></tr><tr id="520a3cc2-9b00-4093-bed0-e8c89910c823" dir="ltr"><td id="Rt?d" class="">第二层</td><td id="lg_J" class="">每分项：得分、取值、单位、观测时间、是否超陈旧度、是否人工覆盖</td></tr><tr id="216a3858-ecfc-4096-b035-c3abe5792b58" dir="ltr"><td id="Rt?d" class="">第三层</td><td id="lg_J" class="">七段追溯：① 计算逻辑（阈值表 + 高亮命中行 + 出处页码）② 取值口径 ③ 本次取值与换算规则 ④ 时间点与时间差 ⑤ 来源追溯（库/集合/<code>_id</code>/字段，可展开原始 JSON）⑥ 窗口内候选记录清单（高亮选中项）⑦ 门控与旁路说明</td></tr></tbody></table><p id="34796a35-c48b-4ba1-b01d-8efcd53660b6" class="" dir="auto">第三层第 ① 段下方放<strong>人工覆盖按钮</strong>。覆盖后分项标题旁显示「人工」角标，总分旁显示「含人工干预」。</p><h2 id="f8a95c78-bcfd-42de-8293-61a86618a0eb" class="" dir="auto">八、原因码总表</h2><p id="11240d39-f82f-4859-b23a-cfa776db531b" class="" dir="auto">每个原因码必须配一句人类可读解释，详情逐例展示（多个分号分隔），summary 出原因排行榜。</p><table id="086cb02d-b8c6-4445-82bc-42280f573167" class="simple-table" dir="ltr"><thead class="simple-table-header"><tr id="bf847769-c69f-47a3-939b-7b212f079392" dir="ltr"><th id="^Vau" class="simple-table-header-color simple-table-header">原因码</th><th id="QV]K" class="simple-table-header-color simple-table-header">解释</th></tr></thead><tbody><tr id="4c00da89-f5f4-4043-a91a-fbeed497fa15" dir="ltr"><td id="^Vau" class=""><code>NO_T0</code></td><td id="QV]K" class="">找不到 T0 锚点</td></tr><tr id="c3c8a6d2-8faf-4f6e-b7ec-48d9a591e542" dir="ltr"><td id="^Vau" class=""><code>T0_SUSPECT</code></td><td id="QV]K" class="">T0 与首个异常指标时间差超阈值</td></tr><tr id="1d26db16-39cb-4a15-b9b9-397145187d72" dir="ltr"><td id="^Vau" class=""><code>SITE_UNCONFIRMED</code></td><td id="QV]K" class="">感染部位未人工确认</td></tr><tr id="45d288ad-2ad7-4fa6-8750-6b895bf1d942" dir="ltr"><td id="^Vau" class=""><code>AB_LATE</code></td><td id="QV]K" class="">抗菌药物执行时间超出窗口</td></tr><tr id="0882862d-0c53-4ad9-97b0-6ff674537509" dir="ltr"><td id="^Vau" class=""><code>AB_MISSING</code></td><td id="QV]K" class="">完全找不到抗菌药物执行记录</td></tr><tr id="3aa3282b-7ab2-4106-95fa-78d00171b60e" dir="ltr"><td id="^Vau" class=""><code>BC_LATE</code></td><td id="QV]K" class="">血培养审核时间超出窗口</td></tr><tr id="9e4840b1-3882-42a9-b209-8b33dc821f74" dir="ltr"><td id="^Vau" class=""><code>BC_MISSING</code></td><td id="QV]K" class="">完全找不到血培养记录</td></tr><tr id="6415300b-a680-4254-9dc8-5e19f1f210c1" dir="ltr"><td id="^Vau" class=""><code>BC_AFTER_AB</code></td><td id="QV]K" class="">抗生素早于或等于血培养，顺序不达标</td></tr><tr id="0bdce4d8-af4c-42f5-a3b0-d7b97c08388b" dir="ltr"><td id="^Vau" class=""><code>FLUID_NONE</code></td><td id="QV]K" class="">窗口内无液体执行</td></tr><tr id="8319386f-1dfe-485e-99d8-132d3cb9780f" dir="ltr"><td id="^Vau" class=""><code>FLUID_INSUFFICIENT</code></td><td id="QV]K" class="">液体量不足 1500ml</td></tr><tr id="da73d69f-c583-4803-a877-ae7d8b0c0253" dir="ltr"><td id="^Vau" class=""><code>MAP_NOT_MET</code></td><td id="QV]K" class="">MAP 未达标</td></tr><tr id="826b315f-3c87-4ea4-86a8-ca5561fb3ba4" dir="ltr"><td id="^Vau" class=""><code>LAC_NOT_MET</code></td><td id="QV]K" class="">乳酸未达标</td></tr><tr id="74294532-44cf-4abc-9ae3-ba777326f642" dir="ltr"><td id="^Vau" class=""><code>LAC_NO_RECHECK</code></td><td id="QV]K" class="">6h 未复测乳酸</td></tr><tr id="1a2c2387-f1e9-4961-a51b-35e8fceb71e8" dir="ltr"><td id="^Vau" class=""><code>NO_VASO</code></td><td id="QV]K" class="">无血管活性药执行记录</td></tr><tr id="b501d612-f138-4eed-99d6-c1210f9c6f1c" dir="ltr"><td id="^Vau" class=""><code>DATA_MISSING_MAP</code></td><td id="QV]K" class="">MAP 数据缺失</td></tr><tr id="81124ee1-69af-492c-97fa-1875e5a41149" dir="ltr"><td id="^Vau" class=""><code>DATA_MISSING_LAC</code></td><td id="QV]K" class="">乳酸数据缺失</td></tr><tr id="103e8d99-db2d-4ae2-a529-e5eeb0ad9b46" dir="ltr"><td id="^Vau" class=""><code>DATA_MISSING_FLUID</code></td><td id="QV]K" class="">液体数据缺失</td></tr><tr id="044d01c7-0f84-4af2-a266-fd8e98dad752" dir="ltr"><td id="^Vau" class=""><code>MANUAL_EXCLUDED</code></td><td id="QV]K" class="">人工排除</td></tr></tbody></table><h2 id="a2b8797b-a11f-4594-a440-bb0029d81967" class="" dir="auto">九、配置项总表（零硬编码）</h2><h3 id="e41ec510-498a-4e5a-b6eb-21fc27903912" class="" dir="auto">9.1 <code>config/bundle_rules.py</code></h3><table id="914fcdef-9383-4424-b650-d831fbdc9831" class="simple-table" dir="ltr"><thead class="simple-table-header"><tr id="8a31a917-ea23-40bd-ab42-863478bb49ad" dir="ltr"><th id="_Z]Y" class="simple-table-header-color simple-table-header">配置</th><th id="@feP" class="simple-table-header-color simple-table-header">取值</th><th id="RbrA" class="simple-table-header-color simple-table-header">默认</th><th id="RgXR" class="simple-table-header-color simple-table-header">改它影响什么</th></tr></thead><tbody><tr id="ef2d5f0f-63ff-4b46-ac50-e34ab140d607" dir="ltr"><td id="_Z]Y" class=""><code>BUNDLE_ENGINE</code></td><td id="@feP" class="">auto / manual / compare</td><td id="RbrA" class=""><code>compare</code></td><td id="RgXR" class="">compare 时新旧引擎并行出双份结果</td></tr><tr id="630eb111-0032-48a0-ac23-a4522507e8bd" dir="ltr"><td id="_Z]Y" class=""><code>BUNDLE_DENOM_ANCHOR</code></td><td id="@feP" class="">diagnosis_time / t0</td><td id="RbrA" class=""><code>t0</code></td><td id="RgXR" class="">分母归属月份</td></tr><tr id="364df35c-c032-4d46-9e5d-0677d9a572de" dir="ltr"><td id="_Z]Y" class=""><code>SHOCK_RULE</code></td><td id="@feP" class="">and / or</td><td id="RbrA" class=""><code><strong>and</strong></code><strong>（强制）</strong></td><td id="RgXR" class="">改 or 会导致循环论证，分母虚高</td></tr><tr id="58eac1af-da6b-4e43-8b74-fc3a88b1bcaf" dir="ltr"><td id="_Z]Y" class=""><code>INFECTION_GATE</code></td><td id="@feP" class="">on / off</td><td id="RbrA" class=""><code>on</code></td><td id="RgXR" class="">off 会让任何用升压药的病人都算脓毒症</td></tr><tr id="a3d17ad4-3a1e-4d54-b36f-e619e9766138" dir="ltr"><td id="_Z]Y" class=""><code>SITE_REQUIRED</code></td><td id="@feP" class="">on / off</td><td id="RbrA" class=""><code><strong>off</strong></code></td><td id="RgXR" class="">on 时没人录部位分母会空掉</td></tr><tr id="af1d65c5-93a6-4a4d-86af-47c3c583f6e7" dir="ltr"><td id="_Z]Y" class=""><code>A1_RULE</code></td><td id="@feP" class="">value_present / value_below_threshold</td><td id="RbrA" class=""><code>value_present</code></td><td id="RgXR" class="">抬高或降低第一步达标率</td></tr><tr id="3cb077a4-7e09-4c78-b50a-f66c6538e80a" dir="ltr"><td id="_Z]Y" class=""><code>AB_PICK</code></td><td id="@feP" class="">latest_in_window / first_in_window</td><td id="RbrA" class=""><code>latest_in_window</code></td><td id="RgXR" class="">latest 系统性抬高第二步达标率</td></tr><tr id="e5fcb6c0-fe7c-40de-a76d-5ae7f1c2f5c5" dir="ltr"><td id="_Z]Y" class=""><code>FLUID_SCOPE</code></td><td id="@feP" class="">all_drugs / crystalloid_colloid_only</td><td id="RbrA" class=""><code>crystalloid_colloid_only</code></td><td id="RgXR" class="">all_drugs 会把溶媒计入，高估复苏量</td></tr><tr id="fbef0fa7-6e6f-4ed4-a066-09629bfb9b83" dir="ltr"><td id="_Z]Y" class=""><code>BUNDLE_6H_STEP2_ITEMS</code></td><td id="@feP" class="">list</td><td id="RbrA" class="">antibiotic, blood_culture, fluid_1500, lactate_recheck</td><td id="RgXR" class="">6h 路径 2 的判定项</td></tr></tbody></table><h3 id="18832398-01b4-4182-be7c-b2806f700141" class="" dir="auto">9.2 <code>config/indicator_windows.py</code></h3><table id="f582795e-44e0-4ac4-b18c-a32681e26f85" class="simple-table" dir="ltr"><thead class="simple-table-header"><tr id="6d59b1fa-d395-462b-aefc-45c093ef8df0" dir="ltr"><th id="McCF" class="simple-table-header-color simple-table-header">配置</th><th id="cpqg" class="simple-table-header-color simple-table-header">默认</th><th id="V_[i" class="simple-table-header-color simple-table-header">改它影响什么</th></tr></thead><tbody><tr id="e6e79991-d185-47d2-855d-9219cd68500b" dir="ltr"><td id="McCF" class=""><code>NE_LABEL_BASIS</code></td><td id="cpqg" class=""><code><strong>base</strong></code></td><td id="V_[i" class="">salt 会让所有 NE 剂量减半，循环分项低估</td></tr><tr id="5681b469-ff81-46c1-a068-248dc487f017" dir="ltr"><td id="McCF" class=""><code>ARTIFICIAL_AIRWAY_AS_ADVANCED</code></td><td id="cpqg" class=""><code>False</code></td><td id="V_[i" class="">True 时管氧/切氧类改判高级支持，呼吸分项升高</td></tr><tr id="e2ea80b0-eb9b-4cfa-80ea-d32270fe2afd" dir="ltr"><td id="McCF" class=""><code>HFNC_AS_ADVANCED_CLASSIC</code></td><td id="cpqg" class=""><code>False</code></td><td id="V_[i" class="">经典 SOFA 是否把 HFNC 算高级支持</td></tr><tr id="2ed5635f-4471-43ec-a678-b22d87b5b4b7" dir="ltr"><td id="McCF" class=""><code>HFNC_AS_ADVANCED_SOFA2</code></td><td id="cpqg" class=""><code>True</code></td><td id="V_[i" class="">SOFA-2 是否把 HFNC 算高级支持</td></tr><tr id="b56e6040-9312-4dbc-a21e-153d3b3ad323" dir="ltr"><td id="McCF" class=""><code>RESP_LOOKBACK_H</code></td><td id="cpqg" class=""><code>24</code></td><td id="V_[i" class="">呼吸支持 LOCF 回溯上限</td></tr><tr id="3f53f7f6-9be2-4dcb-a4af-55045e711844" dir="ltr"><td id="McCF" class=""><code>RESP_STALENESS_FRESH_MIN</code></td><td id="cpqg" class=""><code>60</code></td><td id="V_[i" class="">判 fresh 的分界</td></tr><tr id="91b15226-5ca8-4950-ae8f-bb4d12e9b8f8" dir="ltr"><td id="McCF" class=""><code>RESP_STALENESS_MAX_H</code></td><td id="cpqg" class=""><code>8</code></td><td id="V_[i" class="">超过判 degraded</td></tr><tr id="a3bf6dab-0bd4-4813-9d59-32a2555e8dfb" dir="ltr"><td id="McCF" class=""><code>ICU08_PAIR_MODE</code></td><td id="cpqg" class=""><code>locf_8h</code></td><td id="V_[i" class="">window_60 会让 ARDS 分母显著偏低</td></tr><tr id="4294a6d9-cf90-46fe-8b7f-623751b2aacc" dir="ltr"><td id="McCF" class=""><code>VASO_DOSE_UNKNOWN_POLICY</code></td><td id="cpqg" class=""><code>min_band_2</code></td><td id="V_[i" class="">reject 会让循环分项直接缺失</td></tr><tr id="2e718672-03e0-4f36-ba4b-f00e50096a01" dir="ltr"><td id="McCF" class=""><code>SOFA_WINDOW_CLAMP</code></td><td id="cpqg" class=""><code>icu_admission</code></td><td id="V_[i" class="">full_24h 会吸入入 ICU 前的数据</td></tr><tr id="c6ca0c30-e225-46cd-a72c-b48f16629d86" dir="ltr"><td id="McCF" class=""><code>SOFA_MISSING_POLICY</code></td><td id="cpqg" class=""><code>strict_partial</code></td><td id="V_[i" class="">换 official 会给缺失项补 0</td></tr><tr id="e234864d-8ce0-4fde-88d0-e218b6eee658" dir="ltr"><td id="McCF" class=""><code>SOFA_VARIANTS</code></td><td id="cpqg" class=""><code>both</code></td><td id="V_[i" class="">决定跑一个还是两个版本</td></tr><tr id="c31d161d-41c4-4914-a328-2d02881d9a68" dir="ltr"><td id="McCF" class=""><code>ARDS_PF_OP</code></td><td id="cpqg" class=""><code>lt</code></td><td id="V_[i" class="">阈值符号，前端文案需同步</td></tr><tr id="2433d8ab-4981-47b8-abc7-ec8a865ecb97" dir="ltr"><td id="McCF" class=""><code>ARDS_PRONE_AFTER_PF</code></td><td id="cpqg" class=""><code>True</code></td><td id="V_[i" class="">False 时俯卧位可早于 P/F 时刻</td></tr><tr id="2134e3b6-22f3-4622-9a44-e219299d495a" dir="ltr"><td id="McCF" class=""><code>ASSESS_RATE_MODE</code></td><td id="cpqg" class=""><code>person</code></td><td id="V_[i" class="">换 bed_day 后 ICU-09/10 数值会明显下降</td></tr><tr id="bb82b4d1-6840-4290-8102-3d6232a767e1" dir="ltr"><td id="McCF" class=""><code>DEDUP_BY</code></td><td id="cpqg" class=""><code>patient</code></td><td id="V_[i" class="">admission 会让同人多次住院分开计</td></tr><tr id="4d32353d-2264-487d-8c1f-a9e691138fa2" dir="ltr"><td id="McCF" class=""><code>VALID_SCORE_RULE</code></td><td id="cpqg" class=""><code>valid_and_nonnull</code></td><td id="V_[i" class="">放宽会抬高评估率</td></tr><tr id="fe33448e-389f-48be-869b-853c734cbdf2" dir="ltr"><td id="McCF" class=""><code>WINDOW_CLAMP_STRICT</code></td><td id="cpqg" class=""><code>True</code></td><td id="V_[i" class="">False 时允许窗口越界</td></tr></tbody></table><h2 id="b4b7b3a4-dcb2-4a4c-a90a-520af3cb728c" class="" dir="auto">十、追溯与数据质量字段</h2><table id="61b0213e-904d-4df0-ade3-f5c59f291682" class="simple-table" dir="ltr"><thead class="simple-table-header"><tr id="19e9874e-8683-4c6b-bdfb-90ff6a36e4d3" dir="ltr"><th id="XI\Q" class="simple-table-header-color simple-table-header">字段</th><th id="&gt;Q@t" class="simple-table-header-color simple-table-header">说明</th></tr></thead><tbody><tr id="ad114730-6079-4895-ae30-ce5af944bba6" dir="ltr"><td id="XI\Q" class=""><code>t0_source</code></td><td id="&gt;Q@t" class=""><code>first_order</code> / <code>icu_admission</code> / <code>manual</code></td></tr><tr id="da94639f-1b0d-4ee7-93bd-fd624004040b" dir="ltr"><td id="XI\Q" class=""><code>t0_delta_min</code></td><td id="&gt;Q@t" class="">T0 与首个异常指标时间差</td></tr><tr id="b6bc725e-b4e7-43cd-b537-6bd88b4643f3" dir="ltr"><td id="XI\Q" class=""><code>map_source</code></td><td id="&gt;Q@t" class=""><code>measured</code> / <code>computed</code></td></tr><tr id="561246cf-88e8-4875-b34f-693a1f0f2d15" dir="ltr"><td id="XI\Q" class=""><code>specimen</code></td><td id="&gt;Q@t" class="">乳酸标本类型，恒 <code>unknown</code>（库中不区分动静脉）</td></tr><tr id="976c3e73-5ffa-4eea-b788-220a8be4f9a3" dir="ltr"><td id="XI\Q" class=""><code>antibiotic_first_time</code></td><td id="&gt;Q@t" class="">首剂时间，与所取时间并列显示</td></tr><tr id="41b8fe98-4c59-42b5-a314-24b24e61bd41" dir="ltr"><td id="XI\Q" class=""><code>fluid_ml</code> / <code>fluid_unclassified_ml</code> / <code>fluid_all_ml</code></td><td id="&gt;Q@t" class="">三个数并列，医师自行判断口径差异</td></tr><tr id="23645458-a8cc-4ac0-9e3f-6238634ba599" dir="ltr"><td id="XI\Q" class=""><code>o2route_source_time</code> / <code>o2route_staleness_grade</code></td><td id="&gt;Q@t" class=""><code>fresh</code> / <code>acceptable</code> / <code>degraded</code> / <code>missing</code></td></tr><tr id="b0ac7cbb-2d30-42d8-a6cf-0f949ea3f0b5" dir="ltr"><td id="XI\Q" class=""><code>dose_known</code> / <code>dose_unknown_reason</code></td><td id="&gt;Q@t" class="">升压药剂量是否算得出及原因</td></tr><tr id="191cf566-87ad-41a9-8d12-73b6364eab9b" dir="ltr"><td id="XI\Q" class=""><code>weight_backfilled</code></td><td id="&gt;Q@t" class="">体重是否回填</td></tr><tr id="09e510b5-9bd6-48fd-bd5f-eca17facb6db" dir="ltr"><td id="XI\Q" class=""><code>zyyz_collection</code></td><td id="&gt;Q@t" class="">实际命中的医嘱集合名</td></tr><tr id="cc490045-062d-453f-ad63-fa4d89e9f8a8" dir="ltr"><td id="XI\Q" class=""><code>data_quality_flags</code></td><td id="&gt;Q@t" class="">数组，所有异常标记</td></tr></tbody></table><h2 id="0ad8f615-976d-47f8-952b-c8ead5b6ec57" class="" dir="auto">十一、上线门槛与顺序</h2><pre id="b74f5122-5249-4748-a67c-d5bbf073b338" class="code code-wrap" data-notion-code-syntax="mermaid"><code class="language-mermaid" style="white-space:pre-wrap;word-break:break-all">flowchart LR
+    P1[&quot;C-1A&lt;br/&gt;ICU-08 分子月窗口&lt;br/&gt;分子下降&quot;] --&gt; P2[&quot;C-1C&lt;br/&gt;配对策略 + 高流量臂&lt;br/&gt;删 PEEP 前置 continue&lt;br/&gt;分母上升&quot;]
+    P2 --&gt; P3[&quot;ICU-05 Bundle v3&quot;]
+    P3 --&gt; P4[&quot;SOFA 双版本影子展示&lt;br/&gt;永久 experimental&quot;]</code></pre><table id="1fef7a66-54f2-444e-9122-849f1b977c42" class="simple-table" dir="ltr"><thead class="simple-table-header"><tr id="69b5c7de-76ae-4e3f-8d1b-9d5140a34304" dir="ltr"><th id="Z?Y`" class="simple-table-header-color simple-table-header">门槛</th><th id="~BBL" class="simple-table-header-color simple-table-header">条件</th><th id="Lt\N" class="simple-table-header-color simple-table-header">未满足时</th></tr></thead><tbody><tr id="7b6cc23b-bd9a-4eff-93fa-a8c77e7ac117" dir="ltr"><td id="Z?Y`" class="">1</td><td id="~BBL" class="">呼吸支持三列映射表未经主任签字</td><td id="Lt\N" class="">呼吸分项标 <code>experimental</code>，不进大屏</td></tr><tr id="52359df0-4624-4ab4-afa6-02da3c356be2" dir="ltr"><td id="Z?Y`" class="">2</td><td id="~BBL" class="">两个 rulepack 恒为 not_approved</td><td id="Lt\N" class="">SOFA 永不作为任何指标分子分母判定依据</td></tr></tbody></table><p id="a688b736-e847-4fdd-b4f1-63d371c7ad9d" class="" dir="auto">每一步上线都必须带独立的 before / after 对照表，含患者级 diff 两个集合（新增 pid / 消失 pid），<strong>两个集合都为空才算无变化</strong>。</p><h2 id="2829ff78-42ae-4e8c-b274-a43ab2fafb65" class="" dir="auto">十二、待确认（仅剩 2 项，均不阻塞开工）</h2><table id="03b93a1b-769b-4be7-ac7d-9ef7c3e3bd8d" class="simple-table" dir="ltr"><thead class="simple-table-header"><tr id="28c5e345-54a4-4177-9c91-f5aa89ac5b98" dir="ltr"><th id="zgE_" class="simple-table-header-color simple-table-header">#</th><th id="cNKG" class="simple-table-header-color simple-table-header">事项</th><th id="]Vt\" class="simple-table-header-color simple-table-header">谁定</th><th id="w@Ew" class="simple-table-header-color simple-table-header">默认值</th></tr></thead><tbody><tr id="3c00daab-5af0-4681-a21b-cb9d877c23e6" dir="ltr"><td id="zgE_" class="">1</td><td id="cNKG" class="">呼吸支持三列映射表签字</td><td id="]Vt\" class="">主任</td><td id="w@Ew" class="">表中默认值已按通行口径填好</td></tr><tr id="20ead5d2-ee1e-4a6a-a7d5-658d5713b7bb" dir="ltr"><td id="zgE_" class="">2</td><td id="cNKG" class="">6h 第二步第 4 点具体是什么</td><td id="]Vt\" class="">你</td><td id="w@Ew" class="">暂定「复测乳酸」</td></tr></tbody></table></div></article><span class="sans" style="font-size:14px;padding-top:2em"></span></body></html>
