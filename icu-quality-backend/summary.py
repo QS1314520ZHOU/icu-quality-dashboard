@@ -416,6 +416,25 @@ def rebuild_summary(dept_codes: list, periods: list, indicators: list = None,
         raw_den = result.pop("raw_den", None)
         excluded_num = result.pop("excluded_num", None)
         excluded_den = result.pop("excluded_den", None)
+        # 查询三层人工覆盖计数
+        override_count = 0
+        try:
+            from db import get_client, BED_DB_NAMES
+            for db_name in BED_DB_NAMES:
+                try:
+                    db = get_client(db_name)[db_name]
+                    override_count = db.icu_manual_override.count_documents({
+                        "created_at": {
+                            "$gte": datetime(int(year), int(month), 1),
+                            "$lt": datetime(int(year), int(month), end_day + 1),
+                        },
+                    })
+                    break
+                except Exception:
+                    continue
+        except Exception:
+            pass
+
         doc = {
             "dept_code": ",".join(dept_codes) if len(dept_codes) > 1 else dept_codes[0],
             "period": period,
@@ -427,6 +446,7 @@ def rebuild_summary(dept_codes: list, periods: list, indicators: list = None,
             "updated_at": datetime.utcnow(),
             "calc_duration_ms": elapsed,
             "data_available": data_available,
+            "override_count": override_count,
         }
         if census_data:
             doc["census"] = census_data

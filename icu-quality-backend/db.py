@@ -2,7 +2,7 @@
 import os
 from pathlib import Path
 from pymongo import MongoClient
-from datetime import datetime, timedelta
+from datetime import datetime, timedelta, timezone
 from typing import Optional
 from collections import defaultdict
 import re
@@ -38,6 +38,12 @@ if not _env_loaded:
 def _env(key: str, default: str = "") -> str:
     return os.getenv(key, default).strip()
 
+
+def _aware(dt: datetime) -> datetime:
+    """确保时区感知。"""
+    if dt.tzinfo is None:
+        return dt.replace(tzinfo=timezone.utc)
+    return dt
 
 
 def build_exclusion_key(pid: str, event_time) -> str:
@@ -683,6 +689,103 @@ def get_bundle_data(dept_codes: list, start_date: str, end_date: str) -> dict:
     return result
 
 
+def get_bundle_data_v2(dept_codes: list, start_date: str, end_date: str) -> dict:
+    """
+    Bundle 判定 V2 — 双集合查询。
+    分母来源: diseaseDiagnosis (SmartCare) + VI_ICU_ZYYZ (DataCenter)
+    分子来源: infectionShockV2 (SmartCare) + 自动判定引擎
+
+    返回:
+        {
+            "total": int,
+            "h1_num": int, "h3_num": int, "h6_num": int,
+            "h1_patients": [...], "h3_patients": [...], "h6_patients": [...],
+            "den_patients": [...],
+        }
+    """
+    from datetime import datetime as dt
+
+    start_dt = dt.fromisoformat(start_date)
+    end_dt = dt.fromisoformat(end_date)
+
+    result = {
+        "total": 0, "h1_num": 0, "h3_num": 0, "h6_num": 0,
+        "h1_patients": [], "h3_patients": [], "h6_patients": [],
+        "den_patients": [],
+    }
+
+    # ---- 阶段 1: SmartCare diseaseDiagnosis (原有逻辑) ----
+    result_sc = get_bundle_data(dept_codes, start_date, end_date)
+
+    # 合并 SmartCare 结果
+    result["total"] += result_sc["total"]
+    result["h1_num"] += result_sc["h1_num"]
+    result["h3_num"] += result_sc["h3_num"]
+    result["h6_num"] += result_sc["h6_num"]
+    result["h1_patients"].extend(result_sc["h1_patients"])
+    result["h3_patients"].extend(result_sc["h3_patients"])
+    result["h6_patients"].extend(result_sc["h6_patients"])
+    result["den_patients"].extend(result_sc["den_patients"])
+
+    # ---- 阶段 2: DataCenter VI_ICU_ZYYZ ----
+    try:
+        dc = get_client("DataCenter")["DataCenter"]
+    except Exception as _exc:
+        logger.warning("DataCenter connection failed: %s", _exc)
+        return result
+
+    try:
+        # 查询 VI_ICU_ZYYZ 中的感染性休克诊断
+        dc_diagnoses = list(dc.VI_ICU_ZYYZ.find(
+            {
+                "DIAGNOSIS_NAME": {"$regex": "感染性休克|脓毒症休克|脓毒性休克"},
+                "DIAGNOSIS_TIME": {
+                    "$gte": start_dt,
+                    "$lte": dt(end_dt.year, end_dt.month, end_dt.day, 23, 59, 59),
+                },
+            },
+            {
+                "PATIENT_ID": 1,
+                "PATIENT_NAME": 1,
+                "MRN": 1,
+                "DIAGNOSIS_TIME": 1,
+                "DIAGNOSIS_NAME": 1,
+                "BED_NO": 1,
+            },
+        ))
+
+        if not dc_diagnoses:
+            return result
+
+        # 去重: 已在 SmartCare 中出现的患者不再重复计入
+        sc_pids = {p.get("_id") or p.get("pid") for p in result_sc["den_patients"]}
+        sc_mrns = {p.get("mrn") or p.get("hisPid") for p in result_sc["den_patients"]}
+
+        for dx in dc_diagnoses:
+            mrn = (dx.get("MRN") or "").strip()
+            patient_id = (dx.get("PATIENT_ID") or "").strip()
+
+            # 去重: 如果该患者已在 SmartCare 结果中，跳过
+            if patient_id in sc_pids or mrn in sc_mrns:
+                continue
+
+            result["total"] += 1
+            result["den_patients"].append({
+                "_id": patient_id,
+                "mrn": mrn,
+                "name": dx.get("PATIENT_NAME", ""),
+                "hisBed": dx.get("BED_NO", ""),
+                "diagnosisTime": dx.get("DIAGNOSIS_TIME"),
+                "diseaseId": str(dx.get("_id", "")),
+                "source": "vi_zyyz",
+            })
+
+    except Exception as _exc:
+        logger.warning("DC VI_ICU_ZYYZ query failed: %s", _exc)
+
+    return result
+
+
 # ============================================================
 # ICU-08 氧疗途径判定（主判据，替代通气模式猜测）
 # ============================================================
@@ -1050,11 +1153,14 @@ def get_icu08_data(dept_codes: list, start_date: str, end_date: str,
     """
     from datetime import datetime as dt, timedelta
     from bson import ObjectId
+    from config.o2_route_map import classify_o2_route
+    from config.indicator_windows import ICU08_PAIR_MODE
 
     logger.info("[ICU-08] window=%s ~ %s dept=%s", start_date, end_date, dept_codes)
 
-    # 有创氧疗途径
-    INVASIVE_ROUTES = {"管辅", "切辅", "管氧", "切氧", "管文", "切文", "管高", "切高", "有创"}
+    # 接线 ICU08_PAIR_MODE
+    if ICU08_PAIR_MODE == "locf_8h":
+        time_tolerance_min = 480  # 8h LOCF 窗口
 
     start_dt = dt.fromisoformat(start_date)
     end_dt = dt.fromisoformat(end_date)
@@ -1091,41 +1197,49 @@ def get_icu08_data(dept_codes: list, start_date: str, end_date: str,
 
                 win = pf_time - timedelta(minutes=time_tolerance_min)
 
-                # PEEP
-                peep_doc = db.bedside.find_one(
-                    {"pid": pid, "code": "param_vent_peep", "valid": True,
-                     "time": {"$gte": win, "$lte": pf_time}},
-                    {"strVal": 1}, sort=[("time", -1)])
-                if not peep_doc:
-                    continue
-                try:
-                    peep_val = float(peep_doc.get("strVal", "0"))
-                except (ValueError, TypeError):
-                    continue
-
-                # 氧疗途径
+                # 氧疗途径 → o2_route_map 分类
                 o2_doc = db.bedside.find_one(
                     {"pid": pid, "code": "param_XiYangTuJing", "valid": True,
                      "time": {"$gte": win, "$lte": pf_time}},
                     {"strVal": 1}, sort=[("time", -1)])
                 o2_raw = o2_doc.get("strVal", "") if o2_doc else ""
+                o2_cls = classify_o2_route(o2_raw)
+                icu08_arm = o2_cls["icu08_arm"]  # invasive/noninvasive/hfnc/none/unknown
 
-                # 判定三臂
+                # PEEP — 仅 invasive 和 noninvasive 臂需要
+                # 需求文档: 不因 PEEP 缺失而跳过整个患者
+                peep_val = None
+                peep_doc = None
+                if icu08_arm in ("invasive", "noninvasive"):
+                    peep_doc = db.bedside.find_one(
+                        {"pid": pid, "code": "param_vent_peep", "valid": True,
+                         "time": {"$gte": win, "$lte": pf_time}},
+                        {"strVal": 1}, sort=[("time", -1)])
+                    if peep_doc:
+                        raw_peep = peep_doc.get("strVal", "")
+                        if isinstance(raw_peep, str):
+                            # PEEP 单位清洗
+                            raw_peep = raw_peep.replace("cmH2O", "").replace("cmH₂O", "")
+                            raw_peep = raw_peep.replace("cmh2o", "").replace("cm", "")
+                            raw_peep = raw_peep.strip()
+                        try:
+                            peep_val = float(raw_peep) if raw_peep else None
+                        except (ValueError, TypeError):
+                            peep_val = None
+
+                # 判定三臂(使用 o2_route_map 映射结果)
                 arm = None
-                routes = _parse_o2_routes(o2_raw)
-                o2_invasive, _, _ = is_invasive_by_o2route(o2_raw)
-
-                if o2_invasive and peep_val >= peep_min and pf_ratio < invasive_pf:
+                flow_val = 0  # 初始化，HFNC 臂使用
+                if icu08_arm == "invasive" and peep_val is not None and peep_val >= peep_min and pf_ratio < invasive_pf:
                     arm = "有创"
-                elif any("无创" in r for r in routes) and peep_val >= peep_min and pf_ratio <= noninvasive_pf:
+                elif icu08_arm == "noninvasive" and peep_val is not None and peep_val >= peep_min and pf_ratio <= noninvasive_pf:
                     arm = "无创"
-                elif any("高流量" in r for r in routes):
-                    # 查流速
+                elif icu08_arm == "hfnc":
+                    # HFNC 臂:只检查流速门槛,不检查 PEEP
                     flow_doc = db.bedside.find_one(
                         {"pid": pid, "code": "param_吸氧流速", "valid": True,
                          "time": {"$gte": win, "$lte": pf_time}},
                         {"strVal": 1}, sort=[("time", -1)])
-                    flow_val = 0
                     if flow_doc:
                         try:
                             fv = flow_doc.get("strVal", "0")
@@ -1150,9 +1264,23 @@ def get_icu08_data(dept_codes: list, start_date: str, end_date: str,
                         if not mrn: mrn = pat.get("mrn", "") or pat.get("hisPid", "")
                 except Exception:
                     pass
+                # PEEP 时间分级 (staleness grading)
+                peep_grade = None
+                if peep_val is not None and peep_doc:
+                    peep_ts = peep_doc.get("time") or peep_doc.get("eventExe", {}).get("startTime")
+                    if isinstance(peep_ts, datetime):
+                        delta_min = abs((pf_time - peep_ts).total_seconds()) / 60
+                        if delta_min <= 60:
+                            peep_grade = "A"   # ≤1h
+                        elif delta_min <= 240:
+                            peep_grade = "B"   # ≤4h
+                        elif delta_min <= 480:
+                            peep_grade = "C"   # ≤8h
+
                 den_patients.append({
                     "pid": pid, "mrn": mrn, "name": pat_name,
                     "pf_ratio": pf_ratio, "peep": peep_val,
+                    "peep_grade": peep_grade,
                     "o2_route": o2_raw, "arm": arm, "flow_val": flow_val if arm == "高流量" else None,
                     "pf_time": pf_time,
                     "exclusion_key": build_exclusion_key(pid, pf_time),
@@ -4933,6 +5061,312 @@ def get_patient_census_detail(dept_codes: list, start_date: str, end_date: str,
             logger.warning("DB %s failed in get_patient_census_detail: %s", db_name, _exc)
             continue
     return []
+
+
+# ============================================================
+# Stage 6: 感染部位入库 (icu_infection_site)
+# ============================================================
+
+def save_infection_site(
+    pid: str,
+    infection_site: str,
+    eval_time: datetime,
+    operator: str = "system",
+) -> dict:
+    """
+    保存感染部位到 icu_infection_site 集合。
+
+    Args:
+        pid: 患者 ID
+        infection_site: 感染部位 (11 选 1)
+        eval_time: 评估时间
+        operator: 操作者
+
+    Returns:
+        {"ok": True, "id": str} 或 {"ok": False, "error": str}
+    """
+    VALID_SITES = {
+        "肺部", "腹腔", "泌尿道", "血流", "皮肤软组织",
+        "中枢神经系统", "心血管", "骨关节", "五官",
+        "其他", "不明确",
+    }
+    if infection_site not in VALID_SITES:
+        return {"ok": False, "error": f"无效感染部位: {infection_site}"}
+
+    try:
+        sc = get_client("SmartCare")["SmartCare"]
+    except Exception as exc:
+        return {"ok": False, "error": f"SmartCare 连接失败: {exc}"}
+
+    exclusion_key = build_exclusion_key(pid, eval_time)
+    doc = {
+        "pid": pid,
+        "exclusion_key": exclusion_key,
+        "infection_site": infection_site,
+        "eval_time": _aware(eval_time),
+        "operator": operator,
+        "created_at": datetime.now(timezone.utc),
+    }
+    try:
+        sc.icu_infection_site.update_one(
+            {"exclusion_key": exclusion_key},
+            {"$set": doc},
+            upsert=True,
+        )
+        return {"ok": True, "id": exclusion_key}
+    except Exception as exc:
+        return {"ok": False, "error": str(exc)}
+
+
+def get_infection_site(pid: str) -> list:
+    """
+    获取患者的感染部位记录。
+
+    Returns:
+        [{"infection_site": str, "eval_time": datetime, "operator": str}, ...]
+    """
+    try:
+        sc = get_client("SmartCare")["SmartCare"]
+    except Exception:
+        return []
+    try:
+        docs = list(sc.icu_infection_site.find(
+            {"pid": pid},
+            {"_id": 0},
+        ).sort("created_at", -1))
+        return docs
+    except Exception:
+        return []
+
+
+def delete_infection_site(pid: str, exclusion_key: str) -> dict:
+    """删除感染部位记录。"""
+    try:
+        sc = get_client("SmartCare")["SmartCare"]
+    except Exception as exc:
+        return {"ok": False, "error": f"SmartCare 连接失败: {exc}"}
+    try:
+        result = sc.icu_infection_site.delete_one({"exclusion_key": exclusion_key})
+        return {"ok": True, "deleted": result.deleted_count}
+    except Exception as exc:
+        return {"ok": False, "error": str(exc)}
+
+
+# ============================================================
+# Stage 7: 三层人工覆盖 (icu_manual_override)
+# ============================================================
+
+def save_override(override_doc: dict) -> dict:
+    """
+    保存三层人工覆盖记录。
+
+    override_doc 必须包含:
+        - pid: 患者 ID
+        - level: "L1" / "L2" / "L3"
+        - indicator_id: 指标 ID (L2/L3 必填)
+        - override_value: 覆盖值
+        - reason_code: 原因码
+        - operator: 操作者
+
+    Returns:
+        {"ok": True, "id": str} 或 {"ok": False, "error": str}
+    """
+    try:
+        sc = get_client("SmartCare")["SmartCare"]
+    except Exception as exc:
+        return {"ok": False, "error": f"SmartCare 连接失败: {exc}"}
+
+    level = override_doc.get("level")
+    if level not in ("L1", "L2", "L3"):
+        return {"ok": False, "error": f"无效覆盖层级: {level}"}
+
+    pid = override_doc.get("pid")
+    if not pid:
+        return {"ok": False, "error": "pid 不能为空"}
+
+    doc = {
+        "pid": pid,
+        "level": level,
+        "indicator_id": override_doc.get("indicator_id"),
+        "override_value": override_doc.get("override_value"),
+        "reason_code": override_doc.get("reason_code"),
+        "reason_text": override_doc.get("reason_text", ""),
+        "operator": override_doc.get("operator", "unknown"),
+        "created_at": datetime.now(timezone.utc),
+        "expires_at": override_doc.get("expires_at"),
+    }
+
+    # 构建唯一键
+    if level == "L1":
+        key = f"L1|{pid}"
+    elif level == "L2":
+        indicator_id = override_doc.get("indicator_id")
+        eval_time = override_doc.get("eval_time")
+        exclusion_key = build_exclusion_key(pid, eval_time) if eval_time else pid
+        key = f"L2|{exclusion_key}|{indicator_id}"
+    else:
+        indicator_id = override_doc.get("indicator_id")
+        eval_time = override_doc.get("eval_time")
+        exclusion_key = build_exclusion_key(pid, eval_time) if eval_time else pid
+        key = f"L3|{exclusion_key}|{indicator_id}"
+
+    doc["override_key"] = key
+
+    try:
+        sc.icu_manual_override.update_one(
+            {"override_key": key},
+            {"$set": doc},
+            upsert=True,
+        )
+        return {"ok": True, "id": key}
+    except Exception as exc:
+        return {"ok": False, "error": str(exc)}
+
+
+def get_overrides(pid: str, level: str = None) -> list:
+    """
+    获取患者的覆盖记录。
+
+    Args:
+        pid: 患者 ID
+        level: 可选，筛选覆盖层级
+
+    Returns:
+        [{"level": str, "indicator_id": str, "override_value": Any, ...}, ...]
+    """
+    try:
+        sc = get_client("SmartCare")["SmartCare"]
+    except Exception:
+        return []
+
+    query = {"pid": pid}
+    if level:
+        query["level"] = level
+
+    try:
+        docs = list(sc.icu_manual_override.find(
+            query, {"_id": 0}
+        ).sort("created_at", -1))
+        return docs
+    except Exception:
+        return []
+
+
+def get_override_map(pid: str, eval_time: datetime) -> dict:
+    """
+    获取患者的覆盖映射 (合并三层)。
+
+    返回:
+        {
+            "L1": dict or None,
+            "L2": {indicator_id: override_doc, ...},
+            "L3": {indicator_id: override_doc, ...},
+        }
+    """
+    try:
+        sc = get_client("SmartCare")["SmartCare"]
+    except Exception:
+        return {"L1": None, "L2": {}, "L3": {}}
+
+    exclusion_key = build_exclusion_key(pid, eval_time)
+
+    try:
+        # L1: case-level override
+        l1 = sc.icu_manual_override.find_one({"pid": pid, "level": "L1"})
+
+        # L2: judgement-level overrides
+        l2_docs = list(sc.icu_manual_override.find({
+            "level": "L2",
+            "override_key": {"$regex": f"^L2\\|{exclusion_key}\\|"},
+        }))
+        l2_map = {}
+        for doc in l2_docs:
+            indicator_id = doc.get("indicator_id")
+            if indicator_id:
+                l2_map[indicator_id] = doc
+
+        # L3: sofa-component-level overrides
+        l3_docs = list(sc.icu_manual_override.find({
+            "level": "L3",
+            "override_key": {"$regex": f"^L3\\|{exclusion_key}\\|"},
+        }))
+        l3_map = {}
+        for doc in l3_docs:
+            indicator_id = doc.get("indicator_id")
+            if indicator_id:
+                l3_map[indicator_id] = doc
+
+        return {"L1": l1, "L2": l2_map, "L3": l3_map}
+    except Exception:
+        return {"L1": None, "L2": {}, "L3": {}}
+
+
+def delete_override(override_key: str) -> dict:
+    """删除覆盖记录。"""
+    try:
+        sc = get_client("SmartCare")["SmartCare"]
+    except Exception as exc:
+        return {"ok": False, "error": f"SmartCare 连接失败: {exc}"}
+    try:
+        result = sc.icu_manual_override.delete_one({"override_key": override_key})
+        return {"ok": True, "deleted": result.deleted_count}
+    except Exception as exc:
+        return {"ok": False, "error": str(exc)}
+
+
+def get_override_stats(dept_codes: list, start_date: str, end_date: str) -> dict:
+    """
+    获取覆盖统计。
+
+    Returns:
+        {
+            "total_overrides": int,
+            "by_level": {"L1": int, "L2": int, "L3": int},
+            "by_reason": {reason_code: count, ...},
+        }
+    """
+    try:
+        sc = get_client("SmartCare")["SmartCare"]
+    except Exception:
+        return {"total_overrides": 0, "by_level": {}, "by_reason": {}}
+
+    from datetime import datetime as dt
+    start_dt = dt.fromisoformat(start_date)
+    end_dt = dt.fromisoformat(end_date)
+
+    try:
+        pipeline = [
+            {"$match": {
+                "created_at": {"$gte": start_dt, "$lte": end_dt},
+            }},
+            {"$group": {
+                "_id": {"level": "$level", "reason": "$reason_code"},
+                "count": {"$sum": 1},
+            }},
+        ]
+        results = list(sc.icu_manual_override.aggregate(pipeline))
+
+        by_level = {"L1": 0, "L2": 0, "L3": 0}
+        by_reason = {}
+        total = 0
+
+        for r in results:
+            level = r["_id"].get("level")
+            reason = r["_id"].get("reason")
+            count = r["count"]
+            total += count
+            if level in by_level:
+                by_level[level] += count
+            if reason:
+                by_reason[reason] = by_reason.get(reason, 0) + count
+
+        return {
+            "total_overrides": total,
+            "by_level": by_level,
+            "by_reason": by_reason,
+        }
+    except Exception:
+        return {"total_overrides": 0, "by_level": {}, "by_reason": {}}
 
 
 def test_connections() -> dict:

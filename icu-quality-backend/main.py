@@ -98,7 +98,7 @@ def _cache_set(key, val):
 
 DETAIL_CACHE_COLLECTION = "icu_indicator_detail_cache"
 # 缓存版本号：修改口径时 +1，旧条目自然失效
-CACHE_VERSION = 3
+CACHE_VERSION = 4
 
 
 def _dept_cache_key(dept_codes: list) -> str:
@@ -2429,6 +2429,86 @@ def remove_exclusion(code: str, exclusion_key: str, period: str = "", icu_unit: 
         except Exception:
             continue
     return {"error": "Database unavailable"}
+
+
+# ============================================================
+# Stage 7: 三层人工覆盖 API
+# ============================================================
+
+@app.get("/api/bundle/{pid}/overrides")
+def get_bundle_overrides(pid: str, level: str = None):
+    """获取患者的三层覆盖记录。"""
+    from db import get_overrides
+    docs = get_overrides(pid, level=level)
+    return {"overrides": docs}
+
+
+@app.post("/api/bundle/{pid}/overrides")
+def add_bundle_override(pid: str, body: dict = None):
+    """添加三层覆盖记录。"""
+    if not body:
+        return {"error": "Missing body"}
+    from db import save_override
+    body["pid"] = pid
+    result = save_override(body)
+    return result
+
+
+@app.delete("/api/bundle/overrides/{override_key}")
+def remove_bundle_override(override_key: str):
+    """删除三层覆盖记录。"""
+    from db import delete_override
+    result = delete_override(override_key)
+    return result
+
+
+@app.get("/api/bundle/override-stats")
+def bundle_override_stats(period: str, icu_unit: str = "all"):
+    """获取覆盖统计。"""
+    from db import get_override_stats
+    year, month = period.split("-")
+    import calendar
+    end_day = calendar.monthrange(int(year), int(month))[1]
+    start = f"{year}-{month}-01"
+    end = f"{year}-{month}-{end_day:02d}"
+    dept_codes = _resolve_dept_codes(icu_unit)
+    result = get_override_stats(dept_codes, start, end)
+    return result
+
+
+# ============================================================
+# Stage 6: 感染部位 API
+# ============================================================
+
+@app.get("/api/bundle/{pid}/infection-site")
+def get_bundle_infection_site(pid: str):
+    """获取患者的感染部位记录。"""
+    from db import get_infection_site
+    docs = get_infection_site(pid)
+    return {"sites": docs}
+
+
+@app.post("/api/bundle/{pid}/infection-site")
+def add_bundle_infection_site(pid: str, body: dict = None):
+    """添加感染部位记录。"""
+    if not body:
+        return {"error": "Missing body"}
+    from db import save_infection_site
+    result = save_infection_site(
+        pid=pid,
+        infection_site=body.get("infection_site", ""),
+        eval_time=body.get("eval_time", datetime.utcnow()),
+        operator=body.get("operator", "system"),
+    )
+    return result
+
+
+@app.delete("/api/bundle/{pid}/infection-site/{exclusion_key}")
+def remove_bundle_infection_site(pid: str, exclusion_key: str):
+    """删除感染部位记录。"""
+    from db import delete_infection_site
+    result = delete_infection_site(pid, exclusion_key)
+    return result
 
 
 class TriTubeConfirmPayload(BaseModel):
