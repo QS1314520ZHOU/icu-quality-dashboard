@@ -63,14 +63,10 @@ def _convert_to_classic_canonical(
         # 已经是经典 SOFA 标准单位
         return value, None
 
-    # 尝试转换
-    key = (normalized, "umol/l")
-    if key in _UNIT_CONVERSION:
-        return _UNIT_CONVERSION[key](value), None
-
+    # 需求文档 7.3 第 2、13 条: 单位不在白名单 → 拒绝，不做跨 variant 转换
     return None, (
-        f"单位 '{unit}' 不在经典 SOFA {substance} 白名单 {allowed} 内, "
-        f"且无已知转换路径. 禁止静默回退."
+        f"单位 '{unit}' 不在经典 SOFA {substance} 白名单 {allowed} 内. "
+        f"经典 SOFA 仅接受 μmol/L, 禁止从 mg/dL 转换."
     )
 
 
@@ -291,11 +287,11 @@ def _calc_cardiovascular(
                     dose = raw_dose * 1000 / weight_kg
         if dose is not None and dose > 0:
             dose_known = True
-            if "去甲" in med_name or "norepinephrine" in med_name:
+            if "去甲" in med_name or "norepinephrine" in med_name or med_name == "ne":
                 ne_dose_ugkgmin = max(ne_dose_ugkgmin, dose)
-            elif "肾上腺" in med_name or "epinephrine" in med_name:
+            elif "肾上腺" in med_name or "epinephrine" in med_name or med_name == "epi":
                 epi_dose_ugkgmin = max(epi_dose_ugkgmin, dose)
-            elif "多巴胺" in med_name or "dopamine" in med_name:
+            elif "多巴胺" in med_name or "dopamine" in med_name or med_name == "dopa":
                 dopa_dose_ugkgmin = max(dopa_dose_ugkgmin, dose)
 
     # 检查 MAP
@@ -525,7 +521,7 @@ def compute_sofa_classic(
     if eval_time.tzinfo is None:
         raise ValueError("eval_time 必须有时区信息")
 
-    flags: List[str] = {}
+    flags: List[str] = []
     components: Dict[str, Any] = {}
     info: Dict[str, Any] = {}
 

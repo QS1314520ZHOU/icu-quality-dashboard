@@ -54,7 +54,7 @@ def _convert_to_sofa2_canonical(
         return value, None
 
     # 尝试转换: umol/l → mg/dl
-    key = (normalized, "mg/dl")
+    key = (substance, normalized, "mg/dl")
     if key in _UNIT_CONVERSION:
         return _UNIT_CONVERSION[key](value), None
 
@@ -385,11 +385,11 @@ def _calc_cardiovascular(
                     dose = raw_dose * 1000 / weight_kg
         if dose is not None and dose > 0:
             dose_known = True
-            if "去甲" in med_name or "norepinephrine" in med_name:
+            if "去甲" in med_name or "norepinephrine" in med_name or med_name == "ne":
                 ne_dose_ugkgmin = max(ne_dose_ugkgmin, dose)
-            elif "肾上腺" in med_name or "epinephrine" in med_name:
+            elif "肾上腺" in med_name or "epinephrine" in med_name or med_name == "epi":
                 epi_dose_ugkgmin = max(epi_dose_ugkgmin, dose)
-            elif "多巴胺" in med_name or "dopamine" in med_name:
+            elif "多巴胺" in med_name or "dopamine" in med_name or med_name == "dopa":
                 dopa_dose_ugkgmin = max(dopa_dose_ugkgmin, dose)
             else:
                 has_other_pressor = True

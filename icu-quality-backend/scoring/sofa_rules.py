@@ -308,20 +308,20 @@ _CANONICAL_UNITS = {
     },
 }
 
-# 单位转换因子
+# 单位转换因子 — 三元组 key: (substance, from_unit, to_unit)
 _UNIT_CONVERSION = {
-    # bilirubin: μmol/L → mg/dL
-    ("umol/l", "mg/dl"): lambda v: v / 17.104,
-    ("μmol/l", "mg/dl"): lambda v: v / 17.104,
-    ("micromol/l", "mg/dl"): lambda v: v / 17.104,
-    ("微摩尔/升", "mg/dl"): lambda v: v / 17.104,
-    # bilirubin: mg/dL → μmol/L
-    ("mg/dl", "umol/l"): lambda v: v * 17.104,
-    # creatinine: μmol/L → mg/dL
-    ("umol/l", "mg/dl"): lambda v: v / 88.4,
-    ("μmol/l", "mg/dl"): lambda v: v / 88.4,
-    ("micromol/l", "mg/dl"): lambda v: v / 88.4,
-    ("微摩尔/升", "mg/dl"): lambda v: v / 88.4,
-    # creatinine: mg/dL → μmol/L
-    ("mg/dl", "umol/l"): lambda v: v * 88.4,
+    # bilirubin: μmol/L → mg/dL (÷17.104)
+    ("bilirubin", "umol/l", "mg/dl"): lambda v: v / 17.104,
+    ("bilirubin", "μmol/l", "mg/dl"): lambda v: v / 17.104,
+    ("bilirubin", "micromol/l", "mg/dl"): lambda v: v / 17.104,
+    ("bilirubin", "微摩尔/升", "mg/dl"): lambda v: v / 17.104,
+    # bilirubin: mg/dL → μmol/L (×17.104)
+    ("bilirubin", "mg/dl", "umol/l"): lambda v: v * 17.104,
+    # creatinine: μmol/L → mg/dL (÷88.4)
+    ("creatinine", "umol/l", "mg/dl"): lambda v: v / 88.4,
+    ("creatinine", "μmol/l", "mg/dl"): lambda v: v / 88.4,
+    ("creatinine", "micromol/l", "mg/dl"): lambda v: v / 88.4,
+    ("creatinine", "微摩尔/升", "mg/dl"): lambda v: v / 88.4,
+    # creatinine: mg/dL → μmol/L (×88.4)
+    ("creatinine", "mg/dl", "umol/l"): lambda v: v * 88.4,
 }
