@@ -331,6 +331,12 @@ def _calc_cardiovascular(
     info["dose_known"] = dose_known
     info["ne_dose_ugkgmin"] = ne_dose_ugkgmin
     info["map_value"] = map_val
+
+    # 无升压药且无 MAP 数据 → 无法评估心血管
+    if not has_active_pressor and map_val is None:
+        info["cardiovascular_missing"] = True
+        return None, info
+
     return score, info
 
 

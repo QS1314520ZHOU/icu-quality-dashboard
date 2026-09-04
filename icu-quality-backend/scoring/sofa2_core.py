@@ -420,6 +420,7 @@ def _calc_cardiovascular(
         score = max(score, 2)
 
     # MAP<70 且无升压药 → 1
+    map_val = None
     if not has_active_pressor:
         map_val, _, _ = _worst_in_window(obs, ["MAP", "mean_arterial_pressure"], eval_time, 24, 1)
         info["map_value"] = map_val
@@ -433,6 +434,12 @@ def _calc_cardiovascular(
     info["has_active_pressor"] = has_active_pressor
     info["dose_known"] = dose_known
     info["ne_epi_sum"] = ne_epi_sum
+
+    # 无升压药且无 MAP 数据 → 无法评估心血管
+    if not has_active_pressor and map_val is None:
+        info["cardiovascular_missing"] = True
+        return None, info
+
     return score, info
 
 

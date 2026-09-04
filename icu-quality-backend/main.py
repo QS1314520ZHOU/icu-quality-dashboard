@@ -2450,6 +2450,15 @@ def add_bundle_override(pid: str, body: dict = None):
         return {"error": "Missing body"}
     from db import save_override
     body["pid"] = pid
+    # 解析 eval_time
+    eval_time_raw = body.get("eval_time")
+    if isinstance(eval_time_raw, str):
+        try:
+            body["eval_time"] = datetime.fromisoformat(eval_time_raw.replace("Z", "+00:00"))
+        except ValueError:
+            body["eval_time"] = datetime.utcnow()
+    elif not isinstance(eval_time_raw, datetime):
+        body["eval_time"] = datetime.utcnow()
     result = save_override(body)
     return result
 
@@ -2494,10 +2503,20 @@ def add_bundle_infection_site(pid: str, body: dict = None):
     if not body:
         return {"error": "Missing body"}
     from db import save_infection_site
+    eval_time_raw = body.get("eval_time")
+    if isinstance(eval_time_raw, str):
+        try:
+            eval_time = datetime.fromisoformat(eval_time_raw.replace("Z", "+00:00"))
+        except ValueError:
+            eval_time = datetime.utcnow()
+    elif isinstance(eval_time_raw, datetime):
+        eval_time = eval_time_raw
+    else:
+        eval_time = datetime.utcnow()
     result = save_infection_site(
         pid=pid,
         infection_site=body.get("infection_site", ""),
-        eval_time=body.get("eval_time", datetime.utcnow()),
+        eval_time=eval_time,
         operator=body.get("operator", "system"),
     )
     return result
