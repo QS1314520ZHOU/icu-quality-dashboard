@@ -89,7 +89,7 @@ export const INDICATORS = [
   },
   {
     code: 'ICU-08', name: '中重度ARDS俯卧位通气实施率', type: 'ratio', unit: '%',
-    numerator: '实施俯卧位通气人数', denominator: '应实施人数(PEEP≥5,OI≤150)',
+    numerator: '实施俯卧位通气人数', denominator: '应实施人数(PEEP≥5,P/F<150)',
     multiplier: 100, direction: 'higher_better',
     thresholds: { good: [80, 100], warn: [60, 100] },
     meaning: '反映ARDS规范治疗', chart: 'gauge',

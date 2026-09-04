@@ -11,6 +11,7 @@ import time as time_module
 import threading
 import uuid
 import summary as summary_module
+import calendar
 from pathlib import Path
 from fastapi.staticfiles import StaticFiles
 from starlette.responses import FileResponse
@@ -96,6 +97,8 @@ def _cache_set(key, val):
 
 
 DETAIL_CACHE_COLLECTION = "icu_indicator_detail_cache"
+# 缓存版本号：修改口径时 +1，旧条目自然失效
+CACHE_VERSION = 3
 
 
 def _dept_cache_key(dept_codes: list) -> str:
@@ -249,6 +252,7 @@ def _read_detail_cache(dept_codes: list, period: str, code: str, part: str):
         "period": period,
         "code": code,
         "part": part,
+        "cache_version": CACHE_VERSION,
     }, {"_id": 0})
     if not doc:
         return None
@@ -265,6 +269,7 @@ def _write_detail_cache(dept_codes: list, period: str, code: str, part: str, ite
             "period": period,
             "code": code,
             "part": part,
+            "cache_version": CACHE_VERSION,
         },
         {
             "$set": {
@@ -272,6 +277,7 @@ def _write_detail_cache(dept_codes: list, period: str, code: str, part: str, ite
                 "period": period,
                 "code": code,
                 "part": part,
+                "cache_version": CACHE_VERSION,
                 "patients": items,
                 "count": len(items),
                 "updated_at": datetime.utcnow(),
@@ -415,7 +421,7 @@ SOURCE_DESC = {
     "ICU-05-6h": {"numerator": "6h内完成bundle患者数", "denominator": "确诊感染性休克患者数"},
     "ICU-06": {"numerator": "首剂抗菌药前完成病原学送检(培养/镜检/免疫/分子)的患者数", "denominator": "以治疗为目的使用抗菌药的患者数(已剔除围术期/短疗程预防)"},
     "ICU-07": {"numerator": "实施物理或药物DVT预防措施的患者数", "denominator": "同期入住ICU的所有患者数"},
-    "ICU-08": {"numerator": "实施俯卧位通气治疗的患者数", "denominator": "满足PEEP≥5且OI≤150的ARDS患者数"},
+    "ICU-08": {"numerator": "实施俯卧位通气治疗的患者数", "denominator": "满足PEEP≥5且P/F<150的ARDS患者数"},
     "ICU-09": {"numerator": "进行镇痛评分(NRS/CPOT/BPS)测定的患者数", "denominator": "同期入住ICU的所有患者数"},
     "ICU-10": {"numerator": "进行镇静评分(RASS/SAS)测定的患者数", "denominator": "同期入住ICU的所有患者数"},
     "ICU-11": {"numerator": "实际死亡患者总数", "denominator": "预计死亡概率(SMR公式计算)累计总和"},
@@ -498,7 +504,7 @@ def _calc_value(code: str, numerator: float, denominator: float) -> float:
 def _live_summary_row(code: str, period: str, icu_unit: str) -> dict | None:
     year, month = period.split("-")
     start_date = f"{year}-{month}-01"
-    end_day = 31 if int(month) in [1,3,5,7,8,10,12] else (30 if int(month) != 2 else 28)
+    end_day = calendar.monthrange(int(year), int(month))[1]
     end_date = f"{year}-{month}-{end_day:02d}"
     dept_codes = _resolve_dept_codes(icu_unit)
 
@@ -637,7 +643,7 @@ def query_summary(period: str, icu_unit: str = "all"):
     # 计算当月的起止日期
     year, month = period.split("-")
     start_date = f"{year}-{month}-01"
-    end_day = 31 if int(month) in [1,3,5,7,8,10,12] else (30 if int(month) != 2 else 28)
+    end_day = calendar.monthrange(int(year), int(month))[1]
     end_date = f"{year}-{month}-{end_day:02d}"
 
     # ----- ICU-01 分母：从 MongoDB 取真实床位日数 -----
@@ -860,9 +866,10 @@ def query_detail(code: str, period: str, part: str, icu_unit: str = "all"):
     ICU-01 分母 → 床位配置明细
     其他指标 → 患者明细
     """
+    import calendar
     year, month = period.split("-")
     start_date = f"{year}-{month}-01"
-    end_day = 31 if int(month) in [1,3,5,7,8,10,12] else (30 if int(month) != 2 else 28)
+    end_day = calendar.monthrange(int(year), int(month))[1]
     end_date = f"{year}-{month}-{end_day:02d}"
 
     from datetime import datetime as dt, timedelta
@@ -1762,10 +1769,7 @@ def _periods_between(start_period: str, end_period: str = "") -> list:
 
 
 def _month_end_day(year: int, month: int) -> int:
-    if month == 2:
-        leap = year % 4 == 0 and (year % 100 != 0 or year % 400 == 0)
-        return 29 if leap else 28
-    return 31 if month in [1, 3, 5, 7, 8, 10, 12] else 30
+    return calendar.monthrange(year, month)[1]
 
 
 def _aggregate_dashboard_rows(dept_codes: list, periods: list, icu_unit: str) -> tuple[list, dict]:
@@ -2246,9 +2250,9 @@ def indicator_detail(code: str, period: str, part: str, icu_unit: str = "all", e
 
         # 跨月分母：重算总天数和名称
         if code == "ICU-01" and part == "denominator":
+            import calendar
             total_days = sum(
-                31 if int(m.split("-")[1]) in [1,3,5,7,8,10,12]
-                else (30 if int(m.split("-")[1]) != 2 else 28)
+                calendar.monthrange(int(m.split("-")[0]), int(m.split("-")[1]))[1]
                 for m in months
             )
             # 取床位数
@@ -2445,9 +2449,10 @@ def tri_tube_warnings(period: str, icu_unit: str = "all", min_hours: int = 48, n
     if cached is not None:
         return cached
 
+    import calendar
     year, month = period.split("-")
     start_date = f"{year}-{month}-01"
-    end_day = 31 if int(month) in [1,3,5,7,8,10,12] else (30 if int(month) != 2 else 28)
+    end_day = calendar.monthrange(int(year), int(month))[1]
     end_date = f"{year}-{month}-{end_day:02d}"
     dept_codes = _resolve_dept_codes(icu_unit)
     items = get_tri_tube_suspected_warnings(dept_codes, start_date, end_date, min_hours=min_hours)

@@ -50,6 +50,30 @@ def build_exclusion_key(pid: str, event_time) -> str:
     return pid + "|" + ts
 
 
+# ==== 统计窗口交集化 ====
+# 缺陷根源:分母限定统计月,分子却放开整段住院期。
+# 任何"当月是否发生过某事件"的查询,时间条件都必须来自本函数。
+def _month_window(pat, start_dt, end_dt):
+    """返回患者 pat 在统计月内的有效观察窗口 [win_start, win_end]。
+
+    win_start = max(月初 00:00:00, icuAdmissionTime)
+    win_end   = min(月末 23:59:59, icuDischargeTime)  未出科取月末,绝不用 now()
+
+    若返回的 win_start > win_end,表示该患者本月不在科,调用方必须 continue。
+    """
+    month_start = start_dt
+    month_end = datetime(end_dt.year, end_dt.month, end_dt.day, 23, 59, 59)
+
+    admit = pat.get("icuAdmissionTime")
+    win_start = max(month_start, admit) if isinstance(admit, datetime) else month_start
+
+    discharge = pat.get("icuDischargeTime")
+    # 关键:未出科 -> 取月末,不是 datetime.now()
+    win_end = min(month_end, discharge) if isinstance(discharge, datetime) else month_end
+
+    return win_start, win_end
+
+
 # ============================================================
 # 数据库连接配置
 # ============================================================
@@ -758,20 +782,20 @@ def is_invasive_by_o2route(raw_route: str) -> tuple:
 
 
 # ============================================================
-# ICU-08：中重度ARDS俯卧位实施率 分母 — P/F ≤150 且 PEEP≥5 且有创通气
+# ICU-08：中重度ARDS俯卧位实施率 分母 — P/F <150 且 PEEP≥5 且有创通气
 # ============================================================
 
 def get_ards_denominator(dept_codes: list, start_date: str, end_date: str,
                          peep_threshold: float = 5.0, oi_threshold: float = 150.0,
                          time_tolerance_min: int = 60) -> dict:
     """
-    ICU-08 分母：中重度ARDS患者（PEEP≥5 且 P/F≤150）。
+    ICU-08 分母：中重度ARDS患者（PEEP≥5 且 P/F<150）。
 
     【取数逻辑】
     1. 从 bGATemp 表取 code='param_bg_P/Fratio' 且 bedsides.valid='valid' 的血气
-    2. 每条血气按 pid 关联 bedside 表，向前找最近一条 code='param_vent_peep'
-       且 valid=true 且时间在 ±time_tolerance_min 分钟内的 PEEP 记录
-    3. 配对后判定：strVal≥peep_threshold 且 fVal≤oi_threshold
+    2. 每条血气按 pid 关联 bedside 表，向前回溯 time_tolerance_min 分钟找最近一条
+       code='param_vent_peep' 且 valid=true 的 PEEP 记录（不向后取值）
+    3. 配对后判定：strVal≥peep_threshold 且 fVal<oi_threshold
     4. 同一 pid 在统计期内首次满足条件即纳入分母
 
     关联字段：
@@ -917,17 +941,27 @@ def get_ards_denominator(dept_codes: list, start_date: str, end_date: str,
     return result
 
 
-def get_ards_prone_numerator(den_patients: list, dept_codes: list) -> dict:
+def get_ards_prone_numerator(den_patients: list, dept_codes: list,
+                             start_date: str, end_date: str) -> dict:
     """
-    ICU-08 分子：分母患者中，住院期间存在俯卧位记录的住院数。
+    ICU-08 分子：分母患者中，统计月内存在俯卧位记录的患者数。
 
     判据：bedside 表 code=param_TiWei, strVal 包含"俯卧位",
-          valid=true, time 落在该次住院的入科~出科区间内。
+          valid=true, time 落在统计月与住院期的交集窗口内。
+
+    参数:
+      den_patients: 分母患者列表，每项需含 pid, pf_time 等字段
+      dept_codes: 科室代码列表（预留，当前未使用）
+      start_date: 统计月起始日期 "YYYY-MM-DD"
+      end_date: 统计月结束日期 "YYYY-MM-DD"
 
     返回: {num_count, num_patients: [{pid, mrn, name, prone_times[]}]}
     """
     from datetime import datetime as dt
     from bson import ObjectId
+
+    start_dt = dt.fromisoformat(start_date)
+    end_dt = dt.fromisoformat(end_date)
 
     result = {"num_count": 0, "num_patients": []}
 
@@ -952,8 +986,15 @@ def get_ards_prone_numerator(den_patients: list, dept_codes: list) -> dict:
                 if not pat or not pat.get("icuAdmissionTime"):
                     continue
 
-                admit = pat["icuAdmissionTime"]
-                discharge = pat.get("icuDischargeTime") or dt.now()
+                # 使用交集窗口，未出科取月末，绝不用 now()
+                win_start, win_end = _month_window(pat, start_dt, end_dt)
+                if win_start > win_end:
+                    continue  # 本月不在科
+
+                # 俯卧位是对低氧的临床响应，必须晚于"让这个人进分母的那条血气"
+                pf_time = p.get("pf_time")
+                if isinstance(pf_time, dt):
+                    win_start = max(win_start, pf_time)
 
                 # 查俯卧位记录
                 prone_records = list(db.bedside.find(
@@ -962,7 +1003,7 @@ def get_ards_prone_numerator(den_patients: list, dept_codes: list) -> dict:
                         "code": "param_TiWei",
                         "valid": True,
                         "strVal": {"$regex": "俯卧位"},
-                        "time": {"$gte": admit, "$lte": discharge},
+                        "time": {"$gte": win_start, "$lte": win_end},
                     },
                     {"strVal": 1, "time": 1},
                 ).sort("time", 1).limit(50))
@@ -1003,12 +1044,14 @@ def get_icu08_data(dept_codes: list, start_date: str, end_date: str,
       高流量: 氧疗途径=高流量 且 吸氧流速≥30L/min 且 P/F≤200
     三臂按 pid 去重取并集。
 
-    分子：分母患者住院期间有 param_TiWei 含"俯卧位"记录。
+    分子：分母患者统计月内有 param_TiWei 含"俯卧位"记录。
 
     返回: {den_count, num_count, den_patients, num_patients}
     """
     from datetime import datetime as dt, timedelta
     from bson import ObjectId
+
+    logger.info("[ICU-08] window=%s ~ %s dept=%s", start_date, end_date, dept_codes)
 
     # 有创氧疗途径
     INVASIVE_ROUTES = {"管辅", "切辅", "管氧", "切氧", "管文", "切文", "管高", "切高", "有创"}
@@ -1120,8 +1163,15 @@ def get_icu08_data(dept_codes: list, start_date: str, end_date: str,
             logger.warning("DB %s failed in get_icu08_data: %s", db_name, _exc)
             continue
 
-    # 分子：住院期间俯卧位
-    num_result = get_ards_prone_numerator(den_patients, dept_codes)
+    # 分子：统计月与住院期交集窗口内的俯卧位
+    num_result = get_ards_prone_numerator(den_patients, dept_codes, start_date, end_date)
+
+    # 窗口自检：分子不得大于分母
+    if num_result["num_count"] > len(den_patients):
+        logger.warning("[ICU-08] 分子(%d) 大于 分母(%d),窗口口径异常,已截断",
+                       num_result["num_count"], len(den_patients))
+        num_result["num_count"] = len(den_patients)
+
     return {
         "den_count": len(den_patients),
         "num_count": num_result["num_count"],
@@ -2298,13 +2348,12 @@ def get_icu09_data(dept_codes: list, start_date: str, end_date: str) -> dict:
                     if spid not in den_pids_obj:
                         continue
 
-                    # 时间窗口：评估必须在本次 ICU 住院期间
+                    # 时间窗口：评估必须在本次 ICU 住院期间（交集窗口）
                     p = pat_by_strpid.get(spid)
                     at = doc.get("time")
                     if p and at:
-                        admit = p.get("icuAdmissionTime")
-                        discharge = p.get("icuDischargeTime") or end_dt_wide
-                        if at < admit or at > discharge:
+                        win_start, win_end = _month_window(p, start_dt, end_dt)
+                        if at < win_start or at > win_end:
                             continue
 
                     # 取评分值：优先 strVal，无则 history[].desc
@@ -2352,13 +2401,12 @@ def get_icu09_data(dept_codes: list, start_date: str, end_date: str) -> dict:
                         spid = doc.get("pid", "")
                         if spid not in den_pids_obj:
                             continue
-                        # 时间窗口
+                        # 时间窗口（交集窗口）
                         p = pat_by_strpid.get(spid)
                         at = doc.get("time")
                         if p and at:
-                            admit = p.get("icuAdmissionTime")
-                            discharge = p.get("icuDischargeTime") or end_dt_wide
-                            if at < admit or at > discharge:
+                            win_start, win_end = _month_window(p, start_dt, end_dt)
+                            if at < win_start or at > win_end:
                                 continue
                         stype = doc.get("scoreType", "painScore")
                         if spid not in b_pids:
@@ -2494,13 +2542,12 @@ def get_icu10_data(dept_codes: list, start_date: str, end_date: str) -> dict:
                     spid = doc.get("pid", "")
                     if spid not in den_pids_obj:
                         continue
-                    # 时间窗口：评估必须在本次 ICU 住院期间
+                    # 时间窗口：评估必须在本次 ICU 住院期间（交集窗口）
                     p = pat_by_strpid.get(spid)
                     at = doc.get("time")
                     if p and at:
-                        admit = p.get("icuAdmissionTime")
-                        discharge = p.get("icuDischargeTime") or end_dt_wide
-                        if at < admit or at > discharge:
+                        win_start, win_end = _month_window(p, start_dt, end_dt)
+                        if at < win_start or at > win_end:
                             continue
                     # RASS 值: strVal="-4"~"+4", fVal=-4.0~4.0
                     val = (doc.get("strVal") or "").strip()
@@ -2537,13 +2584,12 @@ def get_icu10_data(dept_codes: list, start_date: str, end_date: str) -> dict:
                         spid = doc.get("pid", "")
                         if spid not in den_pids_obj:
                             continue
-                        # 时间窗口
+                        # 时间窗口（交集窗口）
                         p = pat_by_strpid.get(spid)
                         at = doc.get("time")
                         if p and at:
-                            admit = p.get("icuAdmissionTime")
-                            discharge = p.get("icuDischargeTime") or end_dt_wide
-                            if at < admit or at > discharge:
+                            win_start, win_end = _month_window(p, start_dt, end_dt)
+                            if at < win_start or at > win_end:
                                 continue
                         if spid not in b_pids:
                             b_pids.add(spid)
