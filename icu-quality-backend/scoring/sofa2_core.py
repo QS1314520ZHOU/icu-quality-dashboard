@@ -16,7 +16,7 @@ import re
 from datetime import datetime, timedelta, timezone
 from typing import Any, Dict, List, Optional, Tuple
 
-from .sofa_rules import SOFA2_THRESHOLDS as _TH
+from .sofa_rules import SOFA2_THRESHOLDS as _TH, _UNIT_CONVERSION
 from .adapter import ne_ugkgmin as _ne_ugkgmin, canon_drug  # noqa: F401 — 唯一换算点引用
 from .missing_policy import apply_policy as _apply_policy
 import config.indicator_windows as _cfg
@@ -83,6 +83,103 @@ def _score_from_thresholds(
         if t["low"] <= value < t["high"]:
             return int(t["score"])
     return None
+
+
+def _range_ok(value: float, guard: Optional[Tuple[float, float]]) -> bool:
+    """检查值是否在 range_guard 范围内。guard=None 视为通过。"""
+    if guard is None:
+        return True
+    lo, hi = guard
+    return lo <= value <= hi
+
+
+def _apply_stale_policy(is_stale: bool, value: Optional[float], info: dict, organ: str) -> Optional[float]:
+    """
+    #11: 陈旧度策略统一处理。
+    flag_only: 打标记照常出分
+    reject: 返回 None
+    """
+    if not is_stale or value is None:
+        return value
+    policy = _cfg.SOFA_STALE_POLICY
+    info[f"{organ}_stale"] = True
+    if policy == "reject":
+        return None
+    return value
+
+
+def _urine_in_window(
+    obs: List[dict],
+    codes: List[str],
+    eval_time: datetime,
+    lookback_h: int,
+    max_staleness_h: int,
+) -> Tuple[Optional[float], Optional[str], Optional[datetime], Optional[bool]]:
+    """
+    #20: 尿量聚合结构性返工。
+    收集窗口内全部尿量记录，按单位分组后决定聚合方式：
+    - ml/24h, ml/24hr, ml/24 hr -> 取时间最近一条，不求和
+    - ml/h, ml/hr             -> 取时间最近一条，不求和
+    - ml/kg/h, ml/kg/hr       -> 取时间最近一条，不求和
+    - ml, 毫升                 -> 求和（单次增量才允许累加）
+    - 其他                     -> 返回 None + urine_unit_unknown
+    若窗口内同时出现两种以上单位组，返回 None 并打 info["urine_mixed_units"]
+    返回 (value, unit, ts, is_stale)
+    """
+    window_start = eval_time - timedelta(hours=lookback_h)
+    candidates = []
+    for o in obs:
+        code = (o.get("code") or o.get("item_name") or "").strip()
+        if code not in codes:
+            continue
+        raw_val = o.get("value_number")
+        if raw_val is None:
+            continue
+        ts = o.get("observed_at")
+        if not isinstance(ts, datetime):
+            continue
+        if ts.tzinfo is None:
+            ts = ts.replace(tzinfo=timezone.utc)
+        if ts < window_start or ts > eval_time:
+            continue
+        candidates.append((float(raw_val), o.get("unit", ""), ts))
+
+    if not candidates:
+        return None, None, None, None
+
+    # 按单位分组
+    from collections import defaultdict
+    unit_groups: Dict[str, list] = defaultdict(list)
+    for val, unit, ts in candidates:
+        normalized = _normalize_unit(unit)
+        unit_groups[normalized].append((val, unit, ts))
+
+    # 检查是否混合单位
+    if len(unit_groups) > 1:
+        mixed_units = list(unit_groups.keys())
+        return None, None, None, None  # 调用方需打 urine_mixed_units
+
+    # 单一单位组
+    normalized_u = list(unit_groups.keys())[0]
+    group = unit_groups[normalized_u]
+
+    # 决定聚合方式
+    if normalized_u in ("ml/24h", "ml/24 hr", "ml/24hr", "ml/h", "ml/hr", "ml/kg/h", "ml/kg/hr"):
+        # 速率或日汇总 → 取时间最近一条
+        group.sort(key=lambda x: x[2], reverse=True)
+        best_val, best_unit, best_ts = group[0]
+    elif normalized_u in ("ml", "毫升"):
+        # 纯 ml（单次增量）→ 求和
+        best_val = sum(x[0] for x in group)
+        best_ts = max(x[2] for x in group)
+        best_unit = [x[1] for x in group if x[2] == best_ts][0]
+    else:
+        # 未知单位
+        return None, None, None, None
+
+    staleness = (eval_time - best_ts).total_seconds() / 3600.0
+    is_stale = staleness > max_staleness_h if max_staleness_h > 0 else False
+    return best_val, best_unit, best_ts, is_stale
 
 
 # -----------------------------------------------------------
@@ -234,6 +331,9 @@ def _calc_respiratory(
                 fio2 = val_fio2 / 100.0 if val_fio2 > 1.0 else val_fio2
                 sf_ratio = val_spo2 / fio2
                 score = _score_from_thresholds(sf_ratio, _TH["respiratory"]["sf_thresholds"])
+                if score is None:
+                    info["value_out_of_all_bands"] = True
+                    return None, info
                 if score >= 3 and not has_advanced_support:
                     score = 2
                 info["spo2_fio2_ratio"] = sf_ratio
@@ -242,6 +342,9 @@ def _calc_respiratory(
             return None, info
 
     score = _score_from_thresholds(ratio, _TH["respiratory"]["pf_thresholds"])
+    if score is None:
+        info["value_out_of_all_bands"] = True
+        return None, info
     if score >= 3 and not has_advanced_support:
         score = 2
     info["pao2_fio2_ratio"] = ratio
@@ -266,6 +369,10 @@ def _calc_hemostasis(
         return None, info
     if is_stale:
         info["hemostasis_stale"] = True
+    # range_guard 守卫
+    if not _range_ok(val, _TH["hemostasis"].get("range_guard")):
+        info["hemostasis_out_of_range"] = val
+        return None, info
     return _score_from_thresholds(val, _TH["hemostasis"]["thresholds"]), info
 
 
@@ -436,37 +543,40 @@ def _calc_kidney(
     if val is not None:
         if is_stale:
             info["kidney_creatinine_stale"] = True
-        converted, err = _convert_to_sofa2_canonical(val, unit, "creatinine")
-        if err:
-            info["kidney_creatinine_unit_error"] = err
+        # range_guard 守卫 (换算前检查)
+        if not _range_ok(val, _TH["kidney"].get("range_guard_creatinine")):
+            info["kidney_creatinine_out_of_range"] = val
         else:
-            score_creat = _score_from_thresholds(
-                converted, _TH["kidney"]["creatinine_thresholds"]
-            )
+            converted, err = _convert_to_sofa2_canonical(val, unit, "creatinine")
+            if err:
+                info["kidney_creatinine_unit_error"] = err
+            else:
+                score_creat = _score_from_thresholds(
+                    converted, _TH["kidney"]["creatinine_thresholds"]
+                )
 
     # #20: 尿量按单位分流
-    val, unit, _, is_stale = _worst_in_window(
+    urine_val, urine_unit, urine_ts, urine_stale = _urine_in_window(
         obs, _TH["kidney"]["codes_urine"], eval_time,
         _TH["kidney"]["lookback_hours"],
         _TH["kidney"]["max_staleness_hours"],
-        agg="sum",
     )
-    if val is not None and weight_kg and weight_kg > 0:
-        if is_stale:
+    if urine_val is not None and weight_kg and weight_kg > 0:
+        if urine_stale:
             info["kidney_urine_stale"] = True
-        normalized_u = _normalize_unit(unit)
+        normalized_u = _normalize_unit(urine_unit)
         if normalized_u in ("ml/kg/h", "ml/kg/hr"):
-            rate_per_kg_h = val
+            rate_per_kg_h = urine_val
         elif normalized_u in ("ml/h", "ml/hr"):
-            rate_per_kg_h = val / weight_kg
+            rate_per_kg_h = urine_val / weight_kg
         elif normalized_u in ("ml/24h", "ml/24 hr", "ml/24hr"):
-            rate_per_kg_h = val / weight_kg / 24.0
+            rate_per_kg_h = urine_val / weight_kg / 24.0
             info["urine_coarse_24h"] = True
         elif normalized_u in ("ml", "毫升"):
             # #20: 纯 ml（单次增量）→ sum，转换为 ml/kg/h
-            rate_per_kg_h = val / weight_kg / 24.0  # 粗略转换
+            rate_per_kg_h = urine_val / weight_kg / 24.0  # 粗略转换
         else:
-            info["kidney_urine_unit_error"] = f"未知尿量单位: {unit}"
+            info["kidney_urine_unit_error"] = f"未知尿量单位: {urine_unit}"
             info.setdefault("data_quality_flags", []).append("urine_unit_unknown")
             rate_per_kg_h = None
 
@@ -580,7 +690,9 @@ def _calc_cardiovascular(
     # MAP<70 且无升压药 → 1
     map_val = None
     if not has_active_pressor:
-        map_val, _, _, _ = _worst_in_window(obs, ["MAP", "mean_arterial_pressure"], eval_time, _cfg.RESP_LOOKBACK_H, 1)
+        map_val, _, _, map_stale = _worst_in_window(obs, ["MAP", "mean_arterial_pressure"], eval_time, _cfg.RESP_LOOKBACK_H, 1)
+        # #11: 陈旧度策略
+        map_val = _apply_stale_policy(map_stale, map_val, info, "cardiovascular_map")
         info["map_value"] = map_val
         if map_val is not None and map_val < 70:
             score = max(score, 1)

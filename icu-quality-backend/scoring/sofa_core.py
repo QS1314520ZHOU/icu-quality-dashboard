@@ -92,6 +92,103 @@ def _score_from_thresholds(
     return None
 
 
+def _range_ok(value: float, guard: Optional[Tuple[float, float]]) -> bool:
+    """检查值是否在 range_guard 范围内。guard=None 视为通过。"""
+    if guard is None:
+        return True
+    lo, hi = guard
+    return lo <= value <= hi
+
+
+def _apply_stale_policy(is_stale: bool, value: Optional[float], info: dict, organ: str) -> Optional[float]:
+    """
+    #11: 陈旧度策略统一处理。
+    flag_only: 打标记照常出分
+    reject: 返回 None
+    """
+    if not is_stale or value is None:
+        return value
+    policy = _cfg.SOFA_STALE_POLICY
+    info[f"{organ}_stale"] = True
+    if policy == "reject":
+        return None
+    return value
+
+
+def _urine_in_window(
+    obs: List[dict],
+    codes: List[str],
+    eval_time: datetime,
+    lookback_h: int,
+    max_staleness_h: int,
+) -> Tuple[Optional[float], Optional[str], Optional[datetime], Optional[bool]]:
+    """
+    #20: 尿量聚合结构性返工。
+    收集窗口内全部尿量记录，按单位分组后决定聚合方式：
+    - ml/24h, ml/24hr, ml/24 hr -> 取时间最近一条，不求和
+    - ml/h, ml/hr             -> 取时间最近一条，不求和
+    - ml/kg/h, ml/kg/hr       -> 取时间最近一条，不求和
+    - ml, 毫升                 -> 求和（单次增量才允许累加）
+    - 其他                     -> 返回 None + urine_unit_unknown
+    若窗口内同时出现两种以上单位组，返回 None 并打 info["urine_mixed_units"]
+    返回 (value, unit, ts, is_stale)
+    """
+    window_start = eval_time - timedelta(hours=lookback_h)
+    candidates = []
+    for o in obs:
+        code = (o.get("code") or o.get("item_name") or "").strip()
+        if code not in codes:
+            continue
+        raw_val = o.get("value_number")
+        if raw_val is None:
+            continue
+        ts = o.get("observed_at")
+        if not isinstance(ts, datetime):
+            continue
+        if ts.tzinfo is None:
+            ts = ts.replace(tzinfo=timezone.utc)
+        if ts < window_start or ts > eval_time:
+            continue
+        candidates.append((float(raw_val), o.get("unit", ""), ts))
+
+    if not candidates:
+        return None, None, None, None
+
+    # 按单位分组
+    from collections import defaultdict
+    unit_groups: Dict[str, list] = defaultdict(list)
+    for val, unit, ts in candidates:
+        normalized = _normalize_unit(unit)
+        unit_groups[normalized].append((val, unit, ts))
+
+    # 检查是否混合单位
+    if len(unit_groups) > 1:
+        mixed_units = list(unit_groups.keys())
+        return None, None, None, None  # 调用方需打 urine_mixed_units
+
+    # 单一单位组
+    normalized_u = list(unit_groups.keys())[0]
+    group = unit_groups[normalized_u]
+
+    # 决定聚合方式
+    if normalized_u in ("ml/24h", "ml/24 hr", "ml/24hr", "ml/h", "ml/hr", "ml/kg/h", "ml/kg/hr"):
+        # 速率或日汇总 → 取时间最近一条
+        group.sort(key=lambda x: x[2], reverse=True)
+        best_val, best_unit, best_ts = group[0]
+    elif normalized_u in ("ml", "毫升"):
+        # 纯 ml（单次增量）→ 求和
+        best_val = sum(x[0] for x in group)
+        best_ts = max(x[2] for x in group)
+        best_unit = [x[1] for x in group if x[2] == best_ts][0]
+    else:
+        # 未知单位
+        return None, None, None, None
+
+    staleness = (eval_time - best_ts).total_seconds() / 3600.0
+    is_stale = staleness > max_staleness_h if max_staleness_h > 0 else False
+    return best_val, best_unit, best_ts, is_stale
+
+
 # -----------------------------------------------------------
 # 辅助: 从观测列表中找窗口内最差值
 # -----------------------------------------------------------
@@ -181,12 +278,12 @@ def _worst_pf_pair_in_window(
     # 收集窗口内全部候选
     pao2_candidates = []
     fio2_candidates = []
-    for obs in obs:
-        code = (obs.get("code") or obs.get("item_name") or "").strip()
-        raw_val = obs.get("value_number")
+    for o in obs:
+        code = (o.get("code") or o.get("item_name") or "").strip()
+        raw_val = o.get("value_number")
         if raw_val is None:
             continue
-        ts = obs.get("observed_at")
+        ts = o.get("observed_at")
         if not isinstance(ts, datetime):
             continue
         if ts.tzinfo is None:
@@ -257,6 +354,9 @@ def _calc_respiratory(
         ratio, ts_pao2, ts_fio2 = pair
 
     score = _score_from_thresholds(ratio, _TH["respiratory"]["thresholds"])
+    if score is None:
+        info["value_out_of_all_bands"] = True
+        return None, info
 
     # 需求文档 7.3 第 12 条: 经典 SOFA score=3 或 4 需机械通气门控
     if score >= 3 and not has_advanced_support:
@@ -284,6 +384,10 @@ def _calc_coagulation(
         return None, info
     if is_stale:
         info["coagulation_stale"] = True
+    # range_guard 守卫
+    if not _range_ok(val, _TH["coagulation"].get("range_guard")):
+        info["coagulation_out_of_range"] = val
+        return None, info
     score = _score_from_thresholds(val, _TH["coagulation"]["thresholds"])
     return score, info
 
@@ -307,6 +411,11 @@ def _calc_liver(
         return None, info
     if is_stale:
         info["liver_stale"] = True
+
+    # range_guard 守卫 (换算前检查)
+    if not _range_ok(val, _TH["liver"].get("range_guard")):
+        info["liver_out_of_range"] = val
+        return None, info
 
     # 需求文档 7.3 第 2 条: 单位白名单
     converted, err = _convert_to_classic_canonical(val, unit, "bilirubin")
@@ -332,7 +441,7 @@ def _calc_cardiovascular(
     需求文档 7.3 第 1 条:
       - MAP<70 → score=1
       - 多巴胺分档: ≤5→2, >5且≤15→3, >15→4
-      - NE/Epi 剂量梯度: ≤5→3, >5→4 (注意: 经典 SOFA 只有 2 个梯度)
+      - NE/Epi 剂量梯度: ≤0.1→3, >0.1→4 (Vincent 1996 原文)
       - 第 9 条: has_active_pressor 且剂量未知 → score=max(score,2)
     """
     info: Dict[str, Any] = {}
@@ -383,6 +492,8 @@ def _calc_cardiovascular(
     map_val, _, _, map_stale = _worst_in_window(
         obs, ["MAP", "mean_arterial_pressure"], eval_time, _cfg.RESP_LOOKBACK_H, 1
     )
+    # #11: 陈旧度策略
+    map_val = _apply_stale_policy(map_stale, map_val, info, "cardiovascular_map")
 
     score = 0
 
@@ -565,6 +676,11 @@ def _calc_cns(
         info["cns_missing"] = True
         return None, info
 
+    # range_guard 守卫
+    if not _range_ok(gcs_total, _TH["central_nervous_system"].get("range_guard")):
+        info["cns_out_of_range"] = gcs_total
+        return None, info
+
     score = _score_from_thresholds(gcs_total, _TH["central_nervous_system"]["thresholds"])
     return score, info
 
@@ -595,38 +711,37 @@ def _calc_renal(
     if val is not None:
         if is_stale:
             info["renal_creatinine_stale"] = True
-        converted, err = _convert_to_classic_canonical(val, unit, "creatinine")
-        if err:
-            info["renal_creatinine_unit_error"] = err
+        # range_guard 守卫 (换算前检查)
+        if not _range_ok(val, _TH["renal"].get("range_guard_creatinine")):
+            info["renal_creatinine_out_of_range"] = val
         else:
-            score_creat = _score_from_thresholds(
-                converted, _TH["renal"]["creatinine_thresholds"]
-            )
+            converted, err = _convert_to_classic_canonical(val, unit, "creatinine")
+            if err:
+                info["renal_creatinine_unit_error"] = err
+            else:
+                score_creat = _score_from_thresholds(
+                    converted, _TH["renal"]["creatinine_thresholds"]
+                )
 
     # #20: 尿量按单位分流
-    val, unit, ts, is_stale = _worst_in_window(
+    urine_val, urine_unit, urine_ts, urine_stale = _urine_in_window(
         obs, _TH["renal"]["codes_urine"], eval_time,
         _TH["renal"]["lookback_hours"],
         _TH["renal"]["max_staleness_hours"],
-        agg="sum",
     )
-    if val is not None:
-        if is_stale:
+    if urine_val is not None:
+        if urine_stale:
             info["renal_urine_stale"] = True
-        normalized_u = _normalize_unit(unit)
-        # #20: 速率或日汇总口径 → latest，纯 ml（单次增量）→ sum
-        if normalized_u in ("ml/24h", "ml/24 hr", "ml/24hr", "ml/h", "ml/hr", "ml/kg/h", "ml/kg/hr"):
-            # 速率/日汇总 → 取最近一条（已在 sum 中处理，这里做单位转换）
-            if normalized_u in ("ml/24h", "ml/24 hr", "ml/24hr"):
-                score_urine = _score_from_thresholds(
-                    val, _TH["renal"]["urine_thresholds"]
-                )
-            elif normalized_u in ("ml/h", "ml/hr"):
-                score_urine = _score_from_thresholds(
-                    val * 24, _TH["renal"]["urine_thresholds"]
-                )
+        normalized_u = _normalize_unit(urine_unit)
+        if normalized_u in ("ml/24h", "ml/24 hr", "ml/24hr"):
+            score_urine = _score_from_thresholds(
+                urine_val, _TH["renal"]["urine_thresholds"]
+            )
+        elif normalized_u in ("ml/h", "ml/hr"):
+            score_urine = _score_from_thresholds(
+                urine_val * 24, _TH["renal"]["urine_thresholds"]
+            )
         elif normalized_u in ("ml", "毫升"):
-            # 纯 ml（单次增量）→ sum
             score_urine = _score_from_thresholds(
                 val, _TH["renal"]["urine_thresholds"]
             )

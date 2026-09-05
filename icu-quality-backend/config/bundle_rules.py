@@ -34,6 +34,16 @@ AB_PICK = "latest_in_window"
 # 影响: all_drugs 会把溶媒计入，高估复苏量
 FLUID_SCOPE = "crystalloid_colloid_only"
 
+# ---- 休克确认规则 ----
+# and = K1 AND K2 必须同时成立；or = K1 OR K2 任一成立
+# 影响: 脓毒性休克确认的严格程度
+SHOCK_RULE = "and"
+
+# ---- 感染部位确认 ----
+# True = 必须确认感染部位才进分母；False = 不要求
+# 影响: 分母大小，True 会排除部位未确认的病例
+SITE_REQUIRED = False
+
 # ---- 6h 路径 2 判定项 ----
 # 6h 第二步包含的具体项目清单
 # 影响: 6h 达标判定的完整性

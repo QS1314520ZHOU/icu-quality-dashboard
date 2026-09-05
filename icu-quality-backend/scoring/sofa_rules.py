@@ -70,14 +70,7 @@ CLASSIC_SOFA_THRESHOLDS = {
         "aggregation": "worst",
         "source": "Vincent 1996 Table 1, p.708",
         # 需求文档 7.3 第 1 条: 按 Vincent 1996 原文重写
-        # 剂量梯度 + MAP<70→1 + 多巴胺分档
-        "pressor_thresholds": [
-            {"low": 0,    "high": 0,    "score": 0},
-            {"low": 0.001, "high": 0.1,  "score": 1},
-            {"low": 0.1,   "high": 0.2,  "score": 2},
-            {"low": 0.2,   "high": 0.5,  "score": 3},
-            {"low": 0.5,   "high": 999,  "score": 4},
-        ],
+        # 多巴胺分档
         "dopamine_thresholds": [
             {"low": 0,    "high": 5,    "score": 2},
             {"low": 5,    "high": 15,   "score": 3},

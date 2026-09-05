@@ -64,13 +64,13 @@ INFECTION_SITE_COLLECTION = "icu_infection_site"
 
 
 def _get_infection_site_collection():
-    for db_name in BED_DB_NAMES:
-        try:
-            db = get_client(db_name)[db_name]
-            return db[INFECTION_SITE_COLLECTION]
-        except Exception:
-            continue
-    return None
+    """#21: 固定使用 BED_DB_NAMES[0]，连不上直接抛异常。"""
+    db_name = BED_DB_NAMES[0]
+    try:
+        db = get_client(db_name)[db_name]
+        return db[INFECTION_SITE_COLLECTION]
+    except Exception as e:
+        raise RuntimeError(f"无法连接到主库 {db_name}: {e}")
 
 
 def ensure_infection_site_indexes():
@@ -134,10 +134,24 @@ def get_infection_site(exclusion_key: str) -> dict | None:
     )
 
 
+def get_infection_sites_bulk(exclusion_keys: list) -> dict:
+    """#20: 批量查询感染部位记录，返回 {exclusion_key: doc} 字典。"""
+    coll = _get_infection_site_collection()
+    if coll is None:
+        return {}
+    if not exclusion_keys:
+        return {}
+    cursor = coll.find(
+        {"indicator_code": "ICU-05", "exclusion_key": {"$in": exclusion_keys}, "revoked_at": None},
+        {"_id": 0},
+    )
+    return {doc["exclusion_key"]: doc for doc in cursor}
+
+
 def create_infection_site(doc: dict) -> dict:
     """
     创建感染部位记录。
-    已存在未撤销记录时：先置 revoked_at 再插新条，返回 {"replaced": True}。
+    #18: 原子操作 — 先插新、再撤旧，失败时回滚。
     """
     from config.infection_sites import validate_site_code, validate_evidence_type
 
@@ -174,12 +188,47 @@ def create_infection_site(doc: dict) -> dict:
     })
 
     replaced = False
+    new_id = None
     if existing:
-        # 先撤销旧记录
-        coll.update_one(
-            {"_id": existing["_id"]},
-            {"$set": {"revoked_at": datetime.utcnow(), "revoked_by": doc.get("confirmed_by", "system")}},
-        )
+        # #18: 先插新记录
+        new_doc = {
+            "indicator_code": "ICU-05",
+            "exclusion_key": doc["exclusion_key"],
+            "pid": doc.get("pid", ""),
+            "disease_id": doc.get("disease_id"),
+            "period": doc.get("period", ""),
+            "dept_code": doc.get("dept_code", ""),
+            "patient_name": doc.get("patient_name", ""),
+            "primary_site": primary_site,
+            "secondary_sites": secondary_sites,
+            "evidence_type": evidence_type,
+            "evidence_text": (doc.get("evidence_text") or "")[:500],
+            "confirmed_by": doc["confirmed_by"],
+            "confirmed_at": datetime.now(timezone.utc),
+            "revoked_at": None,
+            "revoked_by": None,
+            "superseded_by": None,
+            "source": doc.get("source", "manual"),
+        }
+        try:
+            result = coll.insert_one(new_doc)
+            new_id = result.inserted_id
+        except Exception as e:
+            # 唯一索引冲突 → 并发
+            raise RuntimeError(f"并发插入冲突: {e}")
+
+        # #18: 再撤销旧记录
+        try:
+            coll.update_one(
+                {"_id": existing["_id"]},
+                {"$set": {"revoked_at": datetime.now(timezone.utc),
+                          "superseded_by": doc.get("confirmed_by", "system")}},
+            )
+        except Exception as e:
+            # 撤销失败 → 回滚新记录
+            if new_id:
+                coll.delete_one({"_id": new_id})
+            raise RuntimeError(f"撤销旧记录失败，已回滚: {e}")
         replaced = True
 
     # 插入新记录
@@ -196,9 +245,10 @@ def create_infection_site(doc: dict) -> dict:
         "evidence_type": evidence_type,
         "evidence_text": (doc.get("evidence_text") or "")[:500],
         "confirmed_by": doc["confirmed_by"],
-        "confirmed_at": datetime.utcnow(),
+        "confirmed_at": datetime.now(timezone.utc),
         "revoked_at": None,
         "revoked_by": None,
+        "superseded_by": None,
         "source": doc.get("source", "manual"),
     }
     coll.insert_one(new_doc)
@@ -221,7 +271,7 @@ def revoke_infection_site(record_id: str, revoked_by: str) -> dict:
 
     coll.update_one(
         {"_id": ObjectId(record_id)},
-        {"$set": {"revoked_at": datetime.utcnow(), "revoked_by": revoked_by}},
+        {"$set": {"revoked_at": datetime.now(timezone.utc), "revoked_by": revoked_by}},
     )
     return {"revoked": True}
 

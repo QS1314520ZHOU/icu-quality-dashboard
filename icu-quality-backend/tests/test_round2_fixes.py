@@ -12,10 +12,26 @@ from scoring.adapter import canon_drug
 # ---- #1: canon_drug 测试 ----
 
 def test_canon_drug_phenylephrine_alone_score2():
-    """苯肾上腺素 1.0 ug/kg/min 单独使用 → SOFA-2 心血管 = 2，不是 4"""
+    """#23: 苯肾上腺素 1.0 ug/kg/min 单独使用 → SOFA-2 心血管 = 2，不是 4"""
+    from datetime import datetime, timezone
+    from scoring.sofa2_core import _calc_cardiovascular
+
     # 苯肾上腺素 → phenylephrine（other 桶），SOFA-2 other_vasopressor → ≥2
     assert canon_drug("苯肾上腺素") == "phenylephrine"
     assert canon_drug("phenylephrine") == "phenylephrine"
+
+    # 端到端测试
+    eval_time = datetime(2025, 1, 1, 12, 0, 0, tzinfo=timezone.utc)
+    pressors = [
+        {
+            "med_name": "苯肾上腺素",
+            "route": "静脉泵入",
+            "dose_ugkgmin": 1.0,
+            "admin_end": None,
+        }
+    ]
+    score, info = _calc_cardiovascular([], eval_time, pressors, weight_kg=70.0)
+    assert score == 2, f"Expected score=2 (other_vasopressor), got {score}"
 
 
 def test_canon_drug_isoproterenol_other():
@@ -90,10 +106,23 @@ def test_gcs_regex_e5_rejected():
 # ---- #18: GCS 回归断言 ----
 
 def test_gcs_e4vtm6_score_0():
-    """E4VTM6 → motor fallback: M6=0"""
-    from scoring.sofa_rules import SOFA2_THRESHOLDS
-    motor_fallback = SOFA2_THRESHOLDS["brain"]["motor_fallback"]
-    assert motor_fallback[6] == 0
+    """#23: E4VTM6 → motor fallback: M6=0，端到端测试"""
+    from datetime import datetime, timezone
+    from scoring.sofa_core import _calc_cns
+    from scoring.sofa2_core import _calc_brain
+
+    eval_time = datetime(2025, 1, 1, 12, 0, 0, tzinfo=timezone.utc)
+    obs = [
+        {"code": "param_score_gcs_obs", "value_text": "E4VTM6", "observed_at": eval_time, "unit": ""},
+    ]
+
+    # 经典 SOFA
+    score_classic, _ = _calc_cns(obs, eval_time)
+    assert score_classic == 0, f"Expected classic score=0, got {score_classic}"
+
+    # SOFA-2
+    score_sofa2, _ = _calc_brain(obs, eval_time)
+    assert score_sofa2 == 0, f"Expected sofa2 score=0, got {score_sofa2}"
 
 
 def test_gcs_e1vtm1_score_4():

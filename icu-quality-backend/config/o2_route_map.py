@@ -137,15 +137,7 @@ def classify_o2_route(
 ) -> dict:
     """
     #27: 三个默认值从 config.indicator_windows 读，不写死在签名里。
-    """
-    import config.indicator_windows as _cfg
-    if airway_as_advanced is None:
-        airway_as_advanced = _cfg.ARTIFICIAL_AIRWAY_AS_ADVANCED
-    if hfnc_as_advanced_classic is None:
-        hfnc_as_advanced_classic = _cfg.HFNC_AS_ADVANCED_CLASSIC
-    if hfnc_as_advanced_sofa2 is None:
-        hfnc_as_advanced_sofa2 = _cfg.HFNC_AS_ADVANCED_SOFA2
-    """
+
     对单条 param_XiYangTuJing 原始值做三列分类。
 
     参数:
@@ -160,6 +152,13 @@ def classify_o2_route(
         icu08_arm:       str (invasive/noninvasive/hfnc/none/unknown)
         unknown_tokens:  list (未在映射表中的原始值)
     """
+    import config.indicator_windows as _cfg
+    if airway_as_advanced is None:
+        airway_as_advanced = _cfg.ARTIFICIAL_AIRWAY_AS_ADVANCED
+    if hfnc_as_advanced_classic is None:
+        hfnc_as_advanced_classic = _cfg.HFNC_AS_ADVANCED_CLASSIC
+    if hfnc_as_advanced_sofa2 is None:
+        hfnc_as_advanced_sofa2 = _cfg.HFNC_AS_ADVANCED_SOFA2
     parts = _split_routes(raw)
     if not parts:
         return {
@@ -206,8 +205,19 @@ def classify_o2_route(
             icu08_tier = tier
             icu08_best = arm
 
-    # 未知取值不污染整条记录: 已识别到的最高级别照常返回
-    # unknown_tokens 只挂在返回值里做追溯
+    # #14: 全未知值处理
+    if parts and not unknown_tokens:
+        # 全部识别
+        pass
+    elif parts and len(unknown_tokens) == len(parts):
+        # 全未知
+        return {
+            "classic_advanced": None,
+            "sofa2_advanced": None,
+            "icu08_arm": "unknown",
+            "unknown_tokens": unknown_tokens,
+        }
+    # 部分识别: 已识别到的最高级别照常返回，unknown_tokens 挂在返回值里做追溯
     return {
         "classic_advanced": classic_adv,
         "sofa2_advanced": sofa2_adv,

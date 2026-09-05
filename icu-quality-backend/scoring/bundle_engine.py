@@ -115,11 +115,16 @@ def _classify_vasopressor(med_name: str) -> Tuple[bool, bool]:
     return in_wide, in_strict
 
 
-def _classify_fluid(med_name: str) -> Optional[str]:
+def _classify_fluid(med_name: str, scope: str = "crystalloid_colloid_only") -> Optional[str]:
     """
     分类液体类型。
+    #5: FLUID_SCOPE 配置
+    - "crystalloid_colloid_only": 只计晶体/胶体
+    - "all_drugs": 所有药物都返回 "crystalloid"
     返回 "crystalloid" / "colloid" / None。
     """
+    if scope == "all_drugs":
+        return "crystalloid"
     name_lower = (med_name or "").strip().lower()
     if any(kw in name_lower for kw in CRYSTALLOID_KEYWORDS):
         return "crystalloid"
@@ -208,10 +213,20 @@ def judge_K2_pressor_needed(has_vasopressor: Optional[bool]) -> Optional[bool]:
 # v3 判定项：Bundle 时间窗
 # ============================================================
 
-def judge_A1_lactate_measured(lactate_value: Optional[float]) -> Optional[bool]:
-    """A1: 乳酸测定 (窗口内最早一条，取到值即达标)"""
+def judge_A1_lactate_measured(
+    lactate_value: Optional[float],
+    rule: str = "value_present",
+) -> Optional[bool]:
+    """
+    A1: 乳酸测定 (窗口内最早一条)
+    #5: A1_RULE 配置
+    - "value_present": 取到值即达标
+    - "value_below_threshold": 值低于阈值(2 mmol/L)才算达标
+    """
     if lactate_value is None:
         return None
+    if rule == "value_below_threshold":
+        return lactate_value < 2
     return True
 
 
@@ -247,7 +262,8 @@ def judge_B3_step2(
     if antibiotic_time is None or culture_time is None:
         return None, "AB_MISSING" if antibiotic_time is None else "BC_MISSING"
     # 抗生素晚于血培养 → 达标
-    if antibiotic_time > culture_time:
+    # #7: naive/aware 混用安全比较
+    if _aware(antibiotic_time) > _aware(culture_time):
         return True, None
     return False, "BC_AFTER_AB"
 
@@ -290,6 +306,7 @@ def judge_bundle_finish_v3(
     c1: Optional[bool],
     c2: Optional[bool],
     c3: Optional[bool],
+    b3_reason: Optional[str] = None,
 ) -> Dict[str, Any]:
     """
     v3 完成判定决策树。
@@ -324,16 +341,15 @@ def judge_bundle_finish_v3(
     reasons = []
     if step1 is False:
         reasons.append("A1_NOT_MET")
-    if step2 is False:
-        if b3 is False:
-            reasons.append("BC_AFTER_AB")  # 抗生素早于血培养
-        else:
-            reasons.append("AB_MISSING")
+    # #9: b3_reason 传下去
+    if step2 is False or step2 is None:
+        reasons.append(b3_reason or "AB_MISSING")
+    # #9: step3 未触发时恒为 True，"if step3 is False" 必然处在触发态
     if step3 is False:
-        if c1_or_c2_triggered:
-            reasons.append("FLUID_INSUFFICIENT")
-        else:
-            reasons.append("MAP_NOT_MET")
+        reasons.append("FLUID_INSUFFICIENT")
+    # #9: MAP_NOT_MET 改在 c1 为 True 时单独发一码（表示 MAP 触发项成立）
+    if c1 is True:
+        reasons.append("MAP_NOT_MET")
 
     return {
         "finish": finish,
@@ -364,7 +380,9 @@ def judge_bundle_v3(patient_data: Dict[str, Any]) -> Dict[str, Any]:
 
     t0 = patient_data.get("t0")
     if not t0:
-        return {"bundle_1h": None, "bundle_3h": None, "reason": "NO_T0"}
+        return {"bundle_1h": None, "bundle_3h": None,
+                "gate": {"reason": "NO_T0", "is_septic_shock": None,
+                         "has_infection": None, "has_organ_dysfunction": None}}
 
     # ---- 门控判定 ----
     # 器官障碍 S1-S4
@@ -399,14 +417,23 @@ def judge_bundle_v3(patient_data: Dict[str, Any]) -> Dict[str, Any]:
         return {"bundle_1h": None, "bundle_3h": None, "gate": gate}
 
     # 感染证据门控: I1/I2/I3 任一
-    has_infection = (i1 is True) or (i2 is True) or (i3 is True)
+    # #5: INFECTION_GATE 配置
+    if _br.INFECTION_GATE == "off":
+        gate["infection_gate"] = "off"
+        has_infection = True  # 跳过感染证据判定
+    else:
+        has_infection = (i1 is True) or (i2 is True) or (i3 is True)
     gate["has_infection"] = has_infection
     if not has_infection:
         gate["reason"] = "NO_INFECTION_EVIDENCE"
         return {"bundle_1h": None, "bundle_3h": None, "gate": gate}
 
     # 脓毒性休克确认: K1 AND K2
-    has_septic_shock = (k1 is True) and (k2 is True)
+    # #5: SHOCK_RULE 配置
+    if _br.SHOCK_RULE == "or":
+        has_septic_shock = (k1 is True) or (k2 is True)
+    else:
+        has_septic_shock = (k1 is True) and (k2 is True)
     gate["is_septic_shock"] = has_septic_shock
     if not has_septic_shock:
         gate["reason"] = "NOT_SEPTIC_SHOCK"
@@ -424,26 +451,21 @@ def judge_bundle_v3(patient_data: Dict[str, Any]) -> Dict[str, Any]:
         """#10: 检查时间是否在 [t0, win_end] 窗口内"""
         if ts is None or not isinstance(ts, datetime):
             return True  # 无时间戳的数据不参与窗口校验
-        return t0 <= ts <= win_end
-
-    def _window_validate_time(ts, win_end, raw_result, key):
-        """#10: 窗口校验 — 不在窗口内则置 None，时间照常回填到详情用于红字展示"""
-        if ts is not None and isinstance(ts, datetime) and not _in_window(ts, win_end):
-            raw_result[f"{key}_out_of_window"] = True
-            return None
-        return raw_result.get(key)
+        return _aware(t0) <= _aware(ts) <= _aware(win_end)
 
     # ---- 1h 窗口判定 ----
     abx_time_1h = w1h.get("antibiotic_time")
     culture_time_1h = w1h.get("culture_time")
-    a1_1h = judge_A1_lactate_measured(w1h.get("lactate_initial"))
+    # #5: A1_RULE 配置
+    a1_1h = judge_A1_lactate_measured(w1h.get("lactate_initial"), _br.A1_RULE)
+    # #8: 窗口校验
     b1_1h = judge_B1_antibiotic_time(abx_time_1h) if _in_window(abx_time_1h, t0_1h) else None
     b2_1h = judge_B2_culture_time(culture_time_1h) if _in_window(culture_time_1h, t0_1h) else None
     b3_1h, b3_reason_1h = judge_B3_step2(b1_1h, b2_1h, abx_time_1h, culture_time_1h)
     c1_1h = judge_C1_map_trigger(w1h.get("map_min"))
     c2_1h = judge_C2_lactate_trigger(w1h.get("lactate_max"))
     c3_1h = judge_C3_1h_fluid(w1h.get("has_fluid"))
-    result_1h = judge_bundle_finish_v3(a1_1h, b3_1h, c1_1h, c2_1h, c3_1h)
+    result_1h = judge_bundle_finish_v3(a1_1h, b3_1h, c1_1h, c2_1h, c3_1h, b3_reason_1h)
     result_1h.update({
         "a1": a1_1h, "b1": b1_1h, "b2": b2_1h, "b3": b3_1h,
         "c1": c1_1h, "c2": c2_1h, "c3": c3_1h,
@@ -457,14 +479,15 @@ def judge_bundle_v3(patient_data: Dict[str, Any]) -> Dict[str, Any]:
     # ---- 3h 窗口判定 ----
     abx_time_3h = w3h.get("antibiotic_time")
     culture_time_3h = w3h.get("culture_time")
-    a1_3h = judge_A1_lactate_measured(w3h.get("lactate_initial"))
+    # #5: A1_RULE 配置
+    a1_3h = judge_A1_lactate_measured(w3h.get("lactate_initial"), _br.A1_RULE)
     b1_3h = judge_B1_antibiotic_time(abx_time_3h) if _in_window(abx_time_3h, t0_3h) else None
     b2_3h = judge_B2_culture_time(culture_time_3h) if _in_window(culture_time_3h, t0_3h) else None
     b3_3h, b3_reason_3h = judge_B3_step2(b1_3h, b2_3h, abx_time_3h, culture_time_3h)
     c1_3h = judge_C1_map_trigger(w3h.get("map_min"))
     c2_3h = judge_C2_lactate_trigger(w3h.get("lactate_max"))
     c3_3h = judge_C3_3h_fluid(w3h.get("fluid_ml"))
-    result_3h = judge_bundle_finish_v3(a1_3h, b3_3h, c1_3h, c2_3h, c3_3h)
+    result_3h = judge_bundle_finish_v3(a1_3h, b3_3h, c1_3h, c2_3h, c3_3h, b3_reason_3h)
     result_3h.update({
         "a1": a1_3h, "b1": b1_3h, "b2": b2_3h, "b3": b3_3h,
         "c1": c1_3h, "c2": c2_3h, "c3": c3_3h,
