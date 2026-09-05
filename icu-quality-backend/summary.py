@@ -81,7 +81,46 @@ def _compute_icu05(dept_codes, start, end, hour):
     num = d.get(key, 0)
     den = d["total"]
     val = round(num / den * 100, 1) if den > 0 else 0.0
-    return {"num": num, "den": den, "val": val, "val_type": "percent"}
+
+    # G-1: 感染部位确认计数
+    site_confirmed_count = 0
+    site_unconfirmed_count = 0
+    try:
+        from db import get_infection_site, build_exclusion_key, _get_infection_site_collection
+        from config.indicator_windows import SITE_REQUIRED
+        if SITE_REQUIRED:
+            period = start[:7]  # "YYYY-MM"
+            # 查询该期间已确认的感染部位记录
+            coll = _get_infection_site_collection()
+            if coll is not None:
+                confirmed_keys = set()
+                for doc in coll.find(
+                    {"indicator_code": "ICU-05", "period": period, "revoked_at": None},
+                    {"exclusion_key": 1, "_id": 0},
+                ):
+                    ek = doc.get("exclusion_key", "")
+                    if ek:
+                        confirmed_keys.add(ek)
+
+                # 遍历分母患者，按 exclusion_key 匹配
+                for pat in d.get("den_patients", []):
+                    pid = pat.get("pid") or pat.get("dc_pid") or pat.get("_id") or ""
+                    t0 = pat.get("t0")
+                    if not pid or not t0:
+                        continue
+                    ek = build_exclusion_key(str(pid), t0)
+                    if ek in confirmed_keys:
+                        site_confirmed_count += 1
+                    else:
+                        site_unconfirmed_count += 1
+    except Exception:
+        pass
+
+    return {
+        "num": num, "den": den, "val": val, "val_type": "percent",
+        "site_confirmed_count": site_confirmed_count,
+        "site_unconfirmed_count": site_unconfirmed_count,
+    }
 
 
 def _compute_icu06(dept_codes, start, end):
@@ -416,6 +455,8 @@ def rebuild_summary(dept_codes: list, periods: list, indicators: list = None,
         raw_den = result.pop("raw_den", None)
         excluded_num = result.pop("excluded_num", None)
         excluded_den = result.pop("excluded_den", None)
+        site_confirmed_count = result.pop("site_confirmed_count", None)
+        site_unconfirmed_count = result.pop("site_unconfirmed_count", None)
         # 查询三层人工覆盖计数
         override_count = 0
         try:
@@ -455,6 +496,9 @@ def rebuild_summary(dept_codes: list, periods: list, indicators: list = None,
             doc["raw_den"] = raw_den
             doc["excluded_num"] = excluded_num
             doc["excluded_den"] = excluded_den
+        if site_confirmed_count is not None:
+            doc["site_confirmed_count"] = site_confirmed_count
+            doc["site_unconfirmed_count"] = site_unconfirmed_count
         return doc
 
     light_first = {

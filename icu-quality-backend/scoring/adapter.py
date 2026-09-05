@@ -16,6 +16,44 @@ from typing import Optional
 import config.indicator_windows as _cfg
 
 
+# ---- 升压药规范化 ----
+# 顺序即优先级，长名在前。肾上腺素必须排在去甲/异丙/苯/去氧之后。
+_DRUG_CANON_ORDERED = [
+    ("去甲肾上腺素", "norepinephrine"),
+    ("noradrenaline", "norepinephrine"),
+    ("norepinephrine", "norepinephrine"),
+    ("异丙肾上腺素", "isoproterenol"),
+    ("isoproterenol", "isoproterenol"),
+    ("苯肾上腺素", "phenylephrine"),
+    ("去氧肾上腺素", "phenylephrine"),
+    ("phenylephrine", "phenylephrine"),
+    ("多巴酚丁胺", "dobutamine"),
+    ("dobutamine", "dobutamine"),
+    ("多巴胺", "dopamine"),
+    ("dopamine", "dopamine"),
+    ("血管加压素", "vasopressin"),
+    ("vasopressin", "vasopressin"),
+    ("特利加压素", "terlipressin"),
+    ("米力农", "milrinone"),
+    ("milrinone", "milrinone"),
+    ("肾上腺素", "epinephrine"),
+    ("adrenaline", "epinephrine"),
+    ("epinephrine", "epinephrine"),
+]
+
+
+def canon_drug(name: str) -> Optional[str]:
+    """
+    规范化升压药名称。返回标准英文名或 None。
+    顺序即优先级：长名在前，肾上腺素排在去甲/异丙/苯/去氧之后。
+    """
+    s = (name or "").strip().lower()
+    for kw, canon in _DRUG_CANON_ORDERED:
+        if kw in s:
+            return canon
+    return None
+
+
 # ---- 枚举 ----
 class SaltForm(StrEnum):
     """NE 盐型枚举。五档: base / bitartrate_monohydrate / anhydrous_bitartrate / hydrochloride / unknown。"""
@@ -189,15 +227,19 @@ def build_medication_administration(
     """
     从 drugExe 子项构建 MedicationAdministration。
     salt_form 固定为 BASE。
+    #30: drug.get("unit") → drug.get("doseUnit")；liquid 先取 drug 再回退 doc。
     """
     dose = _safe_float(drug.get("dose"))
-    liquid = _safe_float(drug.get("liquidAmount")) or _safe_float(doc.get("liquidAmount"))
+    # #30: liquid 先取 drug 的值，仅当结果为 None 时才回退 doc，禁用 or
+    liquid = _safe_float(drug.get("liquidAmount"))
+    if liquid is None:
+        liquid = _safe_float(doc.get("liquidAmount"))
     if dose is None or liquid is None:
         return None
     return MedicationAdministration(
         drug_name=drug.get("name", ""),
         dose_mg=dose,
-        dose_unit=drug.get("unit", ""),
+        dose_unit=drug.get("doseUnit", ""),  # #30: unit → doseUnit
         liquid_amount_ml=liquid,
         speed_mlh=speed_mlh,
         weight_kg=weight_kg,

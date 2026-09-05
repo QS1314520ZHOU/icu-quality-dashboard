@@ -131,10 +131,20 @@ def _split_routes(raw: str) -> list[str]:
 
 def classify_o2_route(
     raw: str,
-    airway_as_advanced: bool = False,
-    hfnc_as_advanced_classic: bool = False,
-    hfnc_as_advanced_sofa2: bool = True,
+    airway_as_advanced: bool = None,
+    hfnc_as_advanced_classic: bool = None,
+    hfnc_as_advanced_sofa2: bool = None,
 ) -> dict:
+    """
+    #27: 三个默认值从 config.indicator_windows 读，不写死在签名里。
+    """
+    import config.indicator_windows as _cfg
+    if airway_as_advanced is None:
+        airway_as_advanced = _cfg.ARTIFICIAL_AIRWAY_AS_ADVANCED
+    if hfnc_as_advanced_classic is None:
+        hfnc_as_advanced_classic = _cfg.HFNC_AS_ADVANCED_CLASSIC
+    if hfnc_as_advanced_sofa2 is None:
+        hfnc_as_advanced_sofa2 = _cfg.HFNC_AS_ADVANCED_SOFA2
     """
     对单条 param_XiYangTuJing 原始值做三列分类。
 
@@ -155,7 +165,7 @@ def classify_o2_route(
         return {
             "classic_advanced": None,
             "sofa2_advanced": None,
-            "icu08_arm": "none",
+            "icu08_arm": "unknown",  # #27: 空值返回 unknown
             "unknown_tokens": [],
         }
 
@@ -177,12 +187,10 @@ def classify_o2_route(
         if c_adv == _AIRWAY:
             c_adv = airway_as_advanced
 
-        # HFNC 可由配置覆盖
+        # #26: HFNC 覆盖改成直接赋值
         if arm == "hfnc":
-            if not hfnc_as_advanced_classic:
-                c_adv = False
-            if not hfnc_as_advanced_sofa2:
-                s2_adv = False
+            c_adv = hfnc_as_advanced_classic
+            s2_adv = hfnc_as_advanced_sofa2
 
         # classic_advanced: 任一成分为 True 即 True
         if c_adv:

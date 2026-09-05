@@ -16,8 +16,8 @@ import re
 from datetime import datetime, timedelta, timezone
 from typing import Any, Dict, List, Optional, Tuple
 
-from .sofa_rules import _UNIT_CONVERSION, SOFA2_THRESHOLDS as _TH
-from .adapter import ne_ugkgmin as _ne_ugkgmin  # noqa: F401 — 唯一换算点引用
+from .sofa_rules import SOFA2_THRESHOLDS as _TH
+from .adapter import ne_ugkgmin as _ne_ugkgmin, canon_drug  # noqa: F401 — 唯一换算点引用
 from .missing_policy import apply_policy as _apply_policy
 import config.indicator_windows as _cfg
 
@@ -70,13 +70,19 @@ def _convert_to_sofa2_canonical(
 # -----------------------------------------------------------
 # 阈值匹配 (半开区间)
 # -----------------------------------------------------------
-def _score_from_thresholds(value: float, thresholds: List[dict]) -> int:
+def _score_from_thresholds(
+    value: float,
+    thresholds: List[dict],
+    direction: str = "higher_is_worse",
+) -> Optional[int]:
+    """
+    #21: 半开区间 [low, high) 匹配分值。
+    落不进任何区间时返回 None。
+    """
     for t in thresholds:
         if t["low"] <= value < t["high"]:
             return int(t["score"])
-    if value < thresholds[0]["low"]:
-        return int(thresholds[-1]["score"])
-    return int(thresholds[0]["score"])
+    return None
 
 
 # -----------------------------------------------------------
@@ -89,8 +95,9 @@ def _worst_in_window(
     lookback_hours: int,
     max_staleness_hours: int,
     agg: str = "min",
-) -> Tuple[Optional[float], Optional[str], Optional[datetime]]:
+) -> Tuple[Optional[float], Optional[str], Optional[datetime], Optional[bool]]:
     """
+    #19: max_staleness_hours 真正生效。
     agg 聚合方向: min / max / sum / latest
     """
     window_start = eval_time - timedelta(hours=lookback_hours)
@@ -111,19 +118,84 @@ def _worst_in_window(
             continue
         candidates.append((float(raw_val), obs.get("unit", ""), ts))
     if not candidates:
-        return None, None, None
+        return None, None, None, None
     if agg == "sum":
         total_val = sum(c[0] for c in candidates)
         best_ts = max(c[2] for c in candidates)
         best_unit = [c[1] for c in candidates if c[2] == best_ts][0]
-        return total_val, best_unit, best_ts
+        best = (total_val, best_unit, best_ts)
     elif agg == "max":
         candidates.sort(key=lambda x: x[0], reverse=True)
+        best = candidates[0]
     elif agg == "latest":
         candidates.sort(key=lambda x: x[2], reverse=True)
+        best = candidates[0]
     else:
         candidates.sort(key=lambda x: x[0])
-    return candidates[0]
+        best = candidates[0]
+    staleness = (eval_time - best[2]).total_seconds() / 3600.0
+    is_stale = staleness > max_staleness_hours if max_staleness_hours > 0 else False
+    return best[0], best[1], best[2], is_stale
+
+
+# -----------------------------------------------------------
+# 呼吸配对聚合 (#12)
+# -----------------------------------------------------------
+def _worst_pf_pair_in_window(
+    obs: List[dict],
+    codes_pao2: List[str],
+    codes_fio2: List[str],
+    eval_time: datetime,
+    lookback_h: int,
+    max_pair_seconds: int = 1800,
+) -> Optional[Tuple[float, datetime, datetime]]:
+    """
+    #12: 笛卡尔配对 PaO2×FiO2，保留时间差≤max_pair_seconds 的配对，
+    返回 (ratio, pao2_ts, fio2_ts) 中 ratio 最小的一对。
+    无配对返回 None。
+    """
+    window_start = eval_time - timedelta(hours=lookback_h)
+    pao2_candidates = []
+    fio2_candidates = []
+    for o in obs:
+        code = (o.get("code") or o.get("item_name") or "").strip()
+        raw_val = o.get("value_number")
+        if raw_val is None:
+            continue
+        ts = o.get("observed_at")
+        if not isinstance(ts, datetime):
+            continue
+        if ts.tzinfo is None:
+            ts = ts.replace(tzinfo=timezone.utc)
+        if ts < window_start or ts > eval_time:
+            continue
+        val = float(raw_val)
+        if code in codes_pao2:
+            pao2_candidates.append((val, ts))
+        elif code in codes_fio2:
+            fio2_candidates.append((val, ts))
+
+    if not pao2_candidates or not fio2_candidates:
+        return None
+
+    best_ratio = None
+    best_pair = None
+    for pao2_val, pao2_ts in pao2_candidates:
+        for fio2_val, fio2_ts in fio2_candidates:
+            if abs((pao2_ts - fio2_ts).total_seconds()) > max_pair_seconds:
+                continue
+            if fio2_val <= 0:
+                continue
+            if fio2_val > 1.0:
+                fio2_val = fio2_val / 100.0
+            if fio2_val <= 0 or fio2_val > 1.0:
+                continue
+            ratio = pao2_val / fio2_val
+            if best_ratio is None or ratio < best_ratio:
+                best_ratio = ratio
+                best_pair = (ratio, pao2_ts, fio2_ts)
+
+    return best_pair
 
 
 # -----------------------------------------------------------
@@ -136,22 +208,25 @@ def _calc_respiratory(
 ) -> Tuple[Optional[int], Dict[str, Any]]:
     info: Dict[str, Any] = {}
 
-    # 先查 P/F ratio
-    val, unit, ts = _worst_in_window(obs, ["param_bg_P/Fratio"], eval_time, _cfg.RESP_LOOKBACK_H, _cfg.RESP_STALENESS_MAX_H)
+    codes_pao2 = ["param_PaO2", "PaO2"]
+    codes_fio2 = ["param_FiO2", "FiO2"]
+
+    # 先查 P/F ratio 直接值
+    val, unit, ts, is_stale = _worst_in_window(obs, ["param_bg_P/Fratio"], eval_time, _cfg.RESP_LOOKBACK_H, _cfg.RESP_STALENESS_MAX_H)
     if val is not None and val > 0:
         ratio = val
+        if is_stale:
+            info["respiratory_stale"] = True
     else:
-        val_pao2, _, ts_pao2 = _worst_in_window(obs, ["param_PaO2", "PaO2"], eval_time, _cfg.RESP_LOOKBACK_H, _cfg.RESP_STALENESS_MAX_H)
-        val_fio2, _, ts_fio2 = _worst_in_window(obs, ["param_FiO2", "FiO2"], eval_time, _cfg.RESP_LOOKBACK_H, _cfg.RESP_STALENESS_MAX_H)
-        if val_pao2 is not None and val_fio2 is not None and val_fio2 > 0:
-            if ts_pao2 and ts_fio2 and abs((ts_pao2 - ts_fio2).total_seconds()) > 1800:
-                info["respiratory_pair_mismatch"] = True
-                return None, info
-            fio2 = val_fio2 / 100.0 if val_fio2 > 1.0 else val_fio2
-            ratio = val_pao2 / fio2
+        # #12: 配对聚合
+        pair = _worst_pf_pair_in_window(obs, codes_pao2, codes_fio2, eval_time, _cfg.RESP_LOOKBACK_H)
+        if pair is not None:
+            ratio, _, _ = pair
         else:
             # SpO2/FiO2 替代路径 (SOFA-2 特有)
-            val_spo2, _, _ = _worst_in_window(obs, ["SpO2", "param_SpO2"], eval_time, _cfg.RESP_LOOKBACK_H, _cfg.RESP_STALENESS_MAX_H)
+            val_spo2, _, _, _ = _worst_in_window(obs, ["SpO2", "param_SpO2"], eval_time, _cfg.RESP_LOOKBACK_H, _cfg.RESP_STALENESS_MAX_H)
+            # FiO2 单独取（SpO2 替代路径不需要 PaO2 配对）
+            val_fio2, _, _, _ = _worst_in_window(obs, codes_fio2, eval_time, _cfg.RESP_LOOKBACK_H, _cfg.RESP_STALENESS_MAX_H)
             if val_spo2 is not None and val_fio2 is not None and val_fio2 > 0:
                 if val_spo2 >= 98:
                     info["spo2_98_no_fallback"] = True
@@ -159,7 +234,6 @@ def _calc_respiratory(
                 fio2 = val_fio2 / 100.0 if val_fio2 > 1.0 else val_fio2
                 sf_ratio = val_spo2 / fio2
                 score = _score_from_thresholds(sf_ratio, _TH["respiratory"]["sf_thresholds"])
-                # score=3/4 需高级呼吸支持门控
                 if score >= 3 and not has_advanced_support:
                     score = 2
                 info["spo2_fio2_ratio"] = sf_ratio
@@ -168,7 +242,6 @@ def _calc_respiratory(
             return None, info
 
     score = _score_from_thresholds(ratio, _TH["respiratory"]["pf_thresholds"])
-    # score=3/4 需高级呼吸支持门控
     if score >= 3 and not has_advanced_support:
         score = 2
     info["pao2_fio2_ratio"] = ratio
@@ -183,7 +256,7 @@ def _calc_hemostasis(
     eval_time: datetime,
 ) -> Tuple[Optional[int], Dict[str, Any]]:
     info: Dict[str, Any] = {}
-    val, _, _ = _worst_in_window(
+    val, _, _, is_stale = _worst_in_window(
         obs, _TH["hemostasis"]["codes"], eval_time,
         _TH["hemostasis"]["lookback_hours"],
         _TH["hemostasis"]["max_staleness_hours"],
@@ -191,6 +264,8 @@ def _calc_hemostasis(
     if val is None:
         info["hemostasis_missing"] = True
         return None, info
+    if is_stale:
+        info["hemostasis_stale"] = True
     return _score_from_thresholds(val, _TH["hemostasis"]["thresholds"]), info
 
 
@@ -202,7 +277,7 @@ def _calc_liver(
     eval_time: datetime,
 ) -> Tuple[Optional[int], Dict[str, Any]]:
     info: Dict[str, Any] = {}
-    val, unit, _ = _worst_in_window(
+    val, unit, _, is_stale = _worst_in_window(
         obs, _TH["liver"]["codes"], eval_time,
         _TH["liver"]["lookback_hours"],
         _TH["liver"]["max_staleness_hours"],
@@ -211,6 +286,8 @@ def _calc_liver(
     if val is None:
         info["liver_missing"] = True
         return None, info
+    if is_stale:
+        info["liver_stale"] = True
     converted, err = _convert_to_sofa2_canonical(val, unit, "bilirubin")
     if err:
         info["liver_unit_error"] = err
@@ -221,8 +298,52 @@ def _calc_liver(
 # -----------------------------------------------------------
 # 脑 (SOFA-2: delirium 治疗 + motor fallback)
 # -----------------------------------------------------------
-# V=T 时的替代值 (气管插管无法评估语言)
-_V_T_SUBSTITUTE = 1
+def _lowest_gcs_in_window(
+    obs: List[dict],
+    codes: List[str],
+    eval_time: datetime,
+    lookback_h: int,
+) -> Tuple[Optional[int], Optional[datetime], Optional[int], bool]:
+    """
+    #15: 遍历窗口内全部 GCS 记录，返回 (lowest_total, lowest_ts, vt_motor, vt_only)。
+    """
+    window_start = eval_time - timedelta(hours=lookback_h)
+    numeric = []
+    vt_motors = []
+
+    for o in obs:
+        code = (o.get("code") or o.get("item_name") or "").strip()
+        if code not in codes:
+            continue
+        ts = o.get("observed_at")
+        if not isinstance(ts, datetime):
+            continue
+        if ts.tzinfo is None:
+            ts = ts.replace(tzinfo=timezone.utc)
+        if ts < window_start or ts > eval_time:
+            continue
+
+        raw_gcs = o.get("value_number") or o.get("value_text")
+        gcs_total, parse_err = _parse_gcs(raw_gcs)
+        if parse_err == "V=T_motor_fallback":
+            raw_text = str(raw_gcs).strip()
+            vt_match = re.fullmatch(r"^[Ee]([1-4])[Vv][Tt][Mm]([1-6])$", raw_text)
+            if vt_match:
+                m_val = int(vt_match.group(2))
+                vt_motors.append((m_val, ts))
+        elif gcs_total is not None:
+            numeric.append((gcs_total, ts))
+
+    if numeric:
+        best = min(numeric, key=lambda x: x[0])
+        return best[0], best[1], None, False
+
+    if vt_motors:
+        best_m = min(vt_motors, key=lambda x: x[0])
+        return None, best_m[1], best_m[0], True
+
+    return None, None, None, False
+
 
 def _parse_gcs(gcs_val: Any) -> Tuple[Optional[int], Optional[str]]:
     """
@@ -246,7 +367,8 @@ def _parse_gcs(gcs_val: Any) -> Tuple[Optional[int], Optional[str]]:
             return total, None
         except ValueError:
             pass
-        pattern = r"^[Ee]([1-5])[Vv]([Tt1-5])[Mm]([1-6])$"
+        # E 最大 4（睁眼）
+        pattern = r"^[Ee]([1-4])[Vv]([Tt1-5])[Mm]([1-6])$"
         m = re.fullmatch(pattern, gcs_val.strip())
         if m:
             e = int(m.group(1))
@@ -270,56 +392,25 @@ def _calc_brain(
     codes = _TH["brain"]["codes"]
     lookback = _TH["brain"]["lookback_hours"]
 
-    window_start = eval_time - timedelta(hours=lookback)
-    best = None
-    best_ts = None
-    for o in obs:
-        code = (o.get("code") or o.get("item_name") or "").strip()
-        if code not in codes:
-            continue
-        ts = o.get("observed_at")
-        if not isinstance(ts, datetime):
-            continue
-        if ts.tzinfo is None:
-            ts = ts.replace(tzinfo=timezone.utc)
-        if ts < window_start or ts > eval_time:
-            continue
-        if best_ts is None or ts > best_ts:
-            best = o
-            best_ts = ts
+    # #15: 使用 _lowest_gcs_in_window 遍历全部记录取最差
+    gcs_total, gcs_ts, vt_motor, vt_only = _lowest_gcs_in_window(obs, codes, eval_time, lookback)
 
-    if best is None:
-        info["brain_missing"] = True
-        return None, info
-
-    raw_gcs = best.get("value_number") or best.get("value_text")
-    gcs_total, parse_err = _parse_gcs(raw_gcs)
-    if parse_err == "V=T_motor_fallback":
+    if vt_only and vt_motor is not None:
         # V=T: 走 motor fallback (需求文档 7.3 第 8 条)
-        raw_text = str(raw_gcs).strip()
-        vt_match = re.fullmatch(r"^[Ee]([1-5])[Vv][Tt][Mm]([1-6])$", raw_text)
-        if vt_match:
-            m_val = int(vt_match.group(2))
-            motor_fallback = _TH["brain"].get("motor_fallback", {})
-            fallback_score = motor_fallback.get(m_val)
-            if fallback_score is not None:
-                info["gcs_vt_motor_fallback"] = {"m": m_val, "fallback_score": fallback_score}
-                return fallback_score, info
-            else:
-                info["gcs_parse_error"] = f"V=T 但 motor_fallback 无 M{m_val} 映射"
-                return None, info
+        motor_fallback = _TH["brain"].get("motor_fallback", {})
+        fallback_score = motor_fallback.get(vt_motor)
+        if fallback_score is not None:
+            info["gcs_vt_motor_fallback"] = {"m": vt_motor, "fallback_score": fallback_score}
+            return fallback_score, info
         else:
-            info["gcs_parse_error"] = parse_err
+            info["gcs_parse_error"] = f"V=T 但 motor_fallback 无 M{vt_motor} 映射"
             return None, info
-    elif parse_err:
-        info["gcs_parse_error"] = parse_err
-        return None, info
-    elif gcs_total is None:
+
+    if gcs_total is None:
         info["brain_missing"] = True
         return None, info
-    else:
-        # SOFA-2 brain thresholds
-        score = _score_from_thresholds(gcs_total, _TH["brain"]["thresholds"])
+
+    score = _score_from_thresholds(gcs_total, _TH["brain"]["thresholds"])
     return score, info
 
 
@@ -336,13 +427,15 @@ def _calc_kidney(
     score_urine = None
 
     # 肌酐 (mg/dL, 取最高值: 越高越差)
-    val, unit, _ = _worst_in_window(
+    val, unit, _, is_stale = _worst_in_window(
         obs, _TH["kidney"]["codes_creatinine"], eval_time,
         _TH["kidney"]["lookback_hours"],
         _TH["kidney"]["max_staleness_hours"],
         agg="max",
     )
     if val is not None:
+        if is_stale:
+            info["kidney_creatinine_stale"] = True
         converted, err = _convert_to_sofa2_canonical(val, unit, "creatinine")
         if err:
             info["kidney_creatinine_unit_error"] = err
@@ -351,14 +444,16 @@ def _calc_kidney(
                 converted, _TH["kidney"]["creatinine_thresholds"]
             )
 
-    # 尿量 (mL/kg/h, 需求文档 7.3 第 6 条: 粗粒度24h标记, 取总和)
-    val, unit, _ = _worst_in_window(
+    # #20: 尿量按单位分流
+    val, unit, _, is_stale = _worst_in_window(
         obs, _TH["kidney"]["codes_urine"], eval_time,
         _TH["kidney"]["lookback_hours"],
         _TH["kidney"]["max_staleness_hours"],
         agg="sum",
     )
     if val is not None and weight_kg and weight_kg > 0:
+        if is_stale:
+            info["kidney_urine_stale"] = True
         normalized_u = _normalize_unit(unit)
         if normalized_u in ("ml/kg/h", "ml/kg/hr"):
             rate_per_kg_h = val
@@ -366,13 +461,16 @@ def _calc_kidney(
             rate_per_kg_h = val / weight_kg
         elif normalized_u in ("ml/24h", "ml/24 hr", "ml/24hr"):
             rate_per_kg_h = val / weight_kg / 24.0
-            info["urine_coarse_24h"] = True  # 需求文档 7.3 第 6 条
+            info["urine_coarse_24h"] = True
+        elif normalized_u in ("ml", "毫升"):
+            # #20: 纯 ml（单次增量）→ sum，转换为 ml/kg/h
+            rate_per_kg_h = val / weight_kg / 24.0  # 粗略转换
         else:
             info["kidney_urine_unit_error"] = f"未知尿量单位: {unit}"
+            info.setdefault("data_quality_flags", []).append("urine_unit_unknown")
             rate_per_kg_h = None
 
         if rate_per_kg_h is not None:
-            # SOFA-2 尿量梯度
             if rate_per_kg_h < 0.3:
                 score_urine = 3
             elif rate_per_kg_h < 0.5:
@@ -424,7 +522,7 @@ def _calc_cardiovascular(
         if admin_end and isinstance(admin_end, datetime):
             if admin_end < eval_time:
                 continue
-        med_name = (med.get("med_name") or "").lower()
+        med_name = med.get("med_name") or ""
         route = (med.get("route") or "")
         # 白名单: 静脉 静滴 静推 泵入 iv 任一命中即通过
         # route 缺失时不跳过, 照常计入并打 route_unknown 标记
@@ -440,13 +538,18 @@ def _calc_cardiovascular(
         dose = med.get("dose_ugkgmin")
         if dose is not None and dose > 0:
             dose_known = True
-            if "去甲" in med_name or "norepinephrine" in med_name or med_name == "ne":
+            canon = canon_drug(med_name)
+            if canon == "norepinephrine":
                 ne_dose_ugkgmin = max(ne_dose_ugkgmin, dose)
-            elif "肾上腺" in med_name or "epinephrine" in med_name or med_name == "epi":
+            elif canon == "epinephrine":
                 epi_dose_ugkgmin = max(epi_dose_ugkgmin, dose)
-            elif "多巴胺" in med_name or "dopamine" in med_name or med_name == "dopa":
+            elif canon == "dopamine":
                 dopa_dose_ugkgmin = max(dopa_dose_ugkgmin, dose)
+            elif canon == "dobutamine":
+                # dobutamine 在 SOFA-2 归 other 桶（JAMA 2025: other_vasopressor → ≥2）
+                has_other_pressor = True
             else:
+                # phenylephrine / vasopressin / terlipressin / milrinone / isoproterenol → other
                 has_other_pressor = True
 
     score = 0
@@ -477,7 +580,7 @@ def _calc_cardiovascular(
     # MAP<70 且无升压药 → 1
     map_val = None
     if not has_active_pressor:
-        map_val, _, _ = _worst_in_window(obs, ["MAP", "mean_arterial_pressure"], eval_time, _cfg.RESP_LOOKBACK_H, 1)
+        map_val, _, _, _ = _worst_in_window(obs, ["MAP", "mean_arterial_pressure"], eval_time, _cfg.RESP_LOOKBACK_H, 1)
         info["map_value"] = map_val
         if map_val is not None and map_val < 70:
             score = max(score, 1)
@@ -488,8 +591,9 @@ def _calc_cardiovascular(
         if policy == "min_band_2":
             score = max(score, 2)
         elif policy == "reject":
+            # #28: reject 分支改成 return None, info
             info["dose_unknown_rejected"] = True
-        # 不许硬编码 max(score, 2)
+            return None, info
 
     info["has_active_pressor"] = has_active_pressor
     info["dose_known"] = dose_known

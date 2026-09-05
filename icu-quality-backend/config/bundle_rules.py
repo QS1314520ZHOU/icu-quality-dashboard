@@ -14,20 +14,10 @@ BUNDLE_ENGINE = "compare"
 # 影响: 分母归属月份，t0 更贴近临床实际
 BUNDLE_DENOM_ANCHOR = "t0"
 
-# ---- 休克判定 ----
-# and = 低血压+升压药同时成立才算脓毒性休克；or = 任一即可
-# ⚠️ 改 or 会导致循环论证，分母虚高
-SHOCK_RULE = "and"
-
 # ---- 感染证据门控 ----
 # on = 必须有感染证据(I1/I2/I3任一)才进分母；off = 跳过感染证据判定
 # 影响: off 会让任何用升压药的病人都算脓毒症
 INFECTION_GATE = "on"
-
-# ---- 感染部位是否必填 ----
-# off = 不阻塞分母，未确认只标黄 + SITE_UNCONFIRMED 原因码
-# ⚠️ on 时没人录部位分母会空掉，指标不可用
-SITE_REQUIRED = "off"
 
 # ---- 第一步 A1 规则 ----
 # value_present = 取到值即达标；value_below_threshold = 值低于阈值才算达标

@@ -84,6 +84,8 @@ def on_startup():
     summary_module.ensure_summary_collection()
     ensure_detail_cache_collection()
     ensure_exclusion_collection()
+    from db import ensure_infection_site_indexes
+    ensure_infection_site_indexes()
     ensure_ai_cache()
     ensure_clinical_indexes()
     _start_scheduler()
@@ -1115,6 +1117,11 @@ def query_detail(code: str, period: str, part: str, icu_unit: str = "all"):
                 "reason_codes": v3.get("reason_codes", []),
                 # 数据质量
                 "data_quality_flags": v3.get("data_quality_flags", []),
+                # G-1: 感染部位
+                "site_confirmed": v3.get("site_confirmed", False),
+                "site_primary": v3.get("site_primary", ""),
+                "site_secondary": v3.get("site_secondary", []),
+                "site_evidence_type": v3.get("site_evidence_type", ""),
             }
 
         hour = code.split("-")[2]  # '1h', '3h', '6h'
@@ -2644,48 +2651,103 @@ def bundle_override_stats(period: str, icu_unit: str = "all"):
 # Stage 6: 感染部位 API
 # ============================================================
 
-@app.get("/api/bundle/{pid}/infection-site")
-def get_bundle_infection_site(pid: str):
-    """获取患者的感染部位记录。"""
+@app.get("/api/infection_site")
+def api_get_infection_site(exclusion_key: str):
+    """查询未撤销的感染部位记录。"""
     from db import get_infection_site
-    docs = get_infection_site(pid)
-    return {"sites": docs}
+    doc = get_infection_site(exclusion_key)
+    return {"found": doc is not None, "record": doc}
 
 
-@app.post("/api/bundle/{pid}/infection-site")
-def add_bundle_infection_site(pid: str, body: dict = None):
-    """添加感染部位记录 (V3 扩展版)。"""
+@app.post("/api/infection_site")
+def api_create_infection_site(body: dict = None):
+    """新建/替换感染部位记录。已存在未撤销记录时先撤销再插入。"""
     if not body:
         return {"error": "Missing body"}
-    from db import save_infection_site
-    eval_time_raw = body.get("eval_time")
-    if isinstance(eval_time_raw, str):
+    from db import create_infection_site
+    try:
+        result = create_infection_site(body)
+        return {"ok": True, **result}
+    except (ValueError, RuntimeError) as e:
+        return {"ok": False, "error": str(e)}
+
+
+@app.delete("/api/infection_site/{record_id}")
+def api_revoke_infection_site(record_id: str, revoked_by: str = "system"):
+    """撤销感染部位记录（逻辑删除，不物理删除）。"""
+    from db import revoke_infection_site
+    try:
+        result = revoke_infection_site(record_id, revoked_by)
+        return {"ok": True, **result}
+    except (ValueError, RuntimeError) as e:
+        return {"ok": False, "error": str(e)}
+
+
+@app.get("/api/infection_site/suggest")
+def api_suggest_infection_site(pid: str, eval_time: str = None):
+    """
+    自动推荐感染部位。读取诊断、医嘱、培养标本，返回打分结果。
+    纯函数，不写库。
+    """
+    from db import suggest_infection_site
+    from datetime import datetime as _dt
+    from pymongo import ASCENDING
+
+    # 解析 eval_time
+    if eval_time:
         try:
-            eval_time = datetime.fromisoformat(eval_time_raw.replace("Z", "+00:00"))
+            et = _dt.fromisoformat(eval_time.replace("Z", "+00:00"))
         except ValueError:
-            eval_time = datetime.utcnow()
-    elif isinstance(eval_time_raw, datetime):
-        eval_time = eval_time_raw
+            et = datetime.utcnow()
     else:
-        eval_time = datetime.utcnow()
-    result = save_infection_site(
-        pid=pid,
-        infection_site=body.get("infection_site", ""),
-        eval_time=eval_time,
-        operator=body.get("operator", "system"),
-        evidence_type=body.get("evidence_type", ""),
-        notes=body.get("notes", ""),
-        secondary_sites=body.get("secondary_sites", []),
-    )
-    return result
+        et = datetime.utcnow()
 
+    # 采集 pid 的所有入库记录，取诊断文本、医嘱名、培养标本
+    diagnosis_text = ""
+    order_names: list[str] = []
+    culture_specimens: list[str] = []
 
-@app.delete("/api/bundle/{pid}/infection-site/{exclusion_key}")
-def remove_bundle_infection_site(pid: str, exclusion_key: str):
-    """删除感染部位记录。"""
-    from db import delete_infection_site
-    result = delete_infection_site(pid, exclusion_key)
-    return result
+    for db_name in BED_DB_NAMES:
+        try:
+            db = get_client()[db_name]
+            doc = db.VI_ICU_ZYBR.find_one(
+                {"hisPid": pid},
+                {"diagnose": 1, "_id": 0},
+            )
+            if doc:
+                diagnosis_text = doc.get("diagnose", "") or ""
+            break
+        except Exception:
+            continue
+
+    # 医嘱名
+    for db_name in BED_DB_NAMES:
+        try:
+            db = get_client()[db_name]
+            cursor = db.VI_ICU_ZYYZ.find(
+                {"hisPid": pid, "orderStatus": {"$in": ["V", "F", "E"]}},
+                {"orderName": 1, "_id": 0},
+            ).limit(200)
+            order_names = [d.get("orderName", "") for d in cursor if d.get("orderName")]
+            break
+        except Exception:
+            continue
+
+    # 培养标本
+    for db_name in BED_DB_NAMES:
+        try:
+            db = get_client()[db_name]
+            cursor = db.VI_DC_YJJC.find(
+                {"pid": pid, "item_name": {"$regex": "培养|culture", "$options": "i"}},
+                {"specimen_name": 1, "_id": 0},
+            ).limit(50)
+            culture_specimens = [d.get("specimen_name", "") for d in cursor if d.get("specimen_name")]
+            break
+        except Exception:
+            continue
+
+    suggestions = suggest_infection_site(diagnosis_text, order_names, culture_specimens)
+    return {"suggestions": suggestions}
 
 
 class TriTubeConfirmPayload(BaseModel):

@@ -89,6 +89,10 @@ SITE_REQUIRED = False
 # 影响: SOFA 总分，换 official 会给缺失项补 0
 SOFA_MISSING_POLICY = "strict_partial"
 
+# #19: 陈旧数据策略。"flag_only"=照常出分但标记; "reject"=返回 None
+# 影响: SOFA 分项，reject 会让陈旧数据的分项缺失
+SOFA_STALE_POLICY = "flag_only"
+
 # SOFA 变体。"both"=同时算 SOFA 和 SOFA-2;"sofa"=只算 SOFA;"sofa2"=只算 SOFA-2
 # 影响: 是否同时跑两个版本
 SOFA_VARIANTS = "both"

@@ -19,8 +19,7 @@ CLASSIC_SOFA_THRESHOLDS = {
         "lookback_hours": 24,
         "max_staleness_hours": 4,
         "aggregation": "worst",
-        # 半开区间 [low, high)，score 分值
-        # 需求文档 7.3 第 4 条: 统一改半开区间
+        "range_guard": (0, 1000),  # #22: P/F 0-1000
         "thresholds": [
             {"low": 400, "high": 99999, "score": 0},
             {"low": 300, "high": 400, "score": 1},
@@ -36,6 +35,7 @@ CLASSIC_SOFA_THRESHOLDS = {
         "lookback_hours": 24,
         "max_staleness_hours": 12,
         "aggregation": "worst",
+        "range_guard": (0, 3000),  # #22: PLT 0-3000
         "thresholds": [
             {"low": 150, "high": 99999, "score": 0},
             {"low": 100, "high": 150, "score": 1},
@@ -51,8 +51,8 @@ CLASSIC_SOFA_THRESHOLDS = {
         "lookback_hours": 24,
         "max_staleness_hours": 12,
         "aggregation": "worst",
-        # 经典 SOFA 用 μmol/L
         "canonical_unit": "umol/l",
+        "range_guard": (0, 2000),  # #22: 胆红素 0-2000 μmol/L
         "thresholds": [
             {"low": 0,    "high": 20,   "score": 0},
             {"low": 20,   "high": 33,   "score": 1},
@@ -90,8 +90,9 @@ CLASSIC_SOFA_THRESHOLDS = {
         "lookback_hours": 24,
         "max_staleness_hours": 8,
         "aggregation": "worst",
+        "range_guard": (3, 15),  # #22: GCS 3-15
         "thresholds": [
-            {"low": 15, "high": 15, "score": 0},
+            {"low": 15, "high": 16, "score": 0},
             {"low": 13, "high": 15, "score": 1},
             {"low": 10, "high": 13, "score": 2},
             {"low": 6,  "high": 10, "score": 3},
@@ -109,6 +110,8 @@ CLASSIC_SOFA_THRESHOLDS = {
         # 经典 SOFA 用 μmol/L
         "canonical_unit_creatinine": "umol/l",
         "canonical_unit_urine": "ml/24h",
+        "range_guard_creatinine": (0, 3000),  # #22: 肌酐 0-3000 μmol/L
+        "range_guard_urine": (0, 20000),  # #22: 尿量 0-20000 ml
         "creatinine_thresholds": [
             {"low": 0,    "high": 110,  "score": 0},
             {"low": 110,  "high": 170,  "score": 1},
@@ -137,7 +140,7 @@ SOFA2_THRESHOLDS = {
         "max_staleness_hours": 8,
         "aggregation": "worst",
         "thresholds": [
-            {"low": 15, "high": 15, "score": 0},
+            {"low": 15, "high": 16, "score": 0},
             {"low": 13, "high": 15, "score": 1},
             {"low": 9,  "high": 13, "score": 2},
             {"low": 6,  "high": 9,  "score": 3},
@@ -179,6 +182,7 @@ SOFA2_THRESHOLDS = {
         "lookback_hours": 24,
         "max_staleness_hours": 12,
         "aggregation": "worst",
+        "range_guard": (0, 3000),  # #22: PLT 0-3000
         "thresholds": [
             {"low": 150, "high": 9999, "score": 0},
             {"low": 100, "high": 150,  "score": 1},
@@ -255,12 +259,6 @@ SOFA2_THRESHOLDS = {
             {"low": 70, "high": 999, "score": 0},
             {"low": 0,  "high": 70,  "score": 1},
         ],
-        # 有 other_pressor 时的额外加分
-        "other_pressor_bonus": {
-            # (ne_epi_score, has_other) → final_score
-            # ne_epi 2 + other → 2 (no change per JAMA)
-            # ne_epi 2 + other → 实际由 ne_epi_sum 决定
-        },
     },
 }
 
@@ -293,22 +291,8 @@ SOFA2_META = {
 }
 
 # ============================================================
-# 单位白名单 (需求文档 7.3 第 2、13 条)
-# 按 variant 分开，禁止共用
-# ============================================================
-
-_CANONICAL_UNITS = {
-    "classic_sofa_1996": {
-        "bilirubin": {"umol/l", "μmol/l", "微摩尔/升", "micromol/l"},
-        "creatinine": {"umol/l", "μmol/l", "微摩尔/升", "micromol/l"},
-    },
-    "sofa_2_2025": {
-        "bilirubin": {"mg/dl"},
-        "creatinine": {"mg/dl"},
-    },
-}
-
 # 单位转换因子 — 三元组 key: (substance, from_unit, to_unit)
+# ============================================================
 _UNIT_CONVERSION = {
     # bilirubin: μmol/L → mg/dL (÷17.104)
     ("bilirubin", "umol/l", "mg/dl"): lambda v: v / 17.104,

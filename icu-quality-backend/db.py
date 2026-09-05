@@ -56,6 +56,176 @@ def build_exclusion_key(pid: str, event_time) -> str:
     return pid + "|" + ts
 
 
+# ============================================================
+# G-1: 感染部位人工确认与入库
+# ============================================================
+
+INFECTION_SITE_COLLECTION = "icu_infection_site"
+
+
+def _get_infection_site_collection():
+    for db_name in BED_DB_NAMES:
+        try:
+            db = get_client(db_name)[db_name]
+            return db[INFECTION_SITE_COLLECTION]
+        except Exception:
+            continue
+    return None
+
+
+def ensure_infection_site_indexes():
+    """创建 icu_infection_site 集合索引。在 main.py on_startup 中调用。"""
+    coll = _get_infection_site_collection()
+    if coll is None:
+        return
+    try:
+        # 唯一索引: (indicator_code, exclusion_key, revoked_at) 部分唯一
+        coll.create_index(
+            [("indicator_code", 1), ("exclusion_key", 1), ("revoked_at", 1)],
+            unique=True, background=True,
+            partialFilterExpression={"revoked_at": None},
+        )
+        coll.create_index([("period", 1), ("dept_code", 1)], background=True)
+        coll.create_index([("pid", 1)], background=True)
+        logger.info("[infection_site] indexes ensured")
+    except Exception as e:
+        logger.warning("[infection_site] ensure index failed: %s", e)
+
+
+def suggest_infection_site(
+    diagnosis_text: str,
+    order_names: list,
+    culture_specimens: list,
+) -> list:
+    """
+    纯函数，不写库。按关键词表打分，返回 [{site, score, matched_keywords}] 倒序。
+    全部为零 → 返回空数组。
+    """
+    from config.infection_sites import SITE_SUGGEST_KEYWORDS
+
+    combined_text = " ".join([
+        diagnosis_text or "",
+        " ".join(order_names or []),
+        " ".join(culture_specimens or []),
+    ])
+
+    results = []
+    for site, keywords in SITE_SUGGEST_KEYWORDS.items():
+        matched = [kw for kw in keywords if kw in combined_text]
+        if matched:
+            results.append({
+                "site": site,
+                "score": len(matched),
+                "matched_keywords": matched,
+            })
+
+    results.sort(key=lambda x: x["score"], reverse=True)
+    return results
+
+
+def get_infection_site(exclusion_key: str) -> dict | None:
+    """查询未撤销的感染部位记录。"""
+    coll = _get_infection_site_collection()
+    if coll is None:
+        return None
+    return coll.find_one(
+        {"indicator_code": "ICU-05", "exclusion_key": exclusion_key, "revoked_at": None},
+        {"_id": 0},
+    )
+
+
+def create_infection_site(doc: dict) -> dict:
+    """
+    创建感染部位记录。
+    已存在未撤销记录时：先置 revoked_at 再插新条，返回 {"replaced": True}。
+    """
+    from config.infection_sites import validate_site_code, validate_evidence_type
+
+    coll = _get_infection_site_collection()
+    if coll is None:
+        raise RuntimeError("无法获取 icu_infection_site 集合")
+
+    # 校验
+    primary_site = doc.get("primary_site")
+    if not validate_site_code(primary_site):
+        raise ValueError(f"primary_site 不合法: {primary_site}")
+
+    secondary_sites = doc.get("secondary_sites", [])
+    for s in secondary_sites:
+        if not validate_site_code(s):
+            raise ValueError(f"secondary_site 不合法: {s}")
+    if primary_site in secondary_sites:
+        raise ValueError("primary_site 不得同时出现在 secondary_sites 里")
+
+    evidence_type = doc.get("evidence_type")
+    if not validate_evidence_type(evidence_type):
+        raise ValueError(f"evidence_type 不合法: {evidence_type}")
+
+    if not doc.get("exclusion_key"):
+        raise ValueError("exclusion_key 不能为空")
+    if not doc.get("confirmed_by"):
+        raise ValueError("confirmed_by 不能为空")
+
+    # 检查是否已存在未撤销记录
+    existing = coll.find_one({
+        "indicator_code": "ICU-05",
+        "exclusion_key": doc["exclusion_key"],
+        "revoked_at": None,
+    })
+
+    replaced = False
+    if existing:
+        # 先撤销旧记录
+        coll.update_one(
+            {"_id": existing["_id"]},
+            {"$set": {"revoked_at": datetime.utcnow(), "revoked_by": doc.get("confirmed_by", "system")}},
+        )
+        replaced = True
+
+    # 插入新记录
+    new_doc = {
+        "indicator_code": "ICU-05",
+        "exclusion_key": doc["exclusion_key"],
+        "pid": doc.get("pid", ""),
+        "disease_id": doc.get("disease_id"),
+        "period": doc.get("period", ""),
+        "dept_code": doc.get("dept_code", ""),
+        "patient_name": doc.get("patient_name", ""),
+        "primary_site": primary_site,
+        "secondary_sites": secondary_sites,
+        "evidence_type": evidence_type,
+        "evidence_text": (doc.get("evidence_text") or "")[:500],
+        "confirmed_by": doc["confirmed_by"],
+        "confirmed_at": datetime.utcnow(),
+        "revoked_at": None,
+        "revoked_by": None,
+        "source": doc.get("source", "manual"),
+    }
+    coll.insert_one(new_doc)
+    return {"replaced": replaced}
+
+
+def revoke_infection_site(record_id: str, revoked_by: str) -> dict:
+    """撤销感染部位记录（只置 revoked_at，不物理删除）。"""
+    from bson import ObjectId
+
+    coll = _get_infection_site_collection()
+    if coll is None:
+        raise RuntimeError("无法获取 icu_infection_site 集合")
+
+    existing = coll.find_one({"_id": ObjectId(record_id)})
+    if not existing:
+        raise ValueError("记录不存在")
+    if existing.get("revoked_at") is not None:
+        raise ValueError("记录已撤销")
+
+    coll.update_one(
+        {"_id": ObjectId(record_id)},
+        {"$set": {"revoked_at": datetime.utcnow(), "revoked_by": revoked_by}},
+    )
+    return {"revoked": True}
+
+
 # ==== 统计窗口交集化 ====
 # 缺陷根源:分母限定统计月,分子却放开整段住院期。
 # 任何"当月是否发生过某事件"的查询,时间条件都必须来自本函数。
@@ -2314,23 +2484,51 @@ def judge_bundle_v3_for_patient(sc_pid: str, dc_pid: str, mrn: str, t0: datetime
     except Exception:
         pass
 
+    # ---- G-1: 查询感染部位确认状态 ----
+    site_confirmed = False
+    try:
+        from config.indicator_windows import SITE_REQUIRED as _SITE_REQUIRED
+        if _SITE_REQUIRED:
+            ek = build_exclusion_key(dc_pid, t0)
+            site_doc = get_infection_site(ek)
+            if site_doc and site_doc.get("primary_site"):
+                site_confirmed = True
+    except Exception:
+        pass
+
     # ---- 调用 v3 引擎 ----
+    # #8: 1h 和 3h 各自独立提供数据
     patient_data = {
         't0': t0,
         'eval_time': eval_time,
+        # 门控数据（全窗口，用于 S1-S4 / I1-I3 / K1-K2）
         'diagnosis_text': diagnosis_text,
         'has_antibiotic': has_antibiotic,
         'has_culture': has_culture,
         'has_vasopressor': has_vasopressor,
+        'site_confirmed': site_confirmed,
         'lactate_initial': lactate_initial,
-        'lactate_max': lactate_max,
-        'map_min': map_min,
         'gcs_min': gcs_min,
         'pf_ratio_min': pf_ratio_min,
-        'antibiotic_time': antibiotic_time,
-        'culture_time': culture_time,
-        'has_fluid_1h': has_fluid_1h,
-        'fluid_3h_ml': fluid_3h_ml,
+        'map_min': map_min,
+        # 1h 窗口数据（用于 A1/B1/B2/B3/C1/C2/C3）
+        'w1h': {
+            'lactate_initial': lactate_initial,
+            'lactate_max': lactate_max,
+            'map_min': map_min,
+            'antibiotic_time': antibiotic_time,
+            'culture_time': culture_time,
+            'has_fluid': has_fluid_1h,
+        },
+        # 3h 窗口数据
+        'w3h': {
+            'lactate_initial': lactate_initial,
+            'lactate_max': lactate_max,
+            'map_min': map_min,
+            'antibiotic_time': antibiotic_time,
+            'culture_time': culture_time,
+            'fluid_ml': fluid_3h_ml,
+        },
     }
 
     result = judge_bundle_v3(patient_data)

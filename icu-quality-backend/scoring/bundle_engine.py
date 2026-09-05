@@ -19,6 +19,9 @@ import logging
 from datetime import datetime, timedelta, timezone
 from typing import Any, Dict, List, Optional, Tuple
 
+import config.bundle_rules as _br
+import config.indicator_windows as _iw
+
 logger = logging.getLogger(__name__)
 
 # ============================================================
@@ -28,6 +31,7 @@ logger = logging.getLogger(__name__)
 # VASO_WIDE: 运行时从医院药物字典读 classification=="血管活性"
 # 调用方需在启动时调用 set_vaso_wide_labels() 填充
 VASO_WIDE_LABELS: set[str] = set()
+_wide_injected: bool = False
 
 # VASO_STRICT: SOFA-2 白名单 8 种 (硬编码)
 VASO_STRICT_LABELS = {
@@ -44,8 +48,15 @@ VASO_STRICT_LABELS = {
 
 def set_vaso_wide_labels(labels: set[str]) -> None:
     """由调用方注入, 数据源: 医院药物字典 classification=='血管活性'。"""
-    global VASO_WIDE_LABELS
+    global VASO_WIDE_LABELS, _wide_injected
+    if not labels:
+        raise RuntimeError(
+            "VASO_WIDE_LABELS 注入为空集，ICU-05 分母会恒为 0，"
+            "请在启动时从药物字典 classification=='血管活性' 注入"
+        )
     VASO_WIDE_LABELS = set(labels)
+    _wide_injected = True
+    logger.info("VASO_WIDE_LABELS 注入 %d 条", len(VASO_WIDE_LABELS))
 
 
 # 感染诊断关键词
@@ -89,13 +100,18 @@ def _in_window(ts: datetime, start: datetime, end: datetime) -> bool:
 
 def _classify_vasopressor(med_name: str) -> Tuple[bool, bool]:
     """
-    分类升压药。全等匹配，禁止子串匹配。
+    分类升压药。
+    in_wide: 全等匹配 VASO_WIDE_LABELS（医院字典原名，本来就该全等）
+    in_strict: 用 canon_drug 规范化判定（覆盖各种别名/商品名）
     返回 (in_wide, in_strict)。
     """
+    from .adapter import canon_drug
     name_lower = (med_name or "").strip().lower()
-    # 全等匹配: 药物名必须精确命中集合中的某个元素
+    # VASO_WIDE: 全等匹配，医院字典原名
     in_wide = name_lower in VASO_WIDE_LABELS
-    in_strict = name_lower in VASO_STRICT_LABELS
+    # VASO_STRICT: canon_drug 规范化判定
+    canon = canon_drug(med_name)
+    in_strict = canon is not None
     return in_wide, in_strict
 
 
@@ -217,19 +233,23 @@ def judge_B3_step2(
     b1: Optional[bool], b2: Optional[bool],
     antibiotic_time: Optional[datetime],
     culture_time: Optional[datetime],
-) -> Optional[bool]:
+) -> Tuple[Optional[bool], Optional[str]]:
     """
-    B3: 第二步达标 = B1有值 AND B2有值 AND B1晚于B2
-    即：抗生素执行时间晚于血培养执行时间
+    #29: B3 返回 (bool_or_none, reason)。
+    区分 AB_MISSING / BC_MISSING / BC_AFTER_AB 三种情况。
     """
-    if b1 is None or b2 is None:
-        return None
+    if b1 is None:
+        return None, "AB_MISSING"
+    if b2 is None:
+        return None, "BC_MISSING"
     if not b1 or not b2:
-        return False
+        return False, "AB_MISSING" if not b1 else "BC_MISSING"
     if antibiotic_time is None or culture_time is None:
-        return None
+        return None, "AB_MISSING" if antibiotic_time is None else "BC_MISSING"
     # 抗生素晚于血培养 → 达标
-    return antibiotic_time > culture_time
+    if antibiotic_time > culture_time:
+        return True, None
+    return False, "BC_AFTER_AB"
 
 
 def judge_C1_map_trigger(map_value: Optional[float]) -> Optional[bool]:
@@ -336,6 +356,12 @@ def judge_bundle_v3(patient_data: Dict[str, Any]) -> Dict[str, Any]:
 
     返回: {"bundle_1h": {...}, "bundle_3h": {...}, "gate": {...}}
     """
+    if not _wide_injected:
+        raise RuntimeError(
+            "VASO_WIDE_LABELS 未注入，ICU-05 分母会恒为 0，"
+            "请在启动时从药物字典 classification=='血管活性' 注入"
+        )
+
     t0 = patient_data.get("t0")
     if not t0:
         return {"bundle_1h": None, "bundle_3h": None, "reason": "NO_T0"}
@@ -386,33 +412,68 @@ def judge_bundle_v3(patient_data: Dict[str, Any]) -> Dict[str, Any]:
         gate["reason"] = "NOT_SEPTIC_SHOCK"
         return {"bundle_1h": None, "bundle_3h": None, "gate": gate}
 
-    # ---- Bundle 时间窗判定 (公共部分) ----
-    a1 = judge_A1_lactate_measured(patient_data.get("lactate_initial"))
-    b1 = judge_B1_antibiotic_time(patient_data.get("antibiotic_time"))
-    b2 = judge_B2_culture_time(patient_data.get("culture_time"))
-    b3 = judge_B3_step2(b1, b2, patient_data.get("antibiotic_time"), patient_data.get("culture_time"))
-    c1 = judge_C1_map_trigger(patient_data.get("map_min"))
-    c2 = judge_C2_lactate_trigger(patient_data.get("lactate_max"))
+    # ---- Bundle 时间窗判定 ----
+    # #8: w1h 和 w3h 各自独立提供数据
+    w1h = patient_data.get("w1h", {})
+    w3h = patient_data.get("w3h", {})
+    # #10: 窗口边界
+    t0_1h = t0 + timedelta(hours=1)
+    t0_3h = t0 + timedelta(hours=3)
 
-    common = {
-        "a1": a1, "b1": b1, "b2": b2, "b3": b3,
-        "c1": c1, "c2": c2,
-        "t0": t0,
-    }
+    def _in_window(ts, win_end):
+        """#10: 检查时间是否在 [t0, win_end] 窗口内"""
+        if ts is None or not isinstance(ts, datetime):
+            return True  # 无时间戳的数据不参与窗口校验
+        return t0 <= ts <= win_end
+
+    def _window_validate_time(ts, win_end, raw_result, key):
+        """#10: 窗口校验 — 不在窗口内则置 None，时间照常回填到详情用于红字展示"""
+        if ts is not None and isinstance(ts, datetime) and not _in_window(ts, win_end):
+            raw_result[f"{key}_out_of_window"] = True
+            return None
+        return raw_result.get(key)
 
     # ---- 1h 窗口判定 ----
-    c3_1h = judge_C3_1h_fluid(patient_data.get("has_fluid_1h"))
-    result_1h = judge_bundle_finish_v3(a1, b3, c1, c2, c3_1h)
-    result_1h.update(common)
-    result_1h["c3"] = c3_1h
-    result_1h["c3_1h"] = c3_1h
+    abx_time_1h = w1h.get("antibiotic_time")
+    culture_time_1h = w1h.get("culture_time")
+    a1_1h = judge_A1_lactate_measured(w1h.get("lactate_initial"))
+    b1_1h = judge_B1_antibiotic_time(abx_time_1h) if _in_window(abx_time_1h, t0_1h) else None
+    b2_1h = judge_B2_culture_time(culture_time_1h) if _in_window(culture_time_1h, t0_1h) else None
+    b3_1h, b3_reason_1h = judge_B3_step2(b1_1h, b2_1h, abx_time_1h, culture_time_1h)
+    c1_1h = judge_C1_map_trigger(w1h.get("map_min"))
+    c2_1h = judge_C2_lactate_trigger(w1h.get("lactate_max"))
+    c3_1h = judge_C3_1h_fluid(w1h.get("has_fluid"))
+    result_1h = judge_bundle_finish_v3(a1_1h, b3_1h, c1_1h, c2_1h, c3_1h)
+    result_1h.update({
+        "a1": a1_1h, "b1": b1_1h, "b2": b2_1h, "b3": b3_1h,
+        "c1": c1_1h, "c2": c2_1h, "c3": c3_1h,
+        "t0": t0,
+        "b3_reason": b3_reason_1h,
+        # 时间戳照常回填（红字展示用）
+        "antibiotic_time": abx_time_1h,
+        "culture_time": culture_time_1h,
+    })
 
     # ---- 3h 窗口判定 ----
-    c3_3h = judge_C3_3h_fluid(patient_data.get("fluid_3h_ml"))
-    result_3h = judge_bundle_finish_v3(a1, b3, c1, c2, c3_3h)
-    result_3h.update(common)
-    result_3h["c3"] = c3_3h
-    result_3h["c3_3h"] = c3_3h
+    abx_time_3h = w3h.get("antibiotic_time")
+    culture_time_3h = w3h.get("culture_time")
+    a1_3h = judge_A1_lactate_measured(w3h.get("lactate_initial"))
+    b1_3h = judge_B1_antibiotic_time(abx_time_3h) if _in_window(abx_time_3h, t0_3h) else None
+    b2_3h = judge_B2_culture_time(culture_time_3h) if _in_window(culture_time_3h, t0_3h) else None
+    b3_3h, b3_reason_3h = judge_B3_step2(b1_3h, b2_3h, abx_time_3h, culture_time_3h)
+    c1_3h = judge_C1_map_trigger(w3h.get("map_min"))
+    c2_3h = judge_C2_lactate_trigger(w3h.get("lactate_max"))
+    c3_3h = judge_C3_3h_fluid(w3h.get("fluid_ml"))
+    result_3h = judge_bundle_finish_v3(a1_3h, b3_3h, c1_3h, c2_3h, c3_3h)
+    result_3h.update({
+        "a1": a1_3h, "b1": b1_3h, "b2": b2_3h, "b3": b3_3h,
+        "c1": c1_3h, "c2": c2_3h, "c3": c3_3h,
+        "t0": t0,
+        "b3_reason": b3_reason_3h,
+        # 时间戳照常回填（红字展示用）
+        "antibiotic_time": abx_time_3h,
+        "culture_time": culture_time_3h,
+    })
 
     return {
         "bundle_1h": result_1h,
