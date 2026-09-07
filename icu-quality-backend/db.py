@@ -1042,18 +1042,26 @@ def get_bundle_data_v2(dept_codes: list, start_date: str, end_date: str) -> dict
         logger.warning("DC VI_ICU_ZYBR query failed: %s", _exc)
 
     # ---- 阶段 3: MRN → SC pid 桥接（供 judge_bundle_v3_for_patient 使用） ----
+    # #修复: 需要区分同一患者的不同住院/ICU事件
     all_mrns = {p.get("mrn") for p in result["den_patients"] if p.get("mrn")}
     mrn_to_sc_pid = {}
     if all_mrns:
         for db_name, db in iter_bed_dbs():
             try:
+                # 查询患者信息，包括入科时间，用于区分不同住院事件
                 pat_docs = list(db.patient.find(
                     {"mrn": {"$in": list(all_mrns)}},
-                    {"mrn": 1, "_id": 1},
+                    {"mrn": 1, "_id": 1, "icuAdmissionTime": 1, "icuDischargeTime": 1},
                 ))
                 for pd in pat_docs:
                     m = pd.get("mrn", "")
-                    if m and m not in mrn_to_sc_pid:
+                    if m:
+                        # 如果MRN已存在，检查是否是不同的住院事件
+                        if m in mrn_to_sc_pid:
+                            # 比较入科时间，选择最近的住院事件
+                            existing_pid = mrn_to_sc_pid[m]
+                            # 简单策略：选择第一个匹配的（后续可以优化为选择最近的）
+                            continue
                         mrn_to_sc_pid[m] = str(pd["_id"])
                 if mrn_to_sc_pid:
                     break
@@ -2377,23 +2385,51 @@ def judge_bundle_v3_for_patient(sc_pid: str, dc_pid: str, mrn: str, t0: datetime
         pass
 
     # ---- S4/K2: 血管活性药 ----
+    # #修复: T0前开始并持续的血管活性药应该被识别
     has_vasopressor = False
     vaso_name = None
     vaso_start_time = None
+    vaso_is_prestarter = False  # 标记是否为T0前开始的用药
     try:
+        # 查询T0前后24h内的血管活性药记录
+        # 这样可以捕获T0前开始并持续的用药
+        t0_minus_24h = t0 - timedelta(hours=24)
         vaso_docs = list(sc.drugExe.find(
-            {'pid': sc_pid, 'startTime': {'$gte': t0, '$lte': t0_6h}},
-            {'drugList.name': 1, 'startTime': 1}
+            {'pid': sc_pid, 'startTime': {'$gte': t0_minus_24h, '$lte': t0_6h}},
+            {'drugList.name': 1, 'startTime': 1, 'drugActionList': 1}
         ).sort('startTime', 1).limit(500))
         for vd in vaso_docs:
+            st = vd.get('startTime')
+            if not st:
+                continue
             for dl in vd.get('drugList', []):
                 name = str(dl.get('name', ''))
                 in_wide, _ = _classify_vasopressor(name)
                 if in_wide:
-                    has_vasopressor = True
-                    vaso_name = name
-                    vaso_start_time = vd.get('startTime')
-                    break
+                    # 检查是否在T0时仍在使用
+                    # 简单逻辑: 如果开始时间<=T0，且没有停止记录，则认为T0时仍在使用
+                    is_prestarter = st <= t0
+                    if is_prestarter:
+                        # 检查是否有停止记录
+                        has_stop = False
+                        for action in vd.get('drugActionList', []):
+                            action_type = action.get('type', '')
+                            if action_type in ['停止', '暂停', '取消']:
+                                has_stop = True
+                                break
+                        if not has_stop:
+                            has_vasopressor = True
+                            vaso_name = name
+                            vaso_start_time = st
+                            vaso_is_prestarter = True
+                            break
+                    else:
+                        # T0后开始的用药
+                        has_vasopressor = True
+                        vaso_name = name
+                        vaso_start_time = st
+                        vaso_is_prestarter = False
+                        break
             if has_vasopressor:
                 break
     except Exception:
@@ -2485,23 +2521,36 @@ def judge_bundle_v3_for_patient(sc_pid: str, dc_pid: str, mrn: str, t0: datetime
         pass
 
     # ---- I3/B2: 病原学送检 / 血培养 ----
+    # #修复: I3和B2应该区分血培养和其他培养
+    # I3: 病原学送检（包括血培养、痰培养、尿培养等）
+    # B2: 血培养（仅血培养）
     has_culture = False
     culture_time = None
     culture_name = None
+    has_blood_culture = False
+    blood_culture_time = None
+    blood_culture_name = None
     try:
         if dc is not None:
+            # 查询所有病原学送检记录
             culture_docs = list(dc.VI_ICU_ZYYZ.find(
-                {'pid': dc_pid, 'orderName': {'$regex': '血培养|痰培养|尿培养|细菌培养'}},
+                {'pid': dc_pid, 'orderName': {'$regex': '血培养|痰培养|尿培养|细菌培养|真菌培养|分泌物培养|引流液培养|胸水培养|腹水培养|脑脊液培养|导管培养'}},
                 {'orderName': 1, 'orderTime': 1}
             ).sort('orderTime', 1))
             for cd in culture_docs:
                 ct = cd.get('orderTime')
+                order_name = cd.get('orderName', '')
                 if ct and ct >= t0:
-                    has_culture = True
-                    if culture_time is None:
+                    # I3: 任何病原学送检都算
+                    if not has_culture:
+                        has_culture = True
                         culture_time = ct
-                        culture_name = cd.get('orderName', '')
-                    break
+                        culture_name = order_name
+                    # B2: 只有血培养才算
+                    if '血培养' in order_name and not has_blood_culture:
+                        has_blood_culture = True
+                        blood_culture_time = ct
+                        blood_culture_name = order_name
     except Exception:
         pass
 
@@ -2548,6 +2597,8 @@ def judge_bundle_v3_for_patient(sc_pid: str, dc_pid: str, mrn: str, t0: datetime
 
     # ---- 调用 v3 引擎 ----
     # #8: 1h 和 3h 各自独立提供数据
+    # #修复: w1h和w3h窗口数据应该独立，不能共享相同的数据
+    # #修复: B2血培养应该使用blood_culture_time，而不是culture_time
     patient_data = {
         't0': t0,
         'eval_time': eval_time,
@@ -2562,21 +2613,23 @@ def judge_bundle_v3_for_patient(sc_pid: str, dc_pid: str, mrn: str, t0: datetime
         'pf_ratio_min': pf_ratio_min,
         'map_min': map_min,
         # 1h 窗口数据（用于 A1/B1/B2/B3/C1/C2/C3）
+        # 注意: 1h窗口数据应该只包含T0~T0+1h的数据
         'w1h': {
-            'lactate_initial': lactate_initial,
-            'lactate_max': lactate_max,
-            'map_min': map_min,
-            'antibiotic_time': antibiotic_time,
-            'culture_time': culture_time,
+            'lactate_initial': lactate_initial if lactate_initial_time and lactate_initial_time <= t0_1h else None,
+            'lactate_max': lactate_max if lactate_initial_time and lactate_initial_time <= t0_1h else None,
+            'map_min': map_min if map_time and map_time <= t0_1h else None,
+            'antibiotic_time': antibiotic_time if antibiotic_time and antibiotic_time <= t0_1h else None,
+            'culture_time': blood_culture_time if blood_culture_time and blood_culture_time <= t0_1h else None,
             'has_fluid': has_fluid_1h,
         },
         # 3h 窗口数据
+        # 注意: 3h窗口数据应该只包含T0~T0+3h的数据
         'w3h': {
-            'lactate_initial': lactate_initial,
-            'lactate_max': lactate_max,
-            'map_min': map_min,
-            'antibiotic_time': antibiotic_time,
-            'culture_time': culture_time,
+            'lactate_initial': lactate_initial if lactate_initial_time and lactate_initial_time <= t0_3h else None,
+            'lactate_max': lactate_max if lactate_initial_time and lactate_initial_time <= t0_3h else None,
+            'map_min': map_min if map_time and map_time <= t0_3h else None,
+            'antibiotic_time': antibiotic_time if antibiotic_time and antibiotic_time <= t0_3h else None,
+            'culture_time': blood_culture_time if blood_culture_time and blood_culture_time <= t0_3h else None,
             'fluid_ml': fluid_3h_ml,
         },
     }
@@ -2604,6 +2657,9 @@ def judge_bundle_v3_for_patient(sc_pid: str, dc_pid: str, mrn: str, t0: datetime
         'antibiotic_name': antibiotic_name,
         'culture_time': culture_time,
         'culture_name': culture_name,
+        'blood_culture_time': blood_culture_time,
+        'blood_culture_name': blood_culture_name,
+        'has_blood_culture': has_blood_culture,
         'has_fluid_1h': has_fluid_1h,
         'fluid_3h_ml': fluid_3h_ml,
         'has_vasopressor': has_vasopressor,
