@@ -833,7 +833,9 @@ def get_bundle_data(dept_codes: list, start_date: str, end_date: str) -> dict:
             for d in den_list:
                 item = {"_id": d["pid"], "mrn": d.get("mrn", ""), "name": d.get("patientName", ""),
                         "hisBed": "", "diagnosisTime": d.get("diagnosisTime"),
-                        "diseaseId": str(d["_id"])}
+                        "diseaseId": str(d["_id"]), "sc_pid": str(d["pid"]),
+                        "diagnose": d.get("diseaseType", ""),
+                        "t0": d.get("diagnosisTime"), "t0_source": "diagnosis_time"}
                 p = pat_map.get(d["pid"])
                 if p:
                     item["mrn"] = item["mrn"] or p.get("hisPid", "")
@@ -851,6 +853,9 @@ def get_bundle_data(dept_codes: list, start_date: str, end_date: str) -> dict:
                         item["ai_reason"] = verdict.get("reason", "")
                         item["low_confidence"] = bool(verdict.get("low_confidence"))
                         item["qc_t0"] = verdict.get("t0")
+                        if item["qc_t0"]:
+                            item["t0"] = item["qc_t0"]
+                            item["t0_source"] = "qc_t0"
                         item["sofa_delta"] = verdict.get("sofa_delta")
                     except Exception:
                         item["ai_confirm"] = None
@@ -968,14 +973,17 @@ def get_bundle_data_v2(dept_codes: list, start_date: str, end_date: str) -> dict
 
     try:
         # 查询 VI_ICU_ZYBR：扩展关键词（脓毒血症/败血症/感染性休克/脓毒性休克等）
-        dc_diagnoses = list(dc.VI_ICU_ZYBR.find(
-            {
+        dc_query = {
                 "diagnose": {"$regex": SEPSIS_DIAG_KEYWORDS, "$options": "i"},
                 "admitTime": {
                     "$gte": start_dt,
                     "$lte": dt(end_dt.year, end_dt.month, end_dt.day, 23, 59, 59),
                 },
-            },
+            }
+        if dept_codes:
+            dc_query["deptCode"] = {"$in": dept_codes}
+        dc_diagnoses = list(dc.VI_ICU_ZYBR.find(
+            dc_query,
             {
                 "pid": 1,
                 "name": 1,
@@ -998,6 +1006,8 @@ def get_bundle_data_v2(dept_codes: list, start_date: str, end_date: str) -> dict
             dc_pids_for_t0 = []
 
             for dx in dc_diagnoses:
+                if dept_codes and dx.get("deptCode") not in dept_codes:
+                    continue
                 mrn = str(dx.get("mrn") or "").strip()
                 patient_id = str(dx.get("pid") or "").strip()
 
@@ -1074,13 +1084,26 @@ def get_bundle_data_v2(dept_codes: list, start_date: str, end_date: str) -> dict
             pat["sc_pid"] = str(pat.get("_id", ""))
 
     # ---- 阶段 4: V3 判定 → h1/h3/h6 计数 ----
+    # Resolve T0 per candidate; a SmartCare-only period must not rely on a
+    # separate DataCenter candidate to receive its fallback T0.
+    for pat in result["den_patients"]:
+        if not pat.get("t0"):
+            pat["t0"] = pat.get("qc_t0") or pat.get("diagnosisTime")
+            pat["t0_source"] = "qc_t0" if pat.get("qc_t0") else "diagnosis_time_fallback"
+        if not pat.get("t0"):
+            pat["event_mapping_status"] = "MISSING_T0"
+
     for pat in result["den_patients"]:
         sc_pid = pat.get("sc_pid")
         t0 = pat.get("t0")
         diag = pat.get("diagnose", "")
         if not t0 or not sc_pid:
+            pat["event_mapping_status"] = pat.get("event_mapping_status", "MISSING_EVENT_ID")
             continue
         try:
+            event_id = str(pat.get("dc_pid") or pat.get("_id") or sc_pid)
+            pat["detail_id"] = build_exclusion_key(event_id, t0)
+            pat["exclusion_key"] = pat["detail_id"]
             v3 = judge_bundle_v3_for_patient(sc_pid, pat.get("_id", ""), pat.get("mrn", ""), t0, diag)
             pat["v3"] = v3
             # 只有确认脓毒性休克 (K1 AND K2) 的患者才计入分母

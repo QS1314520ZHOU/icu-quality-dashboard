@@ -78,8 +78,11 @@ def _compute_icu05(dept_codes, start, end, hour):
     """ICU-05: Bundle完成率 (1h/3h/6h) — 使用 V2 双集合查询"""
     d = get_bundle_data_v2(dept_codes, start, end)
     key = f"h{hour[0]}_num"
-    num = d.get(key, 0)
-    den = d["total"]
+    num_items = d.get(f"h{hour[0]}_patients", [])
+    den_items = d.get("den_patients", [])
+    ex = apply_exclusions(f"ICU-05-{hour}", dept_codes, start[:7], num_items, den_items)
+    num = len(ex["num_items"])
+    den = len(ex["den_items"])
     val = round(num / den * 100, 1) if den > 0 else 0.0
 
     # G-1: 感染部位确认计数
@@ -118,6 +121,8 @@ def _compute_icu05(dept_codes, start, end, hour):
 
     return {
         "num": num, "den": den, "val": val, "val_type": "percent",
+        "raw_num": ex["raw_num"], "raw_den": ex["raw_den"],
+        "excluded_num": ex["excluded_num"], "excluded_den": ex["excluded_den"],
         "site_confirmed_count": site_confirmed_count,
         "site_unconfirmed_count": site_unconfirmed_count,
     }
@@ -464,10 +469,12 @@ def rebuild_summary(dept_codes: list, periods: list, indicators: list = None,
             for db_name in BED_DB_NAMES:
                 try:
                     db = get_client(db_name)[db_name]
+                    month_start = datetime(int(year), int(month), 1)
+                    next_month_start = month_start + timedelta(days=end_day)
                     override_count = db.icu_manual_override.count_documents({
                         "created_at": {
-                            "$gte": datetime(int(year), int(month), 1),
-                            "$lt": datetime(int(year), int(month), end_day + 1),
+                            "$gte": month_start,
+                            "$lt": next_month_start,
                         },
                     })
                     break

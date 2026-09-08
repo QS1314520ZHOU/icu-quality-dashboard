@@ -114,7 +114,7 @@ def _cache_set(key, val):
 
 DETAIL_CACHE_COLLECTION = "icu_indicator_detail_cache"
 # 缓存版本号：修改口径时 +1，旧条目自然失效
-CACHE_VERSION = 6
+CACHE_VERSION = 7
 
 
 def _dept_cache_key(dept_codes: list) -> str:
@@ -159,6 +159,9 @@ def ensure_exclusion_collection():
 
 
 def _invalidate_detail_cache(dept_codes, period, code):
+    # The process-local detail payload cache otherwise keeps a stale response
+    # alive after a successful manual exclusion/restoration.
+    _cache.clear()
     coll = _get_detail_cache_collection()
     if coll is None:
         return
@@ -1140,6 +1143,7 @@ def query_detail(code: str, period: str, part: str, icu_unit: str = "all"):
 
         hour = code.split("-")[2]  # '1h', '3h', '6h'
         key = f"h{hour[0]}_patients"
+        excl_map = _get_exclusion_map(dept_codes, period, code)
         if part == "numerator":
             items = []
             for p in data.get(key, []):
@@ -1148,6 +1152,8 @@ def query_detail(code: str, period: str, part: str, icu_unit: str = "all"):
                 # 获取 admission_type
                 admission_type = p.get("admission_type", "")
                 items.append({
+                    "detail_id": p.get("detail_id", ""),
+                    "exclusion_key": p.get("exclusion_key", ""),
                     "patient_id": mrn, "name": p.get("name", ""),
                     "gender": "", "age": "", "bed_no": p.get("hisBed", ""), "dept": "",
                     "admit_time": str(v3.get("t0", ""))[:16] if v3.get("t0") else "",
@@ -1160,6 +1166,9 @@ def query_detail(code: str, period: str, part: str, icu_unit: str = "all"):
                     "v3": _build_v3_dict(v3, hour),
                 })
             _enrich_admission_discharge(items, dept_codes)
+            for item in items:
+                if item.get("exclusion_key") in excl_map:
+                    item.update({"excluded": True, **excl_map[item["exclusion_key"]]})
             return items
         else:
             items = []
@@ -1181,6 +1190,8 @@ def query_detail(code: str, period: str, part: str, icu_unit: str = "all"):
                 except Exception:
                     pass
                 items.append({
+                    "detail_id": d.get("detail_id", ""),
+                    "exclusion_key": d.get("exclusion_key", ""),
                     "patient_id": mrn, "name": d.get("name", ""),
                     "gender": "", "age": "", "bed_no": "", "dept": "",
                     "admit_time": str(d.get("diagnosisTime", ""))[:16] if d.get("diagnosisTime") else "",
@@ -1193,6 +1204,9 @@ def query_detail(code: str, period: str, part: str, icu_unit: str = "all"):
                     "v3": _build_v3_dict(v3, hour),
                 })
             _enrich_admission_discharge(items, dept_codes)
+            for item in items:
+                if item.get("exclusion_key") in excl_map:
+                    item.update({"excluded": True, **excl_map[item["exclusion_key"]]})
             return items
 
     # ---- ICU-06：抗菌药物送检率明细（含治疗/预防判定） ----
@@ -2532,18 +2546,23 @@ def add_exclusion(code: str, body: dict = None):
         try:
             db = get_client(db_name)[db_name]
             coll = db[EXCLUSION_COLLECTION]
+            history_entry = doc.pop("history")[0]
+            doc.pop("created_at")
             coll.update_one(
                 {"dept_code": dept_key, "period": body["period"], "code": code,
                  "exclusion_key": body["exclusion_key"]},
-                {"$set": doc, "$push": {"history": doc["history"][0]}},
+                {"$set": doc,
+                 "$setOnInsert": {"created_at": now},
+                 "$push": {"history": history_entry}},
                 upsert=True,
             )
             _invalidate_detail_cache(dept_codes, body["period"], code)
             _trigger_summary_rebuild(dept_codes, [body["period"]], indicators=[code])
             return {"ok": True}
-        except Exception:
+        except Exception as exc:
+            logger.exception("Failed to save exclusion for %s/%s: %s", code, body.get("exclusion_key"), exc)
             continue
-    return {"error": "Database unavailable"}
+    return {"ok": False, "error": "Unable to save exclusion; see server log for database error"}
 
 
 @app.delete("/api/indicators/{code}/exclusions/{exclusion_key}")
@@ -2566,9 +2585,10 @@ def remove_exclusion(code: str, exclusion_key: str, period: str = "", icu_unit: 
                 _invalidate_detail_cache(dept_codes, period, code)
                 _trigger_summary_rebuild(dept_codes, [period], indicators=[code])
             return {"ok": True}
-        except Exception:
+        except Exception as exc:
+            logger.exception("Failed to restore exclusion for %s/%s: %s", code, exclusion_key, exc)
             continue
-    return {"error": "Database unavailable"}
+    return {"ok": False, "error": "Unable to restore exclusion; see server log for database error"}
 
 
 # ============================================================
