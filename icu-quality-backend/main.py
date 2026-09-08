@@ -1076,6 +1076,16 @@ def query_detail(code: str, period: str, part: str, icu_unit: str = "all"):
 
         # 构建 v3 字段的完整映射
         def _build_v3_dict(v3):
+            # 构建乳酸完整记录（序列化时间字段）
+            lac_all = v3.get("lactate_all", [])
+            lactate_all_serialized = []
+            for lac in lac_all:
+                item = dict(lac)
+                st = item.get("sample_time", "")
+                if hasattr(st, 'isoformat'):
+                    item["sample_time"] = st.isoformat()[:19]
+                lactate_all_serialized.append(item)
+
             return {
                 "t0": str(v3.get("t0", ""))[:16] if v3.get("t0") else "",
                 "finish": v3.get("finish"),
@@ -1091,6 +1101,7 @@ def query_detail(code: str, period: str, part: str, icu_unit: str = "all"):
                 "lactate_max": v3.get("lactate_max"),
                 "lactate_recheck": v3.get("lactate_recheck_value"),
                 "lactate_recheck_time": str(v3.get("lactate_recheck_time", ""))[:16] if v3.get("lactate_recheck_time") else "",
+                "lactate_all": lactate_all_serialized,
                 # MAP
                 "map": v3.get("map_min"),
                 "map_time": str(v3.get("map_time", ""))[:16] if v3.get("map_time") else "",

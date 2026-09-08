@@ -2441,6 +2441,7 @@ def judge_bundle_v3_for_patient(sc_pid: str, dc_pid: str, mrn: str, t0: datetime
     lactate_max = None
     lactate_recheck_time = None
     lactate_recheck_value = None
+    lactate_all = []  # 1h—3h 乳酸完整记录
     try:
         bga_lac = list(sc.bGATemp.find(
             {'mrn': mrn,
@@ -2477,6 +2478,39 @@ def judge_bundle_v3_for_patient(sc_pid: str, dc_pid: str, mrn: str, t0: datetime
         if lac_recheck:
             lactate_recheck_value = lac_recheck[-1]['value']
             lactate_recheck_time = lac_recheck[-1]['time']
+
+        # 构建乳酸完整记录列表（去重依据: 原始 time 字段 + value）
+        _seen_lac = set()
+        t0_1h = t0 + timedelta(hours=1)
+        t0_3h = t0 + timedelta(hours=3)
+        for lv in lac_values:
+            t = lv['time']
+            val = lv['value']
+            # 去重: 同一采样时间 + 同一原始值视为重复
+            dedup_key = (t, val)
+            if dedup_key in _seen_lac:
+                continue
+            _seen_lac.add(dedup_key)
+            minutes_from_t0 = round((t - t0).total_seconds() / 60, 1)
+            # 所属时段: 使用 (T0+1h, T0+3h] 分组，首次乳酸在 [T0-2h, T0+1h]
+            if t <= t0_1h:
+                period_label = "首次"
+            elif t <= t0_3h:
+                period_label = "1h—3h"
+            else:
+                period_label = "3h—6h"
+            # 有效状态: 在 T0-2h ~ T0+6h 范围内且 valid=valid
+            lactate_all.append({
+                'value': round(val, 2),
+                'raw_value': val,
+                'unit': 'mmol/L',
+                'sample_time': t.isoformat() if hasattr(t, 'isoformat') else str(t),
+                'time_basis': '采样时间',
+                'source': 'bGATemp(血气分析)',
+                'minutes_from_t0': minutes_from_t0,
+                'period_label': period_label,
+                'valid': True,
+            })
     except Exception:
         pass
 
@@ -2653,6 +2687,7 @@ def judge_bundle_v3_for_patient(sc_pid: str, dc_pid: str, mrn: str, t0: datetime
         'lactate_max': lactate_max,
         'lactate_recheck_value': lactate_recheck_value,
         'lactate_recheck_time': lactate_recheck_time,
+        'lactate_all': lactate_all,
         'antibiotic_time': antibiotic_time,
         'antibiotic_name': antibiotic_name,
         'culture_time': culture_time,

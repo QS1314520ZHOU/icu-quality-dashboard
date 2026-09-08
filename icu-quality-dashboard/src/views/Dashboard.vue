@@ -346,7 +346,12 @@ const sMonth = ref(new Date().getMonth() + 1);
 const eMonth = ref(new Date().getMonth() + 1);
 const hostDeptCode = inject('hostDeptCode', ref('all'));
 const dept = computed(() => hostDeptCode.value || 'all');
-const years = [2024, 2025, 2026];
+// 动态年份：从2024到当前年+1
+const years = computed(() => {
+  const arr = [];
+  for (let y = 2024; y <= new Date().getFullYear() + 1; y++) arr.push(y);
+  return arr;
+});
 const compactMode = ref(false);
 
 const rows = ref([]);

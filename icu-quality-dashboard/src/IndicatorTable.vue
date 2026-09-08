@@ -2,7 +2,7 @@
   <div class="table-page">
     <!-- 顶部筛选条 -->
     <div class="filter-bar">
-      <span class="page-title">ICU 质控指标明细 · {{ deptName }}</span>
+      <span class="page-title">{{ deptName }}</span>
       <div class="filters">
         <select v-model="year" @change="reload"><option v-for="y in years" :key="y" :value="y">{{ y }}年</option></select>
         <select v-model="startMonth" @change="reload"><option v-for="m in 12" :key="m" :value="m">{{ m }}月</option></select>
@@ -63,7 +63,7 @@
           </tr>
         </thead>
         <tbody>
-          <tr v-for="row in rows" :key="row.code">
+          <tr v-for="row in rows" :key="row.code" :class="{ selected: selectedRow === row.code }" @click="selectedRow = selectedRow === row.code ? null : row.code">
             <td class="code t-left">{{ displayCode(row.code) }}</td>
             <td class="name t-left" @mouseenter="showTip($event, row.code)" @mouseleave="hideTip">
               <span class="name-txt">{{ row.name }}</span>
@@ -73,7 +73,8 @@
             <td class="num t-right link" @click="drillDetail(row,'numerator')">{{ fmtCell(row.numerator) }}</td>
             <td class="num t-right link" @click="drillDetail(row,'denominator')" :title="census ? '= 原有 ' + census.carry_in + ' + 新入 ' + census.new_admit : ''">{{ fmtCell(row.denominator) }}</td>
             <td class="t-right sep link" @click="drillTrend(row)"><b class="val">{{ fmtValue(row) }}</b></td>
-            <td v-for="m in monthCols" :key="row.code+m" class="t-right month-cell" :class="cellLevel(row, m)">
+            <td v-for="m in monthCols" :key="row.code+m" class="t-right month-cell link" :class="cellLevel(row, m)"
+                @click="drillMonthDetail(row, m)">
               {{ fmtMonth(row, m) }}
             </td>
             <td class="t-center sep">
@@ -110,13 +111,17 @@
     <Modal v-if="detailData" :title="detailTitle" @close="detailData=null">
       <DetailModal :data="detailData" :period="period" :end-period="isMultiMonth ? periodEnd : ''" :unit="unit" :unit-name="deptName" />
     </Modal>
+    <!-- 月份单元格下钻弹窗：独立查询上下文 -->
+    <Modal v-if="monthDetailData" :title="monthDetailTitle" @close="closeMonthDetail">
+      <DetailModal :data="monthDetailData" :period="monthDetailPeriod" :end-period="''" :unit="unit" :unit-name="deptName"
+                   @exclusion-changed="onMonthExclusionChanged" />
+    </Modal>
     <Modal v-if="guideVisible" title="指标口径说明" @close="guideVisible=false"><IndicatorGuideModal /></Modal>
 
     <!-- Toast 通知 -->
     <Transition name="toast-fade">
       <div v-if="toast.show" class="toast" :class="toast.type">{{ toast.message }}</div>
     </Transition>
-    <div class="copyright-bar">© 2026 ICU医疗质量控制中心 版权所有</div>
     <div class="copyright-bar">© 2026 ICU医疗质量控制中心 版权所有</div>
   </div>
 </template>
@@ -130,12 +135,27 @@ import DetailModal from './components/DetailModal.vue';
 import IndicatorGuideModal from './components/IndicatorGuideModal.vue';
 import { fetchIndicatorList, fetchTrend as apiFetchTrend, fetchDetail as apiFetchDetail, triggerRefresh as apiTriggerRefresh, getRefreshStatus } from './api/index.js';
 
-const year = ref(2026), startMonth = ref(6), endMonth = ref(6);
+// 使用 Asia/Shanghai 当前年月作为默认值
+const _now = new Date();
+const _shanghaiNow = new Date(_now.toLocaleString('en-US', { timeZone: 'Asia/Shanghai' }));
+const _curYear = _shanghaiNow.getFullYear();
+const _curMonth = _shanghaiNow.getMonth() + 1;
+
+const year = ref(_curYear), startMonth = ref(_curMonth), endMonth = ref(_curMonth);
 const hostDeptCode = inject('hostDeptCode', ref('all'));
 const unit = computed(() => hostDeptCode.value || 'all');
-const years = [2024, 2025, 2026];
+// 动态年份：从2024到当前年+1
+const years = computed(() => {
+  const arr = [];
+  for (let y = 2024; y <= _curYear + 1; y++) arr.push(y);
+  return arr;
+});
 const rows = ref([]); const trendData = ref(null); const detailData = ref(null);
-const census = ref(null);
+const census = ref(null); const selectedRow = ref(null);
+// 月份单元格下钻
+const monthDetailData = ref(null);
+const monthDetailPeriod = ref('');
+const monthDetailAbort = ref(null); // 用于取消过期请求
 const guideVisible = ref(false);
 const deptName = computed(() => { if (!hostDeptCode.value || hostDeptCode.value === 'all') return '全部ICU'; return hostDeptCode.value; });
 const refreshing = ref(false);
@@ -197,6 +217,10 @@ function hideTip(){ tip.value.show=false; }
 
 // ===== 真实 API 数据加载 =====
 async function reload(nocache = false) {
+  // 校验：开始月份不能晚于结束月份
+  if (startMonth.value > endMonth.value) {
+    endMonth.value = startMonth.value;
+  }
   return reloadRange(period.value, isMultiMonth.value ? periodEnd.value : '', nocache);
 }
 
@@ -246,8 +270,65 @@ async function drillDetail(row, part) {
   }
 }
 
+// 月份单元格下钻：只查被点击月份
+async function drillMonthDetail(row, m) {
+  const monthPeriod = `${year.value}-${String(m).padStart(2, '0')}`;
+  // 0 和 null 严格区分：0 可以下钻，null 显示空态
+  const val = row.monthly?.[m];
+  if (val == null && val !== 0) return;
+
+  // 取消上一次未完成的请求
+  if (monthDetailAbort.value) {
+    monthDetailAbort.value.abort();
+  }
+  const controller = new AbortController();
+  monthDetailAbort.value = controller;
+
+  monthDetailPeriod.value = monthPeriod;
+  const base = { code: row.code, name: row.name, part: 'numerator', count: 0, source_desc: '明细加载中...', patients: [], loading: true };
+  monthDetailData.value = base;
+  try {
+    const result = await apiFetchDetail(row.code, monthPeriod, 'numerator', unit.value, '', { limit: 200, offset: 0 });
+    if (!controller.signal.aborted) {
+      monthDetailData.value = result;
+    }
+  } catch (e) {
+    if (!controller.signal.aborted) {
+      monthDetailData.value = { ...base, loading: false, error: e.message || '明细加载失败', source_desc: '明细加载失败' };
+    }
+  }
+}
+
 const detailTitle = computed(()=> detailData.value
   ? `${detailData.value.name} · ${detailData.value.part==='numerator'?'分子':'分母'}明细` : '');
+
+const monthDetailTitle = computed(() => {
+  if (!monthDetailData.value) return '';
+  const part = monthDetailData.value.part === 'numerator' ? '分子' : '分母';
+  return `${monthDetailData.value.name} · ${monthDetailPeriod.value} · ${part}明细`;
+});
+
+function closeMonthDetail() {
+  if (monthDetailAbort.value) {
+    monthDetailAbort.value.abort();
+    monthDetailAbort.value = null;
+  }
+  monthDetailData.value = null;
+  monthDetailPeriod.value = '';
+}
+
+function onMonthExclusionChanged() {
+  // 排除变更后重新加载该月详情
+  if (monthDetailData.value && monthDetailPeriod.value) {
+    const code = monthDetailData.value.code;
+    const part = monthDetailData.value.part;
+    const base = { ...monthDetailData.value, loading: true, patients: [], source_desc: '重新加载中...' };
+    monthDetailData.value = base;
+    apiFetchDetail(code, monthDetailPeriod.value, part, unit.value, '', { limit: 200, offset: 0 })
+      .then(result => { monthDetailData.value = result; })
+      .catch(e => { monthDetailData.value = { ...base, loading: false, error: e.message }; });
+  }
+}
 function showToast(message, type = 'success', duration = 4000) {
   toast.value = { show: true, message, type };
   clearTimeout(_refreshTimer);
@@ -421,28 +502,36 @@ window.addEventListener('status-config-updated', () => {
 .toast-fade-leave-active { transition:all .25s ease-in; }
 .toast-fade-enter-from, .toast-fade-leave-to { opacity:0; transform: translateY(12px); }
 
-.table-wrap { max-width:680px; margin:0 auto; background:var(--bg-card);
-  border:1px solid var(--border); border-radius:var(--radius); overflow:hidden; box-shadow:var(--shadow-md); }
+.table-wrap { max-width:680px; margin:0 auto; background:#fff;
+  border:1px solid #d0d8e8; border-radius:4px; overflow:hidden; box-shadow:0 1px 2px rgba(16,24,40,.04); }
 .table-wrap.multi-month { max-width:100%; margin:0; overflow-x:auto; }
 
-.indi-table { width:100%; table-layout:fixed; border-collapse:separate; border-spacing:0; }
+.indi-table { width:100%; table-layout:fixed; border-collapse:collapse; border-spacing:0; }
 .table-wrap.multi-month .indi-table { width:auto; min-width:100%; }
 
-.c-code{width:72px} .c-name{width:190px} .c-num{width:72px} .c-val{width:82px}
-.c-month{width:72px} .c-status{width:64px} .c-trend{width:52px}
+.c-code{width:72px} .c-name{width:220px; max-width:260px} .c-num{width:72px} .c-val{width:82px}
+.c-month{width:72px} .c-status{width:80px} .c-trend{width:52px}
 
 .indi-table th, .indi-table td {
-  padding:13px 14px; font-size:13px;
+  padding:0 14px; font-size:13px; height:42px; line-height:42px;
   white-space:nowrap; overflow:hidden; text-overflow:ellipsis;
 }
+.indi-table tr { height:42px; }
 .indi-table th {
-  background:var(--bg-header); color:var(--text-faint);
-  font-size:var(--fs-caption); font-weight:600; letter-spacing:0.04em;
-  border-bottom:1px solid var(--border);
+  background:#CBD7F5; color:#1f2a44;
+  font-size:12px; font-weight:600; letter-spacing:0.03em;
+  border:1px solid #b0c4f0; border-width:0 1px 1px 0;
+  position:sticky; top:0; z-index:2;
 }
-.indi-table td { color:var(--text-main); border-bottom:1px solid var(--border-light); }
+.indi-table th:last-child { border-right:none; }
+.indi-table td { color:#1f2a44; border:1px solid #e5eaf2; border-width:0 1px 1px 0; background:#fff; }
+.indi-table td:last-child { border-right:none; }
 .indi-table tbody tr:last-child td { border-bottom:none; }
-.indi-table tbody tr:hover td { background:var(--bg-hover); }
+.indi-table tbody tr:hover td { background:#f0f4fd; }
+.indi-table tbody tr.selected td { background:#344E84; color:#fff; }
+.indi-table tbody tr.selected td .badge { color:#fff; }
+.indi-table tbody tr.selected .mini { color:#fff; opacity:.8; }
+.indi-table tbody tr.selected:hover td { background:#344E84; }
 
 .t-left{text-align:left} .t-right{text-align:right} .t-center{text-align:center}
 
@@ -451,34 +540,38 @@ window.addEventListener('status-config-updated', () => {
   font-family: 'Cascadia Code', 'Consolas', 'SF Mono', 'JetBrains Mono', ui-monospace, monospace;
   font-variant-numeric:tabular-nums;
 }
-.sep { border-right:1px solid var(--border); }
+.sep { border-right:1px solid #b0c4f0; }
 
-.code { color:var(--text-faint); font-size:12px; }
-.name-txt { vertical-align:middle; }
+.code { color:#6b7a94; font-size:12px; }
+.name { max-width:260px; }
+.name-txt { vertical-align:middle; overflow:hidden; text-overflow:ellipsis; white-space:nowrap; display:inline-block; max-width:180px; }
+.name:hover .name-txt { overflow:visible; position:relative; z-index:5; background:#fff;
+  box-shadow:0 2px 8px rgba(0,0,0,.12); padding:2px 6px; border-radius:3px; white-space:normal; max-width:360px; }
 /* 分子分母:中性深灰；比值:品牌蓝突出 */
-.num { color: var(--text-main); }
-.val { color: var(--brand); font-weight:600; }
+.num { color: #1f2a44; }
+.val { color: #1e5eb8; font-weight:600; }
 .link { cursor:pointer; }
-.link:hover { color:var(--brand); }
+.link:hover { color:#1e5eb8; }
 
 /* 月份列:默认安静灰色,仅异常点亮 */
-.month-cell { color: var(--text-sub); font-weight:400; font-size:12px; }
-.month-cell.alert { color: var(--warn); font-weight:500; }
+.month-cell { color: #6b7a94; font-weight:400; font-size:12px; cursor:pointer; }
+.month-cell:hover { color:#1e5eb8; text-decoration:underline; }
+.month-cell.alert { color: #b26a00; font-weight:500; }
 
-.formula-icon { margin-left:5px; font-style:italic; font-size:var(--fs-caption); color:var(--brand);
-  background:var(--brand-light); border-radius:3px; padding:0 4px; opacity:.5; }
+.formula-icon { margin-left:5px; font-style:italic; font-size:11px; color:#1e5eb8;
+  background:#eaf1fb; border-radius:3px; padding:0 4px; opacity:.5; }
 .name:hover .formula-icon { opacity:1; }
 
 /* 状态徽章:圆点+文字 */
-.badge { padding:3px 10px; border-radius:20px; font-size:var(--fs-caption); font-weight:500;
+.badge { padding:3px 10px; border-radius:20px; font-size:12px; font-weight:500;
   display:inline-flex; align-items:center; gap:4px; }
 .badge-dot { width:5px; height:5px; border-radius:50%; flex-shrink:0; display:inline-block; }
-.badge.good { background:rgba(21,150,107,0.08); color:var(--good); }
-.badge.good::before { background:var(--good); }
-.badge.warn { background:rgba(201,122,22,0.08); color:var(--warn); }
-.badge.warn::before { background:var(--warn); }
-.badge.danger { background:rgba(207,64,64,0.08); color:var(--danger); }
-.badge.danger::before { background:var(--danger); }
+.badge.good { background:rgba(21,150,107,0.08); color:#0e7a52; }
+.badge.good::before { background:#0e7a52; }
+.badge.warn { background:rgba(201,122,22,0.08); color:#b26a00; }
+.badge.warn::before { background:#b26a00; }
+.badge.danger { background:rgba(207,64,64,0.08); color:#c62828; }
+.badge.danger::before { background:#c62828; }
 .mini { cursor:pointer; opacity:.35; } .mini:hover { opacity:.6; }
 
 .formula-tip { position:fixed; z-index:200; pointer-events:none; background:#fff;

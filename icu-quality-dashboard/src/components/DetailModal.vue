@@ -1,17 +1,24 @@
 <template>
   <div>
     <div class="source">
-      <span class="tag">数据源</span>{{ data.source_desc }}
-      <span class="count" v-if="data.count > 0">
-        共 {{ data.count }} 例<span v-if="data.has_more">，先显示 {{ data.patients?.length || 0 }} 例</span>
-      </span>
-      <span v-if="canExclude && excludedCount > 0" class="excl-count">
-        ，已人工排除 {{ excludedCount }} 例
-      </span>
-      <button class="export-btn" :disabled="exporting || !data.patients?.length || isSummary"
-              @click="handleExport" :title="isSummary ? '汇总数据无需导出' : !data.patients?.length ? '无可导出数据' : ''">
-        {{ exporting ? '导出中...' : '导出 Excel' }}
-      </button>
+      <div class="source-left">
+        <span class="tag">数据源</span>
+        <span class="source-desc">{{ data.source_desc }}</span>
+        <span v-if="canExclude && excludedCount > 0" class="excl-count">
+          ，已人工排除 {{ excludedCount }} 例
+        </span>
+      </div>
+      <div class="source-right">
+        <span class="count" v-if="data.count > 0">
+          共 {{ data.count }} 例<span v-if="data.has_more">，先显示 {{ data.patients?.length || 0 }} 例</span>
+        </span>
+        <button class="export-btn" :disabled="exporting || !data.patients?.length || isSummary"
+                @click="handleExport" :title="isSummary ? '汇总数据无需导出' : !data.patients?.length ? '无可导出数据' : ''">
+          {{ exporting ? '导出中...' : '导出 Excel' }}
+        </button>
+      </div>
+    </div>
+    <div v-if="exportProgress || exportError" class="export-status">
       <span v-if="exportProgress" class="export-progress">{{ exportProgress }}</span>
       <span v-if="exportError" class="export-error">{{ exportError }}</span>
     </div>
@@ -326,27 +333,43 @@ const rowClass = (p) => {
 };
 </script>
 <style scoped>
-.source { font-size:var(--fs-label); color:var(--text-sub); margin-bottom:14px; padding:10px 12px;
-  background:var(--brand-weak); border-radius:6px; border:1px solid rgba(30,94,184,0.08); }
-.tag { background:var(--brand); color:#fff; padding:1px 8px; border-radius:4px; font-size:var(--fs-caption); margin-right:8px; }
-.count { float:right; color:var(--brand); font-weight:600; }
-.export-btn { float:right; margin-left:10px; padding:3px 12px; font-size:var(--fs-caption);
+.source {
+  display:flex; align-items:center; justify-content:space-between; gap:12px;
+  font-size:13px; color:var(--text-sub); margin-bottom:14px; padding:10px 12px;
+  background:var(--brand-weak); border-radius:6px; border:1px solid rgba(30,94,184,0.08);
+  min-height:40px; flex-wrap:wrap;
+}
+.source-left { display:flex; align-items:center; gap:6px; flex:1; min-width:0; overflow:hidden; }
+.source-desc { overflow:hidden; text-overflow:ellipsis; white-space:nowrap; }
+.source-right { display:flex; align-items:center; gap:10px; flex-shrink:0; white-space:nowrap; }
+.tag { background:var(--brand); color:#fff; padding:1px 8px; border-radius:4px; font-size:12px; flex-shrink:0; }
+.count { color:var(--brand); font-weight:600; font-size:13px; }
+.export-btn {
+  padding:4px 14px; font-size:12px; height:30px; line-height:22px;
   background:var(--brand); color:#fff; border:none; border-radius:4px; cursor:pointer;
-  line-height:1.8; }
-.export-btn:hover:not(:disabled) { background:var(--brand); opacity:.85; }
+  display:inline-flex; align-items:center; justify-content:center; flex-shrink:0;
+}
+.export-btn:hover:not(:disabled) { opacity:.85; }
 .export-btn:disabled { background:var(--text-faint); cursor:not-allowed; }
-.export-progress { float:right; color:var(--text-sub); font-size:var(--fs-caption); margin-left:8px; }
-.export-error { float:right; color:var(--danger); font-size:var(--fs-caption); margin-left:8px; }
+.export-status { margin-bottom:10px; font-size:12px; }
+.export-progress { color:var(--text-sub); }
+.export-error { color:var(--danger); }
+.excl-count { color:var(--warn); font-weight:600; font-size:13px; }
 .den-summary { font-size:16px; font-weight:600; color:var(--text-title); text-align:center;
   padding:32px 20px; background:#f8fafc; border-radius:8px;
   border: 1px solid var(--border); }
 .loading, .empty { font-size:var(--fs-body); color:var(--text-sub); text-align:center; padding:34px 20px;
   background:var(--bg-subtle); border:1px solid var(--border); border-radius:8px; }
 .detail-table { width:100%; border-collapse:collapse; }
-.detail-table th { color:var(--text-sub); font-size:var(--fs-caption); padding:8px 10px; text-align:left;
-  border-bottom:1px solid var(--border); font-weight:600; }
-.detail-table td { padding:9px 10px; font-size:var(--fs-label); color:var(--text-body);
-  border-bottom:1px solid var(--border-light); }
+.detail-table th { color:#1f2a44; font-size:12px; padding:0 10px; text-align:left;
+  background:#CBD7F5; border:1px solid #b0c4f0; border-width:0 1px 1px 0; font-weight:600;
+  height:38px; line-height:38px; }
+.detail-table th:last-child { border-right:none; }
+.detail-table td { padding:0 10px; font-size:13px; color:#1f2a44;
+  border:1px solid #e5eaf2; border-width:0 1px 1px 0;
+  height:40px; line-height:40px; background:#fff; }
+.detail-table td:last-child { border-right:none; }
+.detail-table tbody tr:hover td { background:#f0f4fd; }
 .mono { font-family:monospace; color:var(--text-sub); }
 .tri-list { display:flex; flex-direction:column; gap:10px; }
 .tri-card:hover { border-color:var(--border-strong); background:var(--bg-hover); }
@@ -374,7 +397,6 @@ tr.low-confidence td:first-child::before {
 .btn-restore { background: var(--brand); color: #fff; border: none; border-radius: 4px; padding: 3px 10px; font-size: var(--fs-caption); cursor: pointer; }
 .btn-restore:hover { opacity:.85; }
 .reason-tag { display: inline-block; margin-left: 4px; font-size: var(--fs-caption); color: var(--text-sub); background: var(--bg-subtle); border-radius: 3px; padding: 1px 6px; }
-.excl-count { color: var(--warn); font-weight: 600; }
 tr.excluded-row { opacity: 0.5; }
 tr.excluded-row td { text-decoration: line-through; }
 .excl-overlay { position: fixed; inset: 0; z-index: 9999; background: rgba(0,0,0,0.4); display: flex; align-items: center; justify-content: center; }

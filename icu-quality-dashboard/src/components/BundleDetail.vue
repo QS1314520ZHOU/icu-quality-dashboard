@@ -140,6 +140,15 @@
             </div>
           </div>
           <div class="timeline-line"></div>
+          <div class="timeline-item" :class="{ active: lactate1h3hCount > 0 }" @click="showLactateTable = !showLactateTable" style="cursor:pointer">
+            <div class="timeline-dot" :class="lactate1h3hCount > 0 ? 'status-ok' : 'status-na'"></div>
+            <div class="timeline-content">
+              <div class="timeline-label">1h—3h乳酸</div>
+              <div class="timeline-value">{{ lactate1h3hCount > 0 ? `${lactate1h3hCount}次` : '—' }}</div>
+              <div class="timeline-hint" v-if="lactate1h3hCount > 0">点击展开</div>
+            </div>
+          </div>
+          <div class="timeline-line"></div>
           <div class="timeline-item" :class="{ active: !!data.culture_time }">
             <div class="timeline-dot" :class="statusClass(!!data.culture_time && !!data.antibiotic_time && data.culture_time < data.antibiotic_time)"></div>
             <div class="timeline-content">
@@ -166,6 +175,40 @@
             </div>
           </div>
         </div>
+      </div>
+
+      <!-- 乳酸完整记录表格 -->
+      <div v-if="showLactateTable && data.lactate_all?.length" class="lactate-card">
+        <div class="card-title">🔬 乳酸完整记录 · {{ data.lactate_all.length }}次</div>
+        <div class="lactate-table-wrap">
+          <table class="lactate-table">
+            <thead>
+              <tr>
+                <th>采样时间</th>
+                <th>距T0</th>
+                <th>乳酸(mmol/L)</th>
+                <th>所属时段</th>
+                <th>数据来源</th>
+              </tr>
+            </thead>
+            <tbody>
+              <tr v-for="(lac, idx) in data.lactate_all" :key="idx" :class="lacRowClass(lac)">
+                <td>{{ lac.sample_time ? formatFullTime(lac.sample_time) : '—' }}</td>
+                <td>{{ lac.minutes_from_t0 != null ? fmtMinutes(lac.minutes_from_t0) : '—' }}</td>
+                <td class="lac-value">{{ fmtNum(lac.value) }}</td>
+                <td><span class="lac-period-tag" :class="lac.period_label">{{ lac.period_label }}</span></td>
+                <td class="lac-source">{{ lac.source || '—' }}</td>
+              </tr>
+            </tbody>
+          </table>
+        </div>
+        <div class="lactate-note">
+          采样时间为血气分析仪采集时刻；距T0分钟数仅供参考；1h—3h分组使用 (T0+1h, T0+3h]。
+        </div>
+      </div>
+      <div v-else-if="showLactateTable && lactateAllCount === 0" class="lactate-card">
+        <div class="card-title">🔬 乳酸完整记录</div>
+        <div class="lactate-empty">窗口内无乳酸测量记录</div>
       </div>
 
       <!-- Bundle 完成情况 -->
@@ -248,6 +291,12 @@ const props = defineProps({
 })
 
 const showInfectionSite = ref(false)
+const showLactateTable = ref(false)
+
+const lactate1h3hCount = computed(() => {
+  return (props.data.lactate_all || []).filter(l => l.period_label === '1h—3h').length
+})
+const lactateAllCount = computed(() => (props.data.lactate_all || []).length)
 
 const REASON_MAP = {
   'NO_T0': '找不到T0锚点',
@@ -293,6 +342,30 @@ function statusClass(value) {
   if (value === true) return 'status-ok'
   if (value === false) return 'status-fail'
   return 'status-na'
+}
+
+function formatFullTime(t) {
+  if (!t) return '—'
+  // ISO string → "MM-DD HH:mm"
+  const s = String(t)
+  if (s.length >= 16) return s.slice(5, 16).replace('T', ' ')
+  return s
+}
+
+function fmtMinutes(mins) {
+  if (mins == null) return '—'
+  const abs = Math.abs(mins)
+  if (abs < 60) return `${Math.round(mins)}min`
+  const h = Math.floor(abs / 60)
+  const m = Math.round(abs % 60)
+  const sign = mins < 0 ? '-' : '+'
+  return m > 0 ? `${sign}${h}h${m}m` : `${sign}${h}h`
+}
+
+function lacRowClass(lac) {
+  if (lac.period_label === '1h—3h') return 'lac-row-1h3h'
+  if (lac.period_label === '3h—6h') return 'lac-row-3h6h'
+  return ''
 }
 </script>
 
@@ -369,4 +442,34 @@ function statusClass(value) {
 
 .infection-site-card .card-title { cursor: pointer; display: flex; justify-content: space-between; align-items: center; margin-bottom: 0; }
 .guide-toggle { color: var(--text-sub); font-size: 0.85em; }
+
+/* 乳酸完整记录 */
+.lactate-card {
+  background: var(--bg-surface);
+  border: 1px solid var(--border);
+  border-radius: 8px;
+  padding: 12px 16px;
+}
+.lactate-table-wrap { overflow-x: auto; }
+.lactate-table { width: 100%; border-collapse: collapse; font-size: 0.85em; }
+.lactate-table th {
+  background: #CBD7F5; color: #1f2a44; font-weight: 600;
+  padding: 8px 10px; text-align: left; font-size: 12px;
+  border-bottom: 1px solid #b0c4f0;
+}
+.lactate-table td {
+  padding: 7px 10px; border-bottom: 1px solid var(--border-light); color: var(--text-body);
+}
+.lactate-table tbody tr:hover td { background: #f0f4fd; }
+.lac-value { font-family: 'Cascadia Code', 'Consolas', monospace; font-weight: 600; color: var(--text-title); }
+.lac-period-tag {
+  display: inline-block; padding: 1px 8px; border-radius: 4px; font-size: 11px; font-weight: 600;
+  background: #eaf1fb; color: #1e5eb8;
+}
+.lactate-table tr.lac-row-1h3h td { background: rgba(52, 78, 132, 0.04); }
+.lactate-table tr.lac-row-3h6h td { background: rgba(178, 106, 0, 0.04); }
+.lac-source { font-size: 11px; color: var(--text-sub); }
+.lactate-note { margin-top: 8px; font-size: 11px; color: var(--text-sub); line-height: 1.5; }
+.lactate-empty { text-align: center; padding: 20px; color: var(--text-sub); font-size: 0.9em; }
+.timeline-hint { font-size: 10px; color: var(--text-sub); opacity: 0.7; }
 </style>
