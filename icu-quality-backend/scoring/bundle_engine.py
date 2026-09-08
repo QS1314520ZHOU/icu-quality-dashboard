@@ -326,6 +326,9 @@ def judge_bundle_finish_v3(
     c1_or_c2_triggered = (c1 is True) or (c2 is True)
     if c1_or_c2_triggered:
         step3 = c3
+    elif c1 is None or c2 is None:
+        # Missing evidence is not proof that the fluid trigger did not apply.
+        step3 = None
     else:
         step3 = True  # 未触发视为达标
 
@@ -351,6 +354,9 @@ def judge_bundle_finish_v3(
     if c1 is True:
         reasons.append("MAP_NOT_MET")
 
+    # Keep window results nested.  Callers must choose a window explicitly;
+    # there is deliberately no top-level ``finish`` that can leak one window
+    # into another.
     return {
         "finish": finish,
         "step1": step1,

@@ -1075,7 +1075,10 @@ def query_detail(code: str, period: str, part: str, icu_unit: str = "all"):
                 v3_results[mrn] = v3
 
         # 构建 v3 字段的完整映射
-        def _build_v3_dict(v3):
+        def _build_v3_dict(v3, window):
+            # Window decisions are nested by contract.  Merge only the
+            # explicitly requested window with encounter-level evidence.
+            v3 = {**v3, **v3.get(f"bundle_{window}", {})}
             # 构建乳酸完整记录（序列化时间字段）
             lac_all = v3.get("lactate_all", [])
             lactate_all_serialized = []
@@ -1141,7 +1144,7 @@ def query_detail(code: str, period: str, part: str, icu_unit: str = "all"):
             items = []
             for p in data.get(key, []):
                 mrn = p.get("mrn", "")
-                v3 = v3_results.get(mrn, {})
+                v3 = p.get("v3", {})
                 # 获取 admission_type
                 admission_type = p.get("admission_type", "")
                 items.append({
@@ -1154,7 +1157,7 @@ def query_detail(code: str, period: str, part: str, icu_unit: str = "all"):
                     "t0": str(v3.get("t0", ""))[:16] if v3.get("t0") else "",
                     "diagnose": p.get("diagnose", ""),
                     "sc_pid": p.get("sc_pid", ""),
-                    "v3": _build_v3_dict(v3),
+                    "v3": _build_v3_dict(v3, hour),
                 })
             _enrich_admission_discharge(items, dept_codes)
             return items
@@ -1162,7 +1165,7 @@ def query_detail(code: str, period: str, part: str, icu_unit: str = "all"):
             items = []
             for d in den_patients:
                 mrn = d.get("mrn", "")
-                v3 = v3_results.get(mrn, {})
+                v3 = d.get("v3", {})
                 # 只显示确诊脓毒性休克的患者（K1 AND K2 都成立）
                 if not v3.get("is_septic_shock"):
                     continue
@@ -1187,7 +1190,7 @@ def query_detail(code: str, period: str, part: str, icu_unit: str = "all"):
                     "t0": str(v3.get("t0", ""))[:16] if v3.get("t0") else "",
                     "diagnose": d.get("diagnose", ""),
                     "sc_pid": d.get("sc_pid", ""),
-                    "v3": _build_v3_dict(v3),
+                    "v3": _build_v3_dict(v3, hour),
                 })
             _enrich_admission_discharge(items, dept_codes)
             return items

@@ -57,7 +57,7 @@
             <th class="t-right">分子</th>
             <th class="t-right">分母</th>
             <th class="t-right sep">比值</th>
-            <th v-for="m in monthCols" :key="'h'+m" class="t-right">{{ m }}月</th>
+            <th v-for="m in monthCols" :key="'h'+m" class="t-center">{{ m }}月</th>
             <th class="t-center sep">状态</th>
             <th class="t-center">趋势</th>
           </tr>
@@ -73,7 +73,7 @@
             <td class="num t-right link" @click="drillDetail(row,'numerator')">{{ fmtCell(row.numerator) }}</td>
             <td class="num t-right link" @click="drillDetail(row,'denominator')" :title="census ? '= 原有 ' + census.carry_in + ' + 新入 ' + census.new_admit : ''">{{ fmtCell(row.denominator) }}</td>
             <td class="t-right sep link" @click="drillTrend(row)"><b class="val">{{ fmtValue(row) }}</b></td>
-            <td v-for="m in monthCols" :key="row.code+m" class="t-right month-cell link" :class="cellLevel(row, m)"
+            <td v-for="m in monthCols" :key="row.code+m" class="t-center month-cell link" :class="cellLevel(row, m)"
                 @click="drillMonthDetail(row, m)">
               {{ fmtMonth(row, m) }}
             </td>
@@ -509,16 +509,16 @@ window.addEventListener('status-config-updated', () => {
 .indi-table { width:auto; table-layout:fixed; border-collapse:collapse; border-spacing:0; }
 .table-wrap.multi-month .indi-table { width:auto; min-width:unset; }
 
-.c-code, .indi-table th:nth-child(1), .indi-table td.code { width:72px !important; min-width:72px !important; max-width:72px !important; }
+.c-code, .indi-table th:nth-child(1), .indi-table td.code { width:90px !important; min-width:90px !important; max-width:90px !important; }
 .c-name, .indi-table th:nth-child(2), .indi-table td.name { width:230px !important; min-width:230px !important; max-width:230px !important; }
-.c-num, .indi-table th:nth-child(3), .indi-table th:nth-child(4), .indi-table td.num { width:72px !important; min-width:72px !important; max-width:72px !important; }
-.c-val, .indi-table th:nth-child(5), .indi-table td:nth-child(5) { width:82px !important; min-width:82px !important; max-width:82px !important; }
-.c-month, .indi-table td.month-cell { width:72px !important; min-width:72px !important; max-width:72px !important; }
+.c-num, .indi-table th:nth-child(3), .indi-table th:nth-child(4), .indi-table td.num { width:76px !important; min-width:76px !important; max-width:76px !important; }
+.c-val, .indi-table th:nth-child(5), .indi-table td:nth-child(5) { width:86px !important; min-width:86px !important; max-width:86px !important; }
+.c-month, .indi-table td.month-cell { width:88px !important; min-width:88px !important; max-width:88px !important; }
 .c-status { width:86px !important; min-width:86px !important; max-width:86px !important; }
-.c-trend { width:52px !important; min-width:52px !important; max-width:52px !important; }
+.c-trend { width:50px !important; min-width:50px !important; max-width:50px !important; }
 
 .indi-table th, .indi-table td {
-  padding:0 10px; font-size:13px; height:42px; line-height:42px;
+  padding:0 6px; font-size:13px; height:42px; line-height:42px;
   white-space:nowrap; overflow:hidden; text-overflow:ellipsis; box-sizing:border-box;
 }
 .indi-table tr { height:42px; }
@@ -569,7 +569,7 @@ window.addEventListener('status-config-updated', () => {
 }
 .table-wrap.multi-month .indi-table th.t-left:nth-child(2),
 .table-wrap.multi-month .indi-table td.name {
-  position:sticky; left:72px; z-index:3;
+  position:sticky; left:90px; z-index:3;
 }
 .table-wrap.multi-month .indi-table th.t-left:nth-child(2) {
   z-index:12; background:#CBD7F5;

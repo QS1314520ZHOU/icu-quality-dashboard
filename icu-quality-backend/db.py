@@ -955,13 +955,8 @@ def get_bundle_data_v2(dept_codes: list, start_date: str, end_date: str) -> dict
     result_sc = get_bundle_data(dept_codes, start_date, end_date)
 
     # 合并 SmartCare 结果
-    result["total"] += result_sc["total"]
-    result["h1_num"] += result_sc["h1_num"]
-    result["h3_num"] += result_sc["h3_num"]
-    result["h6_num"] += result_sc["h6_num"]
-    result["h1_patients"].extend(result_sc["h1_patients"])
-    result["h3_patients"].extend(result_sc["h3_patients"])
-    result["h6_patients"].extend(result_sc["h6_patients"])
+    # V2 owns the statistics.  Use the legacy query only as a source of
+    # candidate events; importing its accumulated numerators mixes contracts.
     result["den_patients"].extend(result_sc["den_patients"])
 
     # ---- 阶段 2: DataCenter VI_ICU_ZYBR (扩展关键词 + 24h 过滤) ----
@@ -1090,6 +1085,17 @@ def get_bundle_data_v2(dept_codes: list, start_date: str, end_date: str) -> dict
             pat["v3"] = v3
             # 只有确认脓毒性休克 (K1 AND K2) 的患者才计入分母
             if v3.get("k1") == True and v3.get("k2") == True:
+                # Each numerator must use its own window result.  Do not
+                # infer a later window from a shared completion timestamp.
+                if v3.get("bundle_1h", {}).get("finish") is True:
+                    result["h1_num"] += 1
+                    result["h1_patients"].append(pat)
+                if v3.get("bundle_3h", {}).get("finish") is True:
+                    result["h3_num"] += 1
+                    result["h3_patients"].append(pat)
+                # No approved V3 6h definition is available.  Never copy
+                # 1h/3h success into 6h or default it to completed.
+                continue
                 # Bundle 完成 (finish=True) 的患者计入分子
                 if v3.get("finish") == True:
                     # 计算完成时间：取各组件最晚完成时间
@@ -2313,7 +2319,7 @@ def judge_bundle_v3_for_patient(sc_pid: str, dc_pid: str, mrn: str, t0: datetime
             {'mrn': mrn,
              'bedsides': {'$elemMatch': {'code': 'param_bg_P/Fratio', 'valid': 'valid',
                                           'time': {'$gte': t0, '$lte': t0_6h}}}},
-            {'bedsides.$': 1}
+            {'bedsides': 1}
         ))
         for doc in bga_pf:
             for bs in doc.get('bedsides', []):
@@ -2366,6 +2372,7 @@ def judge_bundle_v3_for_patient(sc_pid: str, dc_pid: str, mrn: str, t0: datetime
     # ---- S3/C1: MAP (无创平均动脉压 param_nibp_m) ----
     map_min = None
     map_time = None
+    map_values = []
     try:
         map_docs = list(sc.bedside.find(
             {'pid': sc_pid, 'code': 'param_nibp_m', 'valid': True,
@@ -2376,6 +2383,7 @@ def judge_bundle_v3_for_patient(sc_pid: str, dc_pid: str, mrn: str, t0: datetime
             try:
                 val = float(str(md.get('strVal', '0')).strip())
                 if val > 0:
+                    map_values.append({'value': val, 'time': md.get('time')})
                     if map_min is None or val < map_min:
                         map_min = val
                         map_time = md.get('time')
@@ -2442,12 +2450,13 @@ def judge_bundle_v3_for_patient(sc_pid: str, dc_pid: str, mrn: str, t0: datetime
     lactate_recheck_time = None
     lactate_recheck_value = None
     lactate_all = []  # 1h—3h 乳酸完整记录
+    lac_values = []
     try:
         bga_lac = list(sc.bGATemp.find(
             {'mrn': mrn,
              'bedsides': {'$elemMatch': {'code': 'param_bg_Lac', 'valid': 'valid',
                                           'time': {'$gte': t0 - timedelta(hours=2), '$lte': t0_6h}}}},
-            {'bedsides.$': 1}
+            {'bedsides': 1}
         ))
         lac_values = []
         for doc in bga_lac:
@@ -2633,6 +2642,22 @@ def judge_bundle_v3_for_patient(sc_pid: str, dc_pid: str, mrn: str, t0: datetime
     # #8: 1h 和 3h 各自独立提供数据
     # #修复: w1h和w3h窗口数据应该独立，不能共享相同的数据
     # #修复: B2血培养应该使用blood_culture_time，而不是culture_time
+    # Calculate evidence from raw records after applying each deadline.  The
+    # earlier implementation first calculated a 6h extreme and then tested
+    # only the timestamp that happened to own that extreme, which allowed a
+    # 5h MAP/lactate to contaminate 1h/3h decisions.
+    def _window_values(records, end):
+        return [r for r in records if t0 <= r.get('time') <= min(end, eval_time)]
+
+    lac_1h = _window_values(lac_values, t0_1h)
+    lac_3h = _window_values(lac_values, t0_3h)
+    map_1h = _window_values(map_values, t0_1h)
+    map_3h = _window_values(map_values, t0_3h)
+    abx_1h = antibiotic_time if antibiotic_time and t0 <= antibiotic_time <= min(t0_1h, eval_time) else None
+    abx_3h = antibiotic_time if antibiotic_time and t0 <= antibiotic_time <= min(t0_3h, eval_time) else None
+    blood_1h = blood_culture_time if blood_culture_time and t0 <= blood_culture_time <= min(t0_1h, eval_time) else None
+    blood_3h = blood_culture_time if blood_culture_time and t0 <= blood_culture_time <= min(t0_3h, eval_time) else None
+
     patient_data = {
         't0': t0,
         'eval_time': eval_time,
@@ -2649,26 +2674,31 @@ def judge_bundle_v3_for_patient(sc_pid: str, dc_pid: str, mrn: str, t0: datetime
         # 1h 窗口数据（用于 A1/B1/B2/B3/C1/C2/C3）
         # 注意: 1h窗口数据应该只包含T0~T0+1h的数据
         'w1h': {
-            'lactate_initial': lactate_initial if lactate_initial_time and lactate_initial_time <= t0_1h else None,
-            'lactate_max': lactate_max if lactate_initial_time and lactate_initial_time <= t0_1h else None,
-            'map_min': map_min if map_time and map_time <= t0_1h else None,
-            'antibiotic_time': antibiotic_time if antibiotic_time and antibiotic_time <= t0_1h else None,
-            'culture_time': blood_culture_time if blood_culture_time and blood_culture_time <= t0_1h else None,
+            'lactate_initial': lac_1h[0]['value'] if lac_1h else None,
+            'lactate_max': max((x['value'] for x in lac_1h), default=None),
+            'map_min': min((x['value'] for x in map_1h), default=None),
+            'antibiotic_time': abx_1h,
+            'culture_time': blood_1h,
             'has_fluid': has_fluid_1h,
         },
         # 3h 窗口数据
         # 注意: 3h窗口数据应该只包含T0~T0+3h的数据
         'w3h': {
-            'lactate_initial': lactate_initial if lactate_initial_time and lactate_initial_time <= t0_3h else None,
-            'lactate_max': lactate_max if lactate_initial_time and lactate_initial_time <= t0_3h else None,
-            'map_min': map_min if map_time and map_time <= t0_3h else None,
-            'antibiotic_time': antibiotic_time if antibiotic_time and antibiotic_time <= t0_3h else None,
-            'culture_time': blood_culture_time if blood_culture_time and blood_culture_time <= t0_3h else None,
+            'lactate_initial': lac_3h[0]['value'] if lac_3h else None,
+            'lactate_max': max((x['value'] for x in lac_3h), default=None),
+            'map_min': min((x['value'] for x in map_3h), default=None),
+            'antibiotic_time': abx_3h,
+            'culture_time': blood_3h,
             'fluid_ml': fluid_3h_ml,
         },
     }
 
     result = judge_bundle_v3(patient_data)
+
+    # Gate fields are encounter-level evidence and remain available to the
+    # existing detail schema.  Window-specific fields stay under bundle_1h /
+    # bundle_3h and are never flattened into one ambiguous result.
+    result.update(result.get('gate', {}))
 
     # 附加原始数据明细
     result.update({
