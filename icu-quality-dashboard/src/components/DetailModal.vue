@@ -92,44 +92,51 @@
       <span class="filter-count">共 {{ filteredPatients.length }} 例</span>
     </div>
     <!-- 通用表格（共享列定义） -->
-    <table v-if="data.patients?.length && !isSummary && !isTriTube" class="detail-table">
-      <thead>
-        <tr>
-          <th v-if="isIcu05" style="width:30px"></th>
-          <th v-for="c in columns" :key="c.header">{{ c.header }}</th>
-          <th v-if="canExclude">操作</th>
-        </tr>
-      </thead>
-      <tbody>
-        <template v-for="p in filteredPatients" :key="p.detail_id || p.patient_id">
-          <tr :class="[rowClass(p), p.excluded ? 'excluded-row' : '', isIcu05 ? 'clickable-row' : '']"
-              :title="p.admission_source === 'low_confidence' ? 'AI判定置信度<0.6，待人工复核' : ''"
-              @click="isIcu05 && toggleExpand(p.patient_id)">
-            <td v-if="isIcu05" class="expand-cell">
-              <span :class="['expand-icon', { expanded: isExpanded(p.patient_id) }]">▶</span>
-            </td>
-            <td v-for="c in columns" :key="c.header" :class="{ mono: c.header === '住院号' || c.header === '账号' }">
-              {{ c.get(p) }}
-            </td>
-            <td v-if="canExclude" class="action-cell">
-              <template v-if="p.excluded">
-                <button class="btn-restore" @click.stop="handleRestore(p)">恢复</button>
-                <span class="reason-tag">{{ getReasonLabel(p.reason_code) }}</span>
-              </template>
-              <template v-else>
-                <button class="btn-exclude" @click.stop="handleExclude(p)">排除</button>
-              </template>
-            </td>
+    <div v-if="data.patients?.length && !isSummary && !isTriTube" class="detail-table-wrap">
+      <table class="detail-table">
+        <thead>
+          <tr>
+            <th v-if="isIcu05" style="width:30px"></th>
+            <th v-for="c in columns" :key="c.header">{{ c.header }}</th>
+            <th v-if="canExclude">操作</th>
           </tr>
-          <!-- ICU-05 Bundle详情展开行 -->
-          <tr v-if="isIcu05 && isExpanded(p.patient_id)" class="bundle-detail-row">
-            <td :colspan="columns.length + 1 + (canExclude ? 1 : 0)">
-              <BundleDetail :data="p.v3 || {}" :patient="p" :part="data.part" />
-            </td>
-          </tr>
-        </template>
-      </tbody>
-    </table>
+        </thead>
+        <tbody>
+          <template v-for="p in filteredPatients" :key="p.detail_id || p.patient_id">
+            <tr :class="[
+                  rowClass(p),
+                  p.excluded ? 'excluded-row' : '',
+                  'detail-row',
+                  selectedPatientKey === (p.detail_id || p.patient_id) ? 'selected' : ''
+                ]"
+                :title="p.admission_source === 'low_confidence' ? 'AI判定置信度<0.6，待人工复核' : ''"
+                @click="handleRowClick(p)">
+              <td v-if="isIcu05" class="expand-cell">
+                <span :class="['expand-icon', { expanded: isExpanded(p.patient_id) }]">▶</span>
+              </td>
+              <td v-for="c in columns" :key="c.header" :class="{ mono: c.header === '住院号' || c.header === '账号' }">
+                {{ c.get(p) }}
+              </td>
+              <td v-if="canExclude" class="action-cell">
+                <template v-if="p.excluded">
+                  <button class="btn-restore" @click.stop="handleRestore(p)">恢复</button>
+                  <span class="reason-tag">{{ getReasonLabel(p.reason_code) }}</span>
+                </template>
+                <template v-else>
+                  <button class="btn-exclude" @click.stop="handleExclude(p)">排除</button>
+                </template>
+              </td>
+            </tr>
+            <!-- ICU-05 Bundle详情展开行 -->
+            <tr v-if="isIcu05 && isExpanded(p.patient_id)" class="bundle-detail-row">
+              <td :colspan="columns.length + 1 + (canExclude ? 1 : 0)">
+                <BundleDetail :data="p.v3 || {}" :patient="p" :part="data.part" />
+              </td>
+            </tr>
+          </template>
+        </tbody>
+      </table>
+    </div>
   </div>
     <!-- 排除原因弹窗 -->
     <Teleport to="body">
@@ -215,6 +222,15 @@ const filteredPatients = computed(() => {
   if (!hasPatientType.value || !patientTypeFilter.value) return list;
   return list.filter(p => p.patient_type === patientTypeFilter.value);
 });
+
+const selectedPatientKey = ref(null);
+function handleRowClick(p) {
+  const key = p.detail_id || p.patient_id;
+  selectedPatientKey.value = selectedPatientKey.value === key ? null : key;
+  if (isIcu05.value) {
+    toggleExpand(p.patient_id);
+  }
+}
 
 function getReasonLabel(code) {
   return EXCL_REASONS.value.find(r => r.code === code)?.label || code;
@@ -358,18 +374,46 @@ const rowClass = (p) => {
 .den-summary { font-size:16px; font-weight:600; color:var(--text-title); text-align:center;
   padding:32px 20px; background:#f8fafc; border-radius:8px;
   border: 1px solid var(--border); }
-.loading, .empty { font-size:var(--fs-body); color:var(--text-sub); text-align:center; padding:34px 20px;
-  background:var(--bg-subtle); border:1px solid var(--border); border-radius:8px; }
-.detail-table { width:100%; border-collapse:collapse; }
-.detail-table th { color:#1f2a44; font-size:12px; padding:0 10px; text-align:left;
+.detail-table-wrap {
+  border: 1px solid #b0c4f0;
+  border-radius: 4px;
+  overflow-x: auto;
+  background: #fff;
+  box-shadow: none;
+  margin-top: 6px;
+}
+.detail-table { width:100%; border-collapse:collapse; border-spacing:0; }
+.detail-table th {
+  color:#1f2a44; font-size:13px; padding:0 12px; text-align:left;
   background:#CBD7F5; border:1px solid #b0c4f0; border-width:0 1px 1px 0; font-weight:600;
-  height:38px; line-height:38px; }
+  height:42px; line-height:42px; white-space:nowrap; position:sticky; top:0; z-index:2;
+}
 .detail-table th:last-child { border-right:none; }
-.detail-table td { padding:0 10px; font-size:13px; color:#1f2a44;
+.detail-table td {
+  padding:0 12px; font-size:13px; color:#1f2a44;
   border:1px solid #e5eaf2; border-width:0 1px 1px 0;
-  height:40px; line-height:40px; background:#fff; }
+  height:42px; line-height:42px; background:#fff; white-space:nowrap;
+}
 .detail-table td:last-child { border-right:none; }
-.detail-table tbody tr:hover td { background:#f0f4fd; }
+.detail-table tbody tr.detail-row { cursor:pointer; }
+.detail-table tbody tr.detail-row:hover td { background:#f0f4fd; }
+
+/* 选中行样式：背景统一为图一中的明亮活力蓝 #5F8EF1，所有文字与图标纯白，hover 不能覆盖 */
+.detail-table tbody tr.selected td { background:#5F8EF1 !important; color:#ffffff !important; }
+.detail-table tbody tr.selected:hover td { background:#5F8EF1 !important; color:#ffffff !important; }
+.detail-table tbody tr.selected .mono { color:#ffffff !important; }
+.detail-table tbody tr.selected .expand-icon { color:#ffffff !important; }
+.detail-table tbody tr.selected .btn-exclude {
+  background:rgba(255,255,255,0.2) !important; color:#ffffff !important;
+  border:1px solid rgba(255,255,255,0.4) !important;
+}
+.detail-table tbody tr.selected .btn-restore {
+  background:#ffffff !important; color:#5F8EF1 !important; font-weight:600; border:none;
+}
+.detail-table tbody tr.selected .reason-tag {
+  background:rgba(255,255,255,0.2) !important; color:#ffffff !important;
+}
+
 .mono { font-family:monospace; color:var(--text-sub); }
 .tri-list { display:flex; flex-direction:column; gap:10px; }
 .tri-card:hover { border-color:var(--border-strong); background:var(--bg-hover); }

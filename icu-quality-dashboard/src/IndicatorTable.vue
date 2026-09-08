@@ -66,7 +66,7 @@
           <tr v-for="row in rows" :key="row.code" :class="{ selected: selectedRow === row.code }" @click="selectedRow = selectedRow === row.code ? null : row.code">
             <td class="code t-left">{{ displayCode(row.code) }}</td>
             <td class="name t-left" @mouseenter="showTip($event, row.code)" @mouseleave="hideTip">
-              <span class="name-txt">{{ row.name }}</span>
+              <span class="name-txt" tabindex="0" :title="row.name">{{ row.name }}</span>
               <span v-if="row.excluded_den > 0" class="excl-badge" :title="`原始分母  例，人工排除  例，实际计入  例`">口径已调整</span>
               <span class="formula-icon">ƒ</span>
             </td>
@@ -198,7 +198,7 @@ function cellLevel(row, m) {
 function statusStyle(status) {
   const meta = statusConfig.value.meta?.[status];
   if (!meta) return {};
-  return { color: meta.color, background: meta.background };
+  return { color: meta.color };
 }
 
 // 公式悬浮
@@ -502,24 +502,29 @@ window.addEventListener('status-config-updated', () => {
 .toast-fade-leave-active { transition:all .25s ease-in; }
 .toast-fade-enter-from, .toast-fade-leave-to { opacity:0; transform: translateY(12px); }
 
-.table-wrap { max-width:680px; margin:0 auto; background:#fff;
-  border:1px solid #d0d8e8; border-radius:4px; overflow:hidden; box-shadow:0 1px 2px rgba(16,24,40,.04); }
-.table-wrap.multi-month { max-width:100%; margin:0; overflow-x:auto; }
+.table-wrap { width:fit-content; max-width:100%; margin:0 auto; background:#fff;
+  border:1px solid #b0c4f0; border-radius:4px; overflow:hidden; box-shadow:none; }
+.table-wrap.multi-month { width:fit-content; max-width:100%; margin:0 auto; overflow-x:auto; }
 
-.indi-table { width:100%; table-layout:fixed; border-collapse:collapse; border-spacing:0; }
-.table-wrap.multi-month .indi-table { width:auto; min-width:100%; }
+.indi-table { width:auto; table-layout:fixed; border-collapse:collapse; border-spacing:0; }
+.table-wrap.multi-month .indi-table { width:auto; min-width:unset; }
 
-.c-code{width:72px} .c-name{width:220px; max-width:260px} .c-num{width:72px} .c-val{width:82px}
-.c-month{width:72px} .c-status{width:80px} .c-trend{width:52px}
+.c-code, .indi-table th:nth-child(1), .indi-table td.code { width:72px !important; min-width:72px !important; max-width:72px !important; }
+.c-name, .indi-table th:nth-child(2), .indi-table td.name { width:230px !important; min-width:230px !important; max-width:230px !important; }
+.c-num, .indi-table th:nth-child(3), .indi-table th:nth-child(4), .indi-table td.num { width:72px !important; min-width:72px !important; max-width:72px !important; }
+.c-val, .indi-table th:nth-child(5), .indi-table td:nth-child(5) { width:82px !important; min-width:82px !important; max-width:82px !important; }
+.c-month, .indi-table td.month-cell { width:72px !important; min-width:72px !important; max-width:72px !important; }
+.c-status { width:86px !important; min-width:86px !important; max-width:86px !important; }
+.c-trend { width:52px !important; min-width:52px !important; max-width:52px !important; }
 
 .indi-table th, .indi-table td {
-  padding:0 14px; font-size:13px; height:42px; line-height:42px;
-  white-space:nowrap; overflow:hidden; text-overflow:ellipsis;
+  padding:0 10px; font-size:13px; height:42px; line-height:42px;
+  white-space:nowrap; overflow:hidden; text-overflow:ellipsis; box-sizing:border-box;
 }
 .indi-table tr { height:42px; }
 .indi-table th {
   background:#CBD7F5; color:#1f2a44;
-  font-size:12px; font-weight:600; letter-spacing:0.03em;
+  font-size:13px; font-weight:600; letter-spacing:0.02em;
   border:1px solid #b0c4f0; border-width:0 1px 1px 0;
   position:sticky; top:0; z-index:2;
 }
@@ -528,10 +533,57 @@ window.addEventListener('status-config-updated', () => {
 .indi-table td:last-child { border-right:none; }
 .indi-table tbody tr:last-child td { border-bottom:none; }
 .indi-table tbody tr:hover td { background:#f0f4fd; }
-.indi-table tbody tr.selected td { background:#344E84; color:#fff; }
-.indi-table tbody tr.selected td .badge { color:#fff; }
-.indi-table tbody tr.selected .mini { color:#fff; opacity:.8; }
-.indi-table tbody tr.selected:hover td { background:#344E84; }
+
+/* 选中行样式：背景采用图一所示的明亮活力蓝 #5F8EF1，所有文字和操作图标均为白色，hover 不能覆盖 */
+.indi-table tbody tr.selected td { background:#5F8EF1 !important; color:#ffffff !important; }
+.indi-table tbody tr.selected:hover td { background:#5F8EF1 !important; color:#ffffff !important; }
+.indi-table tbody tr.selected .code,
+.indi-table tbody tr.selected .num,
+.indi-table tbody tr.selected .val,
+.indi-table tbody tr.selected .name-txt,
+.indi-table tbody tr.selected .month-cell { color:#ffffff !important; }
+.indi-table tbody tr.selected .link:hover,
+.indi-table tbody tr.selected .month-cell:hover { color:#ffffff !important; text-decoration:underline; }
+.indi-table tbody tr.selected .mini { color:#ffffff !important; opacity:1 !important; }
+.indi-table tbody tr.selected .mini svg { stroke:#ffffff !important; }
+.indi-table tbody tr.selected .formula-icon { background:rgba(255,255,255,0.25) !important; color:#ffffff !important; opacity:1 !important; }
+.indi-table tbody tr.selected .excl-badge { background:rgba(255,255,255,0.2) !important; color:#ffffff !important; border-color:rgba(255,255,255,0.4) !important; }
+
+/* 选中行下的状态：文字纯白，圆点加纯白微光描边，不使用杂乱的大圈圈底色 */
+.indi-table tbody tr.selected .badge {
+  background:transparent !important;
+  color:#ffffff !important;
+  border:none !important;
+}
+.indi-table tbody tr.selected .badge-dot {
+  box-shadow:0 0 0 1.5px #ffffff;
+}
+
+/* 多月时允许横向滚动，表头及必要的左侧列保持固定易读 */
+.table-wrap.multi-month .indi-table th.t-left:nth-child(1),
+.table-wrap.multi-month .indi-table td.code {
+  position:sticky; left:0; z-index:3;
+}
+.table-wrap.multi-month .indi-table th.t-left:nth-child(1) {
+  z-index:12; background:#CBD7F5;
+}
+.table-wrap.multi-month .indi-table th.t-left:nth-child(2),
+.table-wrap.multi-month .indi-table td.name {
+  position:sticky; left:72px; z-index:3;
+}
+.table-wrap.multi-month .indi-table th.t-left:nth-child(2) {
+  z-index:12; background:#CBD7F5;
+}
+.table-wrap.multi-month .indi-table tbody tr:hover td.code,
+.table-wrap.multi-month .indi-table tbody tr:hover td.name {
+  background:#f0f4fd;
+}
+.table-wrap.multi-month .indi-table tbody tr.selected td.code,
+.table-wrap.multi-month .indi-table tbody tr.selected td.name,
+.table-wrap.multi-month .indi-table tbody tr.selected:hover td.code,
+.table-wrap.multi-month .indi-table tbody tr.selected:hover td.name {
+  background:#5F8EF1 !important;
+}
 
 .t-left{text-align:left} .t-right{text-align:right} .t-center{text-align:center}
 
@@ -543,10 +595,23 @@ window.addEventListener('status-config-updated', () => {
 .sep { border-right:1px solid #b0c4f0; }
 
 .code { color:#6b7a94; font-size:12px; }
-.name { max-width:260px; }
-.name-txt { vertical-align:middle; overflow:hidden; text-overflow:ellipsis; white-space:nowrap; display:inline-block; max-width:180px; }
-.name:hover .name-txt { overflow:visible; position:relative; z-index:5; background:#fff;
-  box-shadow:0 2px 8px rgba(0,0,0,.12); padding:2px 6px; border-radius:3px; white-space:normal; max-width:360px; }
+.name { width:230px !important; min-width:230px !important; max-width:230px !important; }
+.name-txt {
+  vertical-align:middle; overflow:hidden; text-overflow:ellipsis; white-space:nowrap;
+  display:inline-block; max-width:170px; outline:none;
+}
+.name:hover .name-txt,
+.name-txt:focus-visible {
+  overflow:visible; position:relative; z-index:15; background:#fff; color:#1f2a44;
+  box-shadow:0 2px 8px rgba(0,0,0,.15); padding:2px 6px; border-radius:3px; white-space:normal; max-width:360px;
+}
+.indi-table tbody tr.selected .name:hover .name-txt,
+.indi-table tbody tr.selected .name-txt:focus-visible {
+  background:#5F8EF1 !important; color:#ffffff !important;
+  border:1px solid rgba(255,255,255,0.4) !important;
+  box-shadow:0 2px 8px rgba(0,0,0,0.2) !important;
+}
+
 /* 分子分母:中性深灰；比值:品牌蓝突出 */
 .num { color: #1f2a44; }
 .val { color: #1e5eb8; font-weight:600; }
@@ -559,19 +624,31 @@ window.addEventListener('status-config-updated', () => {
 .month-cell.alert { color: #b26a00; font-weight:500; }
 
 .formula-icon { margin-left:5px; font-style:italic; font-size:11px; color:#1e5eb8;
-  background:#eaf1fb; border-radius:3px; padding:0 4px; opacity:.5; }
+  background:#eaf1fb; border-radius:3px; padding:0 4px; opacity:.6; cursor:help; }
 .name:hover .formula-icon { opacity:1; }
 
-/* 状态徽章:圆点+文字 */
-.badge { padding:3px 10px; border-radius:20px; font-size:12px; font-weight:500;
-  display:inline-flex; align-items:center; gap:4px; }
-.badge-dot { width:5px; height:5px; border-radius:50%; flex-shrink:0; display:inline-block; }
-.badge.good { background:rgba(21,150,107,0.08); color:#0e7a52; }
-.badge.good::before { background:#0e7a52; }
-.badge.warn { background:rgba(201,122,22,0.08); color:#b26a00; }
-.badge.warn::before { background:#b26a00; }
-.badge.danger { background:rgba(207,64,64,0.08); color:#c62828; }
-.badge.danger::before { background:#c62828; }
+/* 状态展示：彻底去除臃肿的大椭圆圈圈底色，纯净点标 + 文字，紧凑清爽 */
+.badge {
+  padding:0;
+  border-radius:0;
+  font-size:12px;
+  font-weight:500;
+  display:inline-flex;
+  align-items:center;
+  gap:5px;
+  background:transparent !important;
+  border:none !important;
+}
+.badge-dot {
+  width:6px;
+  height:6px;
+  border-radius:50%;
+  flex-shrink:0;
+  display:inline-block;
+}
+.badge.good { color:#0e7a52; }
+.badge.warn { color:#b26a00; }
+.badge.danger { color:#c62828; }
 .mini { cursor:pointer; opacity:.35; } .mini:hover { opacity:.6; }
 
 .formula-tip { position:fixed; z-index:200; pointer-events:none; background:#fff;

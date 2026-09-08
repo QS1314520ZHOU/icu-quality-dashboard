@@ -58,7 +58,7 @@ test.describe('ICU Quality Dashboard E2E', () => {
     expect(bgColor).toBe('rgb(203, 215, 245)');
   });
 
-  test('蓝色网格表格样式 - 选中行背景#344E84', async ({ page }) => {
+  test('蓝色网格表格样式 - 选中行背景#5F8EF1', async ({ page }) => {
     await goToJune2026(page);
 
     const firstRow = page.locator('.indi-table tbody tr').first();
@@ -67,7 +67,7 @@ test.describe('ICU Quality Dashboard E2E', () => {
     const bgColor = await firstRow.locator('td').first().evaluate(
       el => getComputedStyle(el).backgroundColor
     );
-    expect(bgColor).toBe('rgb(52, 78, 132)');
+    expect(bgColor).toBe('rgb(95, 142, 241)');
 
     const color = await firstRow.locator('td').first().evaluate(
       el => getComputedStyle(el).color
@@ -147,7 +147,7 @@ test.describe('ICU Quality Dashboard E2E', () => {
     const bgColor = await firstRow.locator('td').first().evaluate(
       el => getComputedStyle(el).backgroundColor
     );
-    expect(bgColor).toBe('rgb(52, 78, 132)');
+    expect(bgColor).toBe('rgb(95, 142, 241)');
   });
 
   test('月份单元格可点击(cursor:pointer) - 多月模式', async ({ page }) => {
