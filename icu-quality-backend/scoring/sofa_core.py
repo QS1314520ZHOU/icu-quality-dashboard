@@ -146,7 +146,11 @@ def _urine_in_window(
         if not isinstance(ts, datetime):
             continue
         if ts.tzinfo is None:
-            ts = ts.replace(tzinfo=timezone.utc)
+            try:
+                from zoneinfo import ZoneInfo
+            except ImportError:
+                from backports.zoneinfo import ZoneInfo
+            ts = ts.replace(tzinfo=ZoneInfo("Asia/Shanghai")).astimezone(timezone.utc)
         if ts < window_start or ts > eval_time:
             continue
         candidates.append((float(raw_val), o.get("unit", ""), ts))
@@ -226,7 +230,11 @@ def _worst_in_window(
         if not isinstance(ts, datetime):
             continue
         if ts.tzinfo is None:
-            ts = ts.replace(tzinfo=timezone.utc)
+            try:
+                from zoneinfo import ZoneInfo
+            except ImportError:
+                from backports.zoneinfo import ZoneInfo
+            ts = ts.replace(tzinfo=ZoneInfo("Asia/Shanghai")).astimezone(timezone.utc)
         if ts < window_start or ts > eval_time:
             continue
         candidates.append((float(raw_val), obs.get("unit", ""), ts))
@@ -287,7 +295,11 @@ def _worst_pf_pair_in_window(
         if not isinstance(ts, datetime):
             continue
         if ts.tzinfo is None:
-            ts = ts.replace(tzinfo=timezone.utc)
+            try:
+                from zoneinfo import ZoneInfo
+            except ImportError:
+                from backports.zoneinfo import ZoneInfo
+            ts = ts.replace(tzinfo=ZoneInfo("Asia/Shanghai")).astimezone(timezone.utc)
         if ts < window_start or ts > eval_time:
             continue
         val = float(raw_val)
@@ -337,7 +349,7 @@ def _calc_respiratory(
 
     codes_pao2 = ["param_PaO2", "PaO2"]
     codes_fio2 = ["param_FiO2", "FiO2"]
-    codes_ratio = ["param_bg_P/Fratio"]
+    codes_ratio = ["param_bg_P/Fratio", "P/F_ratio"]
 
     # 先查 ratio 直接值
     val, unit, ts, is_stale = _worst_in_window(obs, codes_ratio, eval_time, _cfg.RESP_LOOKBACK_H, _cfg.RESP_STALENESS_MAX_H)
@@ -573,7 +585,11 @@ def _lowest_gcs_in_window(
         if not isinstance(ts, datetime):
             continue
         if ts.tzinfo is None:
-            ts = ts.replace(tzinfo=timezone.utc)
+            try:
+                from zoneinfo import ZoneInfo
+            except ImportError:
+                from backports.zoneinfo import ZoneInfo
+            ts = ts.replace(tzinfo=ZoneInfo("Asia/Shanghai")).astimezone(timezone.utc)
         if ts < window_start or ts > eval_time:
             continue
 
@@ -743,7 +759,7 @@ def _calc_renal(
             )
         elif normalized_u in ("ml", "毫升"):
             score_urine = _score_from_thresholds(
-                val, _TH["renal"]["urine_thresholds"]
+                urine_val, _TH["renal"]["urine_thresholds"]
             )
         else:
             info["renal_urine_unit_error"] = f"未知尿量单位: {unit}"

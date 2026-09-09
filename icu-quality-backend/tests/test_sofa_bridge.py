@@ -99,8 +99,8 @@ def test_preexisting_no_acute_increase():
         infection_evidence={"has_infection": True, "i1": True, "i2": False, "i3": False},
     )
     # 当前实现: SOFA-2 ≥ 2 + 感染 = 脓毒症
-    # 这是试验口径，标记为 experimental
-    assert clinical["layer3_sepsis"]["sepsis_basis"] == "sepsis3_sofa2"
+    # 基线未知时，sepsis_basis 标记为 pending_baseline
+    assert clinical["layer3_sepsis"]["sepsis_basis"] == "sepsis3_sofa2_pending_baseline"
 
 
 # ============================================================

@@ -87,9 +87,19 @@ COLLOID_KEYWORDS = {
 # ============================================================
 
 def _aware(dt: datetime) -> datetime:
-    """确保时区感知。"""
+    """
+    确保时区感知。
+    数据库 naive 时间视为 Asia/Shanghai，显式本地化后转 UTC。
+    禁止直接 replace(tzinfo=UTC) — 那会把本地时间错误地标为 UTC。
+    """
+    if dt is None:
+        return None
     if dt.tzinfo is None:
-        return dt.replace(tzinfo=timezone.utc)
+        try:
+            from zoneinfo import ZoneInfo
+        except ImportError:
+            from backports.zoneinfo import ZoneInfo
+        return dt.replace(tzinfo=ZoneInfo("Asia/Shanghai")).astimezone(timezone.utc)
     return dt
 
 

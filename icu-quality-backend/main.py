@@ -1088,22 +1088,39 @@ def query_detail(code: str, period: str, part: str, icu_unit: str = "all"):
                 "classic_components": classic.get("components"),
                 "classic_result_status": classic.get("result_status"),
                 "classic_completeness": classic.get("completeness"),
+                "classic_meta": classic.get("meta", {}),
                 "sofa2_score": sofa2.get("sofa2_score"),
                 "sofa2_components": sofa2.get("components"),
                 "sofa2_result_status": sofa2.get("result_status"),
                 "sofa2_completeness": sofa2.get("completeness"),
+                "sofa2_meta": sofa2.get("meta", {}),
                 "sofa2_data_quality_flags": sofa2.get("data_quality_flags", []),
                 "eval_time": sofa_data.get("eval_time"),
+                "t0": sofa_data.get("t0"),
                 "version_meta": sofa_data.get("version_meta"),
+                "data_quality_flags": sofa_data.get("data_quality_flags", []),
+                "fetch_meta": sofa_data.get("fetch_meta", {}),
             }
 
         # 临床识别层摘要构建
         def _build_clinical_layer_summary(cl):
             if not cl:
                 return None
+            layer2 = cl.get("layer2_organ_dysfunction", {})
             return {
                 "infection": cl.get("layer1_infection"),
-                "organ_dysfunction": cl.get("layer2_organ_dysfunction"),
+                "organ_dysfunction": {
+                    "sofa2_total": layer2.get("sofa2_total"),
+                    "sofa2_baseline": layer2.get("sofa2_baseline"),
+                    "sofa2_delta": layer2.get("sofa2_delta"),
+                    "baseline_known": layer2.get("baseline_known"),
+                    "acute_basis": layer2.get("acute_basis"),
+                    "acute_assumption_applied": layer2.get("acute_assumption_applied"),
+                    "current_score_elevated": layer2.get("current_score_elevated"),
+                    "has_acute_organ_dysfunction": layer2.get("has_acute_organ_dysfunction"),
+                    "sofa2_completeness": layer2.get("sofa2_completeness"),
+                    "sofa2_result_status": layer2.get("sofa2_result_status"),
+                },
                 "sepsis": cl.get("layer3_sepsis"),
                 "shock": cl.get("layer4_shock"),
             }
@@ -2666,61 +2683,114 @@ def get_bundle_v3_detail(mrn: str, period: str = ""):
 
 
 @app.get("/api/patients/{pid}/sofa")
-def get_patient_sofa(pid: str, eval_time: str = ""):
-    """获取单患者的正式 SOFA 评分结果（经典 SOFA + SOFA-2）。"""
+def get_patient_sofa(pid: str, eval_time: str = "", event_id: str = ""):
+    """
+    获取单患者的正式 SOFA 评分结果（经典 SOFA + SOFA-2）。
+
+    改进:
+    1. 不再调用 get_bundle_data_v2 扫描全月候选
+    2. 要求或解析明确的住院/ICU事件和eval_time
+    3. ObjectId解析失败后仍按MRN/hisPid查找
+    4. 返回明确的400/404/422/500状态
+    5. 限制查询范围和执行时间
+    """
     from scoring.sofa_bridge import compute_sofa_scores
 
+    # 参数验证
+    if not pid:
+        return JSONResponse(status_code=400, content={"error": "Missing pid parameter"})
+
     # 查找患者信息
+    pat = None
+    sc_pid = None
+    mrn = None
+    dc_pid = None
+
     for db_name in BED_DB_NAMES:
         try:
             db = get_client(db_name)[db_name]
-            # 尝试按 sc_pid 或 mrn 查找
-            pat = None
+            # 尝试按 sc_pid (ObjectId) 查找
             if len(pid) == 24:
-                from bson import ObjectId
-                pat = db.patient.find_one({"_id": ObjectId(pid)})
+                try:
+                    from bson import ObjectId
+                    pat = db.patient.find_one({"_id": ObjectId(pid)})
+                except Exception:
+                    pass  # ObjectId解析失败，继续按MRN查找
+            # 按 hisPid/MRN 查找
             if not pat:
                 pat = db.patient.find_one({"hisPid": pid})
             if not pat:
-                continue
-
-            sc_pid = str(pat.get("_id", ""))
-            mrn = pat.get("hisPid", pid)
-            dc_pid = pat.get("dcPid", "")
-
-            # 确定评估时间
-            if eval_time:
-                try:
-                    et = datetime.fromisoformat(eval_time)
-                except ValueError:
-                    et = datetime.utcnow()
-            else:
-                et = datetime.utcnow()
-
-            # 获取 T0 (如果有)
-            t0 = None
-            try:
-                from db import get_bundle_data_v2
-                now = datetime.utcnow()
-                data = get_bundle_data_v2([], f"{now.year}-{now.month:02d}-01",
-                                          f"{now.year}-{now.month:02d}-28")
-                for p in data.get("den_patients", []):
-                    if p.get("sc_pid") == sc_pid or p.get("mrn") == mrn:
-                        t0 = p.get("t0")
-                        break
-            except Exception:
-                pass
-
-            result = compute_sofa_scores(
-                sc_pid=sc_pid, mrn=mrn, dc_pid=dc_pid,
-                t0=t0 or et, eval_time=et,
-            )
-            return {"ok": True, "pid": pid, "sofa": result}
-
-        except Exception as e:
+                pat = db.patient.find_one({"mrn": pid})
+            if pat:
+                sc_pid = str(pat.get("_id", ""))
+                mrn = pat.get("hisPid") or pat.get("mrn") or pid
+                dc_pid = pat.get("dcPid", "")
+                break
+        except Exception:
             continue
 
-    return {"error": f"Patient {pid} not found"}
+    if not pat:
+        return JSONResponse(status_code=404, content={"error": f"Patient {pid} not found"})
+
+    # 确定评估时间
+    et = None
+    if eval_time:
+        try:
+            et = datetime.fromisoformat(eval_time.replace("Z", "+00:00"))
+        except ValueError:
+            return JSONResponse(
+                status_code=400,
+                content={"error": f"Invalid eval_time format: {eval_time}. Use ISO format."}
+            )
+    if et is None:
+        et = datetime.utcnow()
+
+    # 获取 T0
+    # 优先从 event_id 获取，否则直接使用 eval_time 作为 T0
+    # 不再调用 get_bundle_data_v2 扫描全月候选 (性能优化)
+    t0 = None
+    if event_id:
+        try:
+            from bson import ObjectId
+            for db_name in BED_DB_NAMES:
+                try:
+                    db = get_client(db_name)[db_name]
+                    event = db.events.find_one({"_id": ObjectId(event_id)})
+                    if event:
+                        t0 = event.get("t0") or event.get("admit_time")
+                        break
+                except Exception:
+                    continue
+        except Exception as e:
+            logger.warning("Event lookup failed for event_id=%s: %s", event_id, e)
+
+    if t0 is None:
+        # 无法确定T0，使用eval_time作为T0（标记为假设性）
+        t0 = et
+
+    # 计算SOFA评分
+    try:
+        result = compute_sofa_scores(
+            sc_pid=sc_pid, mrn=mrn, dc_pid=dc_pid,
+            t0=t0, eval_time=et,
+        )
+        return {
+            "ok": True,
+            "pid": pid,
+            "sc_pid": sc_pid,
+            "mrn": mrn,
+            "dc_pid": dc_pid,
+            "t0": t0.isoformat() if t0 else None,
+            "eval_time": et.isoformat() if et else None,
+            "t0_source": "bundle_candidate" if t0 != et else "eval_time_fallback",
+            "sofa": result,
+        }
+    except Exception as e:
+        logger.error("SOFA computation failed for pid=%s: %s\n%s", pid, e, traceback.format_exc())
+        return JSONResponse(
+            status_code=500,
+            content={"error": f"SOFA computation failed: {str(e)[:200]}"}
+        )
 
 
 # ============================================================

@@ -18,10 +18,18 @@ logger = logging.getLogger(__name__)
 
 
 def _aware(dt: datetime) -> datetime:
+    """
+    确保时区感知。
+    数据库 naive 时间视为 Asia/Shanghai，显式本地化后转 UTC。
+    """
     if dt is None:
         return None
     if dt.tzinfo is None:
-        return dt.replace(tzinfo=timezone.utc)
+        try:
+            from zoneinfo import ZoneInfo
+        except ImportError:
+            from backports.zoneinfo import ZoneInfo
+        return dt.replace(tzinfo=ZoneInfo("Asia/Shanghai")).astimezone(timezone.utc)
     return dt
 
 
@@ -265,22 +273,59 @@ def build_clinical_layer(
     }
 
     # ---- Layer 2: 急性器官功能障碍 ----
-    # 使用 SOFA-2 总分 ≥ 2 作为判定标准 (Sepsis-3 口径)
+    # 区分: 当前SOFA-2总分 / 基线SOFA-2 / delta / 是否有证据支持"感染相关急性变化"
+    # 设计原则:
+    #   - 当前SOFA-2总分≥2 → has_acute_organ_dysfunction=True (门控逻辑不变)
+    #   - 但 acute_basis 区分基线是否已知，前端可据此显示假设标记
+    #   - 基线已知时用 delta≥2 判定，基线未知时用当前≥2 + 标记假设
+    baseline_sofa2 = sofa_result.get("sofa2_baseline", {}).get("sofa2_score")
+    baseline_known = baseline_sofa2 is not None
+    delta = None
+    if sofa2_score is not None and baseline_sofa2 is not None:
+        delta = sofa2_score - baseline_sofa2
+
+    # 当前总分≥2 → 有器官功能障碍信号
+    current_score_elevated = sofa2_score is not None and sofa2_score >= 2
+
+    # 急性变化判定
     has_acute_organ_dysfunction = None
-    organ_dysfunction_basis = "sofa2_total_ge_2"
-    if sofa2_score is not None:
-        has_acute_organ_dysfunction = sofa2_score >= 2
+    acute_basis = "unknown"
+    acute_assumption_applied = False
+
+    if delta is not None:
+        # 基线已知 → 用 delta 判定
+        if delta >= 2:
+            has_acute_organ_dysfunction = True
+            acute_basis = "delta_ge_2"
+        else:
+            has_acute_organ_dysfunction = False
+            acute_basis = "delta_lt_2"
+    elif current_score_elevated:
+        # 基线未知但当前≥2 → 门控逻辑仍判True，但标记假设
+        has_acute_organ_dysfunction = True
+        acute_basis = "baseline_unknown_current_ge_2"
+        acute_assumption_applied = True
+    elif sofa2_score is not None and sofa2_score < 2:
+        # 当前总分<2 → 不满足器官功能障碍
+        has_acute_organ_dysfunction = False
+        acute_basis = "current_lt_2"
     elif sofa2_status == "insufficient":
-        has_acute_organ_dysfunction = None  # 数据不足，无法判定
+        has_acute_organ_dysfunction = None
+        acute_basis = "insufficient_data"
 
     layer2 = {
         "sofa2_total": sofa2_score,
+        "sofa2_baseline": baseline_sofa2,
+        "sofa2_delta": delta,
+        "baseline_known": baseline_known,
+        "acute_assumption_applied": acute_assumption_applied,
         "sofa2_components": sofa2_components,
         "sofa2_completeness": sofa2_completeness,
         "sofa2_result_status": sofa2_status,
         "classic_total": classic_score,
         "has_acute_organ_dysfunction": has_acute_organ_dysfunction,
-        "organ_dysfunction_basis": organ_dysfunction_basis,
+        "acute_basis": acute_basis,
+        "current_score_elevated": current_score_elevated,
         # S1-S4 保留为辅助信号
         "s1_signal": _organ_signal(sofa2_components, "respiratory"),
         "s2_signal": _organ_signal(classic.get("components", {}), "central_nervous_system"),
@@ -289,10 +334,17 @@ def build_clinical_layer(
     }
 
     # ---- Layer 3: 脓毒症判定 ----
+    # 脓毒症 = 感染 + 急性器官功能变化
+    # 门控逻辑: has_acute_organ_dysfunction=True (含基线未知假设) → is_sepsis=True
+    # 但 sepsis_basis 区分是否基于假设
     is_sepsis = None
     sepsis_basis = "sepsis3_sofa2"
     if has_infection is True and has_acute_organ_dysfunction is True:
         is_sepsis = True
+        if acute_basis == "baseline_unknown_current_ge_2":
+            sepsis_basis = "sepsis3_sofa2_pending_baseline"
+        else:
+            sepsis_basis = "sepsis3_sofa2_confirmed"
     elif has_infection is False:
         is_sepsis = False
     elif has_acute_organ_dysfunction is False and has_infection is True:
@@ -307,12 +359,17 @@ def build_clinical_layer(
 
     # ---- Layer 4: 脓毒性休克判定 ----
     # 独立于 K1∧K2 布尔判定
+    # 脓毒性休克 = 脓毒症 + 持续需要升压药维持MAP + 乳酸>2 + 容量状态
     shock_criteria = {
         "sepsis_confirmed": is_sepsis,
+        "sepsis_basis": sepsis_basis,
         "persistent_hypotension": None,
         "vasopressor_required": None,
+        "vasopressor_active_at_eval": None,
         "lactate_gt_2": None,
+        "lactate_borderline": None,
         "volume_assessed": has_fluid_resuscitation,
+        "volume_adequate": None,
     }
 
     # 乳酸判定 (严格 >2, 不是 ≥2)
@@ -321,8 +378,10 @@ def build_clinical_layer(
         if lactate_value == 2.0:
             lactate_borderline = True
             shock_criteria["lactate_gt_2"] = False
+            shock_criteria["lactate_borderline"] = True
         else:
             shock_criteria["lactate_gt_2"] = lactate_value > 2
+            shock_criteria["lactate_borderline"] = False
 
     # MAP 持续低血压
     map_recovered = False
@@ -333,6 +392,7 @@ def build_clinical_layer(
 
     # 升压药需求
     shock_criteria["vasopressor_required"] = has_vasopressor_wide
+    shock_criteria["vasopressor_active_at_eval"] = has_vasopressor_wide
 
     # 综合判定
     shock_status = _determine_shock_status(
@@ -390,6 +450,9 @@ def _determine_shock_status(
     """
     综合判定脓毒性休克状态。
     返回: "confirmed" | "not_confirmed" | "pending_review" | "borderline" | "insufficient_data"
+
+    脓毒性休克 = 脓毒症 + (持续需要升压药维持MAP ≥65) + 乳酸>2mmol/L
+    容量状态不明时返回 pending_review，不得自动 confirmed。
     """
     # 脓毒症未确认 → 不可能是脓毒性休克
     if is_sepsis is False:
@@ -398,7 +461,7 @@ def _determine_shock_status(
         return "insufficient_data"
 
     # 脓毒症已确认，检查休克条件
-    # 需要: 升压药 + 乳酸>2 + 低血压
+    # 需要: 升压药 + 乳酸>2
     if not has_vasopressor:
         return "not_confirmed"
 
@@ -420,6 +483,7 @@ def _determine_shock_status(
     # 检查 MAP 状态
     if map_recovered:
         # MAP 已恢复但仍依赖升压药 → 仍算休克
+        # 升压药依赖本身就是休克证据（容量复苏后仍需升压药维持MAP）
         return "confirmed"
 
     if map_value is not None and map_value >= 65 and not map_recovered:
@@ -428,7 +492,7 @@ def _determine_shock_status(
 
     # 液体复苏状态
     if has_fluid is None:
-        return "pending_review"  # 液体复苏状态未知
+        return "pending_review"  # 液体复苏状态未知，不得自动confirmed
 
     # 满足所有条件
     return "confirmed"

@@ -139,7 +139,11 @@ def _urine_in_window(
         if not isinstance(ts, datetime):
             continue
         if ts.tzinfo is None:
-            ts = ts.replace(tzinfo=timezone.utc)
+            try:
+                from zoneinfo import ZoneInfo
+            except ImportError:
+                from backports.zoneinfo import ZoneInfo
+            ts = ts.replace(tzinfo=ZoneInfo("Asia/Shanghai")).astimezone(timezone.utc)
         if ts < window_start or ts > eval_time:
             continue
         candidates.append((float(raw_val), o.get("unit", ""), ts))
@@ -210,7 +214,11 @@ def _worst_in_window(
         if not isinstance(ts, datetime):
             continue
         if ts.tzinfo is None:
-            ts = ts.replace(tzinfo=timezone.utc)
+            try:
+                from zoneinfo import ZoneInfo
+            except ImportError:
+                from backports.zoneinfo import ZoneInfo
+            ts = ts.replace(tzinfo=ZoneInfo("Asia/Shanghai")).astimezone(timezone.utc)
         if ts < window_start or ts > eval_time:
             continue
         candidates.append((float(raw_val), obs.get("unit", ""), ts))
@@ -263,7 +271,11 @@ def _worst_pf_pair_in_window(
         if not isinstance(ts, datetime):
             continue
         if ts.tzinfo is None:
-            ts = ts.replace(tzinfo=timezone.utc)
+            try:
+                from zoneinfo import ZoneInfo
+            except ImportError:
+                from backports.zoneinfo import ZoneInfo
+            ts = ts.replace(tzinfo=ZoneInfo("Asia/Shanghai")).astimezone(timezone.utc)
         if ts < window_start or ts > eval_time:
             continue
         val = float(raw_val)
@@ -309,7 +321,7 @@ def _calc_respiratory(
     codes_fio2 = ["param_FiO2", "FiO2"]
 
     # 先查 P/F ratio 直接值
-    val, unit, ts, is_stale = _worst_in_window(obs, ["param_bg_P/Fratio"], eval_time, _cfg.RESP_LOOKBACK_H, _cfg.RESP_STALENESS_MAX_H)
+    val, unit, ts, is_stale = _worst_in_window(obs, ["param_bg_P/Fratio", "P/F_ratio"], eval_time, _cfg.RESP_LOOKBACK_H, _cfg.RESP_STALENESS_MAX_H)
     if val is not None and val > 0:
         ratio = val
         if is_stale:
@@ -426,7 +438,11 @@ def _lowest_gcs_in_window(
         if not isinstance(ts, datetime):
             continue
         if ts.tzinfo is None:
-            ts = ts.replace(tzinfo=timezone.utc)
+            try:
+                from zoneinfo import ZoneInfo
+            except ImportError:
+                from backports.zoneinfo import ZoneInfo
+            ts = ts.replace(tzinfo=ZoneInfo("Asia/Shanghai")).astimezone(timezone.utc)
         if ts < window_start or ts > eval_time:
             continue
 
