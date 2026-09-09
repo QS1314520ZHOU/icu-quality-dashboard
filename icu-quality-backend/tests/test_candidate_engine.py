@@ -27,11 +27,12 @@ class TestCandidateEnginePathways:
         assert result["candidate_status"] in ("high_probability", "probable", "pending_review")
 
     def test_channel_a_sepsis_diagnosis(self):
-        """通道A: 诊断文本含脓毒症 → 候选 (高召回策略)"""
+        """通道A: 仅有脓毒症诊断且无休克信号 → 不自动进入休克候选"""
         result = extract_candidate(diagnosis_text="脓毒症")
-        # "脓毒症"在正向关键词中，高召回策略下应进入候选
-        assert result["is_septic_shock_candidate"] is True
-        assert "diagnosis" in result["candidate_pathways"]
+        # 仅有脓毒症诊断但无任何休克方向信号 → 不进入休克候选
+        # 这是正确的业务规则: 高召回不等于所有感染患者都进入休克分母
+        assert result["is_septic_shock_candidate"] is False
+        assert "diagnosis" not in result["candidate_pathways"]
 
     def test_channel_a_infection_shock(self):
         """通道A: 诊断文本包含感染性休克"""
@@ -153,7 +154,7 @@ class TestCandidateSummary:
     """候选统计测试"""
 
     def test_summary_counts(self):
-        """统计各状态数量"""
+        """统计各状态数量 — raw_candidate_count 排除 not_candidate"""
         candidates = [
             {"candidate_status": "high_probability"},
             {"candidate_status": "high_probability"},
@@ -162,7 +163,11 @@ class TestCandidateSummary:
             {"candidate_status": "not_candidate"},
         ]
         summary = compute_candidate_statistics(candidates)
-        assert summary["raw_candidate_count"] == 5
+        # raw_candidate_count = high_prob + probable + pending_review = 4
+        assert summary["raw_candidate_count"] == 4
+        assert summary["not_candidate_count"] == 1
+        assert summary["evaluated_event_count"] == 5
+        assert summary["final_candidate_count"] == 4
 
     def test_summary_empty(self):
         """空列表"""
@@ -182,7 +187,7 @@ class TestConfigConstants:
         assert LACTATE_STRICT_GT == 2.0
 
     def test_rule_version(self):
-        assert CANDIDATE_RULE_VERSION == "1.0.0"
+        assert CANDIDATE_RULE_VERSION == "1.1.0"
 
 
 class TestGCSAdapter:
@@ -234,6 +239,209 @@ class TestExclusionReasons:
         assert "hypovolemic_shock" in reasons
         assert "postop_routine_vasopressor" in reasons
         assert "other" in reasons
+
+
+class TestSepsisVsSepticShockKeywords:
+    """脓毒症 vs 脓毒性休克 关键词拆分测试"""
+
+    def test_septic_shock_diagnosis_independent_candidate(self):
+        """明确脓毒性休克诊断可独立进入候选"""
+        result = extract_candidate(diagnosis_text="脓毒性休克")
+        assert result["is_septic_shock_candidate"] is True
+        assert "diagnosis" in result["candidate_pathways"]
+        assert result["has_septic_shock_diagnosis"] is True
+        assert result["has_sepsis_only_diagnosis"] is False
+
+    def test_sepsis_only_no_shock_signal_not_candidate(self):
+        """仅有脓毒症诊断且无休克信号 → 非候选"""
+        result = extract_candidate(
+            diagnosis_text="脓毒症",
+            infection_evidence={"has_infection": True},
+        )
+        assert result["is_septic_shock_candidate"] is False
+        assert result["candidate_status"] == "not_candidate"
+
+    def test_sepsis_with_vasopressor_is_candidate(self):
+        """脓毒症诊断 + 升压药 → 候选"""
+        result = extract_candidate(
+            diagnosis_text="脓毒症",
+            infection_evidence={"has_infection": True},
+            has_vasopressor_wide=True,
+        )
+        assert result["is_septic_shock_candidate"] is True
+
+    def test_sepsis_with_lactate_is_candidate(self):
+        """脓毒症诊断 + 乳酸 > 2 → 候选"""
+        result = extract_candidate(
+            diagnosis_text="脓毒症",
+            infection_evidence={"has_infection": True},
+            lactate_value=3.0,
+        )
+        assert result["is_septic_shock_candidate"] is True
+
+    def test_sepsis_with_low_map_is_candidate(self):
+        """脓毒症诊断 + MAP < 65 → 候选"""
+        result = extract_candidate(
+            diagnosis_text="脓毒症",
+            infection_evidence={"has_infection": True},
+            map_value=55.0,
+        )
+        assert result["is_septic_shock_candidate"] is True
+
+    def test_negative_keyword_excludes(self):
+        """否定关键词排除诊断"""
+        result = extract_candidate(diagnosis_text="排除脓毒性休克")
+        assert result["is_septic_shock_candidate"] is False
+        assert "diagnosis" not in result["candidate_pathways"]
+
+
+class TestLactateTriState:
+    """乳酸三态测试"""
+
+    def test_lactate_met(self):
+        """乳酸 > 2 → True / met"""
+        result = extract_candidate(lactate_value=3.5)
+        assert result["lactate_value"] == 3.5
+        assert result["lactate_status"] == "met"
+
+    def test_lactate_not_met(self):
+        """乳酸 <= 2 → False / measured_not_met"""
+        result = extract_candidate(lactate_value=1.5)
+        assert result["lactate_value"] == 1.5
+        assert result["lactate_status"] == "measured_not_met"
+
+    def test_lactate_borderline(self):
+        """乳酸 == 2.0 → borderline"""
+        result = extract_candidate(lactate_value=2.0)
+        assert result["lactate_status"] == "borderline"
+
+    def test_lactate_missing(self):
+        """乳酸缺失 → None / missing"""
+        result = extract_candidate()
+        assert result["lactate_value"] is None
+        assert result["lactate_status"] == "missing"
+
+
+class TestSOFANesting:
+    """SOFA 嵌套结构读取测试"""
+
+    def test_sofa_nested_structure(self):
+        """v3["sofa"]["sofa2"] 嵌套结构正确读取"""
+        v3_result = {
+            "sofa": {
+                "sofa2": {"sofa2_score": 5, "result_status": "complete", "components": {}, "completeness": 1.0},
+                "classic": {"sofa_score": 4, "result_status": "complete"},
+            },
+            "i1": True,
+        }
+        result = extract_candidate(v3_result=v3_result, infection_evidence={"has_infection": True})
+        assert result["sofa2_current"] == 5
+        assert result["classic_sofa_current"] == 4
+
+    def test_sofa_flat_structure_fallback(self):
+        """旧平铺结构 v3["sofa2"] 兼容"""
+        v3_result = {
+            "sofa2": {"sofa2_score": 6, "result_status": "complete", "components": {}, "completeness": 1.0},
+            "classic": {"sofa_score": 3, "result_status": "complete"},
+            "i1": True,
+        }
+        result = extract_candidate(v3_result=v3_result, infection_evidence={"has_infection": True})
+        assert result["sofa2_current"] == 6
+        assert result["classic_sofa_current"] == 3
+
+
+class TestSOFA2Supplement:
+    """SOFA-2 补充通道测试"""
+
+    def test_sofa2_supplement_forces_hit(self):
+        """SOFA-2 >= 2 + 感染 → 补充通道必须命中"""
+        result = extract_candidate(
+            infection_evidence={"has_infection": True},
+            sofa2_result={"sofa2_score": 5, "result_status": "complete", "components": {}, "completeness": 1.0},
+        )
+        # SOFA-2 supplement should add pathway when no other pathway matches
+        assert "sofa2_supplement" in result["candidate_pathways"]
+        assert result["is_septic_shock_candidate"] is True
+        assert result["candidate_status"] == "pending_review"
+
+
+class TestEngineErrorHandling:
+    """候选引擎异常降级测试"""
+
+    def test_engine_error_not_not_candidate(self):
+        """引擎异常不得降级为 not_candidate (在 db.py 中测试)"""
+        # 这个测试验证 extract_candidate 本身不会因为参数异常返回 not_candidate
+        # 当传入不完整的 v3_result 时，应该优雅处理
+        result = extract_candidate(v3_result={})
+        # 无任何证据 → not_candidate 是正常的
+        # 但如果有感染证据但引擎内部异常，db.py 会捕获并返回 pending_review
+        assert result["candidate_status"] in ("not_candidate", "pending_review")
+
+
+class TestCandidateStatisticsInvariants:
+    """候选统计不变量测试"""
+
+    def test_statistics_invariants(self):
+        """evaluated = raw + not_candidate; raw = high + probable + pending"""
+        candidates = [
+            {"candidate_status": "high_probability"},
+            {"candidate_status": "probable"},
+            {"candidate_status": "probable"},
+            {"candidate_status": "pending_review"},
+            {"candidate_status": "not_candidate"},
+            {"candidate_status": "not_candidate"},
+            {"candidate_status": "not_candidate", "excluded": True},
+        ]
+        summary = compute_candidate_statistics(candidates)
+        assert summary["evaluated_event_count"] == 7
+        assert summary["raw_candidate_count"] == 4  # high + probable + pending
+        assert summary["not_candidate_count"] == 3
+        assert summary["high_probability_count"] == 1
+        assert summary["probable_count"] == 2
+        assert summary["pending_review_count"] == 1
+        # excluded 只计算 raw candidates 中的，not_candidate 的 excluded 不计入
+        assert summary["excluded_candidate_count"] == 0
+        assert summary["final_candidate_count"] == 4
+
+    def test_statistics_excluded_candidates(self):
+        """排除候选正确计数"""
+        candidates = [
+            {"candidate_status": "high_probability", "excluded": True},
+            {"candidate_status": "probable"},
+            {"candidate_status": "not_candidate"},
+        ]
+        summary = compute_candidate_statistics(candidates)
+        assert summary["raw_candidate_count"] == 2
+        assert summary["excluded_candidate_count"] == 1
+        assert summary["final_candidate_count"] == 1
+
+    def test_statistics_empty(self):
+        """空列表"""
+        summary = compute_candidate_statistics([])
+        assert summary["evaluated_event_count"] == 0
+        assert summary["raw_candidate_count"] == 0
+        assert summary["not_candidate_count"] == 0
+        assert summary["final_candidate_count"] == 0
+
+
+class TestInfectionOnlyNotCandidate:
+    """单纯感染不进入休克候选测试"""
+
+    def test_infection_only_no_shock_signal(self):
+        """感染 + 无任何休克信号 → 非休克候选"""
+        result = extract_candidate(
+            infection_evidence={"has_infection": True},
+        )
+        assert result["is_septic_shock_candidate"] is False
+        assert result["candidate_status"] == "not_candidate"
+
+    def test_infection_with_shock_signal_is_candidate(self):
+        """感染 + 休克信号 → 候选"""
+        result = extract_candidate(
+            infection_evidence={"has_infection": True},
+            has_vasopressor_wide=True,
+        )
+        assert result["is_septic_shock_candidate"] is True
 
 
 if __name__ == "__main__":

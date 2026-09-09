@@ -502,7 +502,15 @@ def _fetch_medications(
             )
 
             # 判断 eval_time 时是否活跃
+            # 关键: 无动作时 active_intervals 为空，此时 is_active 为 False
+            # 但应标记 active_status=unknown 而非直接判定为不活跃
+            has_actions = bool(doc.get("drugActionList"))
             is_active_at_eval = _is_active_at(active_intervals, eval_time)
+            if not has_actions and not active_intervals:
+                # 无动作记录: 不得直接判定为活跃或不活跃
+                # 调用方应标记 active_status=unknown
+                is_active_at_eval = False  # 保守: 不视为活跃
+                # 但仍保留药物证据供人工复核
 
             # 获取最新泵速 (从活跃区间的最后一个动作)
             speed_mlh = 0.0
@@ -570,6 +578,14 @@ def _fetch_medications(
                             route = r
                             break
 
+                    # 确定 active_status
+                    if not has_actions and not active_intervals:
+                        active_status = "unknown"
+                    elif is_active_at_eval:
+                        active_status = "active"
+                    else:
+                        active_status = "inactive"
+
                     med = {
                         "med_name": name,
                         "route": route,
@@ -579,12 +595,19 @@ def _fetch_medications(
                         "admin_start": _aware(start_time),
                         "active_intervals": active_intervals,
                         "is_active_at_eval": is_active_at_eval,
+                        "active_status": active_status,
                         "is_vasopressor": True,
                         "weight_kg": doc_weight,
                     }
                     medications.append(med)
                 elif in_wide and not in_strict:
                     # VASO_WIDE 但非 SOFA 白名单 → 记录但不计算剂量
+                    if not has_actions and not active_intervals:
+                        active_status = "unknown"
+                    elif is_active_at_eval:
+                        active_status = "active"
+                    else:
+                        active_status = "inactive"
                     medications.append({
                         "med_name": name,
                         "route": "",
@@ -593,6 +616,7 @@ def _fetch_medications(
                         "admin_start": _aware(start_time),
                         "active_intervals": active_intervals,
                         "is_active_at_eval": is_active_at_eval,
+                        "active_status": active_status,
                     })
     except Exception as e:
         logger.warning("drugExe fetch failed for sc_pid=%s: %s", sc_pid, e)
@@ -606,12 +630,16 @@ def _reconstruct_active_intervals(
     """
     从 drugActionList 重建活跃区间。
 
-    逻辑:
-    1. 按动作时间排序
-    2. "开始"动作 → 开启新区间
-    3. "停止/暂停/取消"动作 → 关闭当前区间
-    4. "恢复"动作 → 开启新区间
-    5. 缺时间的动作跳过
+    状态机:
+    1. "开始"/"恢复" → 开启新区间
+    2. "停止"/"暂停"/"取消" → 关闭当前区间
+    3. "调速" → 保持当前区间
+    4. 缺时间的动作跳过
+
+    关键规则:
+    - 无动作且有 startTime 时，不得默认永久活跃
+    - 需结合医嘱类型/执行状态/结束时间判断
+    - 无法判断时返回空列表（标记 unknown）
 
     返回: [(start, end), ...] 区间列表，end=None 表示仍在进行中
     """
@@ -635,14 +663,19 @@ def _reconstruct_active_intervals(
             if current_start is not None:
                 intervals.append((current_start, action_time))
                 current_start = None
+        # "调速"等其他动作: 保持当前区间不变
 
     # 如果最后一个区间未关闭，标记为进行中
     if current_start is not None:
         intervals.append((current_start, None))
 
-    # 如果没有任何动作，使用 startTime 作为开始
+    # 关键修复: 无动作时不得默认永久活跃
+    # 老旧无动作药物可能已结束但未记录停止动作
+    # 此时返回空列表，由调用方标记 active_status=unknown
     if not intervals and start_time:
-        intervals.append((start_time, None))
+        # 不再默认 (start_time, None) —— 那会把旧药视为永久使用
+        # 返回空列表，调用方需要结合其他字段判断
+        pass
 
     return intervals
 
@@ -682,16 +715,35 @@ def _fetch_ventilator_status_point_in_time(
     关键逻辑:
     - 分别获取 PEEP、VT、PIP 在 eval_time 前的最后有效状态
     - 综合多个参数共同判断: PEEP>0 或 VT>0 或 PIP>0 → 机械通气中
-    - 不仅取最新一条(可能PEEP=0但VT仍有值)
     - 找不到证据时返回 False (保守)
 
     返回: True=机械通气中, False=未在机械通气
+    """
+    result = _fetch_ventilator_status_detailed(sc, sc_pid, eval_time, tolerance_hours)
+    return result.get("is_active", False)
+
+
+def _fetch_ventilator_status_detailed(
+    sc, sc_pid: str, eval_time: datetime, tolerance_hours: int = 4
+) -> dict:
+    """
+    详细判断 eval_time 时患者通气状态。
+
+    返回状态:
+        active: 确认机械通气中
+        inactive: 确认未在机械通气
+        unknown: 数据不足无法判断
+        stale: 数据过期
+        error: 查询失败
+
+    返回: {is_active: bool, status: str, details: dict}
     """
     window_start = eval_time - timedelta(hours=tolerance_hours)
 
     try:
         # 分别查询各参数在窗口内的最新值
         vent_params = {}
+        param_times = {}
         for code in ["param_vent_peep", "param_vent_vt", "param_vent_pip"]:
             doc = sc.bedside.find_one(
                 {"pid": sc_pid,
@@ -705,6 +757,18 @@ def _fetch_ventilator_status_point_in_time(
                 if val is None:
                     val = _safe_float(doc.get("strVal"))
                 vent_params[code] = val
+                param_times[code] = doc.get("time")
+
+        # 没有任何通气参数数据 → unknown
+        if not vent_params:
+            return {"is_active": False, "status": "unknown", "details": {}}
+
+        # 检查数据是否过期 (最新数据超过tolerance_hours)
+        latest_time = max(param_times.values()) if param_times else None
+        if latest_time and isinstance(latest_time, datetime):
+            data_age_hours = (_aware(eval_time) - _aware(latest_time)).total_seconds() / 3600
+            if data_age_hours > tolerance_hours:
+                return {"is_active": False, "status": "stale", "details": vent_params}
 
         # 综合判断: 任一参数 > 0 即认为机械通气中
         peep = vent_params.get("param_vent_peep")
@@ -714,12 +778,12 @@ def _fetch_ventilator_status_point_in_time(
         if (peep is not None and peep > 0) or \
            (vt is not None and vt > 0) or \
            (pip is not None and pip > 0):
-            return True
+            return {"is_active": True, "status": "active", "details": vent_params}
 
-        return False
+        return {"is_active": False, "status": "inactive", "details": vent_params}
     except Exception as e:
         logger.warning("Ventilator status fetch failed for sc_pid=%s: %s", sc_pid, e)
-        return False
+        return {"is_active": False, "status": "error", "details": {"error": str(e)}}
 
 
 def _fetch_weight(sc, sc_pid: str) -> Optional[float]:

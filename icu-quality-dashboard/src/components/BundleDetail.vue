@@ -381,17 +381,19 @@ const CANDIDATE_STATUS_MAP = {
   'not_candidate': '非候选',
 }
 const CONFIRMATION_STATUS_MAP = {
-  'confirmed': '临床已确诊',
-  'pending_review': '待复核',
+  'confirmed': '符合电子确认规则',
+  'pending_review': '待人工复核',
   'insufficient': '证据不足',
 }
 const PATHWAY_MAP = {
   'diagnosis': '通道A - 明确诊断',
   'strong_shock': '通道B - 强休克证据',
-  'combined_evidence': '通道C - 组合证据',
+  'composite': '通道C - 组合证据',
   'pending_incomplete': '通道D - 待复核',
   'sofa2_supplement': 'SOFA-2补充',
+  'engine_error': '引擎异常-待复核',
   // 兼容旧格式
+  'combined_evidence': '通道C - 组合证据',
   'A': '通道A - 明确诊断',
   'B': '通道B - 强休克证据',
   'C': '通道C - 组合证据',

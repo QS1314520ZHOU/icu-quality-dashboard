@@ -1122,88 +1122,85 @@ def get_bundle_data_v2(dept_codes: list, start_date: str, end_date: str) -> dict
                 pat["candidate_status"] = candidate_info.get("candidate_status", "not_candidate")
                 pat["candidate_pathways"] = candidate_info.get("candidate_pathways", [])
                 pat["clinical_confirmation_status"] = candidate_info.get("clinical_confirmation_status", "insufficient")
-            except Exception:
-                pat["candidate_info"] = {"candidate_status": "not_candidate", "is_septic_shock_candidate": False}
-                pat["is_septic_shock_candidate"] = False
-                pat["candidate_status"] = "not_candidate"
-                pat["candidate_pathways"] = []
+            except Exception as _cand_exc:
+                # 关键: 引擎异常不得降级为 not_candidate，必须进入 pending_review
+                # 数据库失败/SOFA失败/字段解析失败 ≠ 非候选
+                logger.warning("Candidate engine failed for %s: %s", pat.get("mrn"), _cand_exc)
+                pat["candidate_info"] = {
+                    "is_septic_shock_candidate": True,
+                    "candidate_status": "pending_review",
+                    "candidate_pathways": ["engine_error"],
+                    "clinical_confirmation_status": "insufficient",
+                    "candidate_reasons": ["候选引擎执行异常，需人工复核"],
+                    "missing_evidence": ["candidate_engine_failed"],
+                    "error_code": "CANDIDATE_ENGINE_FAILED",
+                }
+                pat["is_septic_shock_candidate"] = True
+                pat["candidate_status"] = "pending_review"
+                pat["candidate_pathways"] = ["engine_error"]
                 pat["clinical_confirmation_status"] = "insufficient"
             # 影子比对字段保留
             pat["shock_status_new"] = shock_layer.get("shock_status")
             pat["sofa2_total"] = (cl.get("layer2_organ_dysfunction") or {}).get("sofa2_total")
-            # 当前使用旧口径作为分子判定，候选引擎作为分母判定 (summary.py 中使用)
+            # 旧口径分子: K1 AND K2 (正式分子)
             if old_shock_confirmed:
-                # Each numerator must use its own window result.  Do not
-                # infer a later window from a shared completion timestamp.
                 if v3.get("bundle_1h", {}).get("finish") is True:
                     result["h1_num"] += 1
                     result["h1_patients"].append(pat)
                 if v3.get("bundle_3h", {}).get("finish") is True:
                     result["h3_num"] += 1
                     result["h3_patients"].append(pat)
-                # No approved V3 6h definition is available.  Never copy
-                # 1h/3h success into 6h or default it to completed.
-                continue
-                # Bundle 完成 (finish=True) 的患者计入分子
-                if v3.get("finish") == True:
-                    # 计算完成时间：取各组件最晚完成时间
-                    completion_times = []
-                    # A1: 乳酸测量时间
-                    a1_time = v3.get("lactate_initial_time")
-                    if a1_time:
-                        completion_times.append(a1_time)
-                    # B3: 抗生素时间（B3=True 意味着抗生素晚于血培养）
-                    b3_time = v3.get("antibiotic_time")
-                    if b3_time:
-                        completion_times.append(b3_time)
-                    # C3: 液体完成时间
-                    c3_1h = v3.get("c3_1h")
-                    c3_3h = v3.get("c3_3h")
-                    if c3_1h == True:
-                        # 1h内完成液体 → 完成时间 = T0 + 1h
-                        completion_times.append(t0 + timedelta(hours=1))
-                    elif c3_3h == True:
-                        # 3h内完成液体 → 完成时间 = T0 + 3h
-                        completion_times.append(t0 + timedelta(hours=3))
-
-                    # 取最晚完成时间
-                    if completion_times:
-                        latest_completion = max(completion_times)
-                        hours_to_complete = (latest_completion - t0).total_seconds() / 3600
-
-                        if hours_to_complete <= 1:
-                            result["h1_num"] += 1
-                            result["h1_patients"].append(pat)
-                            result["h3_num"] += 1
-                            result["h3_patients"].append(pat)
-                            result["h6_num"] += 1
-                            result["h6_patients"].append(pat)
-                        elif hours_to_complete <= 3:
-                            result["h3_num"] += 1
-                            result["h3_patients"].append(pat)
-                            result["h6_num"] += 1
-                            result["h6_patients"].append(pat)
-                        else:
-                            result["h6_num"] += 1
-                            result["h6_patients"].append(pat)
-                    else:
-                        # 无时间信息，默认计入6h
-                        result["h6_num"] += 1
-                        result["h6_patients"].append(pat)
+            # 影子分子: 候选引擎结果不为 not_candidate 的患者
+            # 新候选分子不受旧K1/K2过滤
+            is_shadow_candidate = pat.get("candidate_status", "not_candidate") != "not_candidate"
+            if is_shadow_candidate:
+                if v3.get("bundle_1h", {}).get("finish") is True:
+                    if not old_shock_confirmed:
+                        # 仅当不在旧分子中时才添加到影子分子
+                        result.setdefault("shadow_h1_patients", []).append(pat)
+                if v3.get("bundle_3h", {}).get("finish") is True:
+                    if not old_shock_confirmed:
+                        result.setdefault("shadow_h3_patients", []).append(pat)
         except Exception as _exc:
             logger.warning("V3 judgment failed for %s: %s", pat.get("mrn"), _exc)
             continue
 
-    # 重新计算分母（候选引擎：高召回四通道）
-    # 新口径：candidate_status != "not_candidate" 进分母
-    # 旧口径：K1 AND K2 仅用于影子比对
-    confirmed_candidates = sum(1 for p in result["den_patients"]
-                               if p.get("candidate_status", "not_candidate") != "not_candidate")
+    # 重新计算分母
+    from config.candidate_rules import CANDIDATE_ENGINE_MODE
+
+    # 旧口径: K1 AND K2 → 正式分母 (shadow 模式下不改变)
     old_shock_count = sum(1 for p in result["den_patients"]
                           if p.get("v3", {}).get("k1") == True and p.get("v3", {}).get("k2") == True)
-    result["total"] = confirmed_candidates
-    # 影子比对字段
+
+    # 新口径: 候选引擎结果 → 影子分母
+    candidate_count = sum(1 for p in result["den_patients"]
+                          if p.get("candidate_status", "not_candidate") != "not_candidate")
+    high_prob_count = sum(1 for p in result["den_patients"]
+                          if p.get("candidate_status") == "high_probability")
+    probable_count = sum(1 for p in result["den_patients"]
+                         if p.get("candidate_status") == "probable")
+    pending_count = sum(1 for p in result["den_patients"]
+                        if p.get("candidate_status") == "pending_review")
+
+    if CANDIDATE_ENGINE_MODE == "shadow":
+        # shadow 模式: 正式分母使用旧口径，候选引擎结果作为影子数据
+        result["total"] = old_shock_count
+        result["candidate_shadow"] = {
+            "candidate_count": candidate_count,
+            "high_probability_count": high_prob_count,
+            "probable_count": probable_count,
+            "pending_review_count": pending_count,
+            "not_candidate_count": len(result["den_patients"]) - candidate_count,
+        }
+    elif CANDIDATE_ENGINE_MODE == "active":
+        # active 模式: 正式分母使用候选引擎结果
+        result["total"] = candidate_count
+    else:
+        result["total"] = old_shock_count
+
+    # 影子比对字段 (始终保留)
     result["old_shock_count"] = old_shock_count
+    result["candidate_mode"] = CANDIDATE_ENGINE_MODE
 
     return result
 

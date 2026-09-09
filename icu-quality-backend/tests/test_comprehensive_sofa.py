@@ -260,12 +260,13 @@ class TestVasopressorIntervals:
         # 重启后活跃
         assert _is_active_at(intervals, _sh(2026, 1, 14, 15, 0)) is True
 
-    def test_no_actions_uses_start_time(self):
-        """无动作时使用 startTime"""
+    def test_no_actions_empty_intervals(self):
+        """无动作时返回空列表 (不得默认永久活跃)"""
         start = _sh(2026, 1, 14, 0, 0)
         intervals = _reconstruct_active_intervals([], start)
-        assert len(intervals) == 1
-        assert intervals[0] == (start, None)
+        # 无动作记录时，不得假设药物永久活跃
+        # 调用方应标记 active_status=unknown
+        assert len(intervals) == 0
 
     def test_cancel_stops_drug(self):
         """取消动作停止药物"""

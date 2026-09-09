@@ -1157,6 +1157,8 @@ def query_detail(code: str, period: str, part: str, icu_unit: str = "all"):
 
         # 构建 v3 字段的完整映射
         def _build_v3_dict(v3, window):
+            if not v3 or not isinstance(v3, dict):
+                return {}
             # Window decisions are nested by contract.  Merge only the
             # explicitly requested window with encounter-level evidence.
             v3 = {**v3, **v3.get(f"bundle_{window}", {})}
@@ -1241,7 +1243,7 @@ def query_detail(code: str, period: str, part: str, icu_unit: str = "all"):
             items = []
             for p in data.get(key, []):
                 mrn = p.get("mrn", "")
-                v3 = p.get("v3", {})
+                v3 = p.get("v3") or {}
                 # 获取 admission_type
                 admission_type = p.get("admission_type", "")
                 items.append({
@@ -1272,7 +1274,7 @@ def query_detail(code: str, period: str, part: str, icu_unit: str = "all"):
             items = []
             for d in den_patients:
                 mrn = d.get("mrn", "")
-                v3 = d.get("v3", {})
+                v3 = d.get("v3") or {}
                 # 候选池: 显示所有候选患者(含pending_review)
                 # 新口径: candidate_status != "not_candidate"
                 # 兼容旧逻辑: 如果没有candidate引擎结果，用is_septic_shock

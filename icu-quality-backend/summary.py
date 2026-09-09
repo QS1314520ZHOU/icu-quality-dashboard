@@ -77,16 +77,21 @@ def _compute_icu04(dept_codes, start, end):
 def _compute_icu05(dept_codes, start, end, hour):
     """ICU-05: Bundle完成率 (1h/3h/6h) — 使用 V2 双集合查询 + 高召回候选引擎
 
-    分母逻辑 (修改为高召回候选池):
-      1. den_patients 是候选列表 (所有通过 T0 映射的患者)
-      2. 使用候选引擎提取高召回候选 (四通道: 诊断/强休克/组合/待复核)
-      3. 候选状态不是 not_candidate 的患者进入分母
-      4. 应用人工排除
-      5. 分子 = 分母集合中相应窗口完成 Bundle 的事件
-
-    业务目标: 系统尽可能自动提取候选，不确定患者进入待复核而不是提前过滤。
+    Shadow 模式关键规则:
+      - official_num/official_den/official_val 使用旧口径 (K1 AND K2)
+      - candidate_shadow_num/candidate_shadow_den 使用候选引擎结果
+      - 新候选不改变正式 num/den/val
+      - 新候选完成 Bundle 时能进入影子分子
     """
     from scoring.candidate_engine import extract_candidate, compute_candidate_statistics
+    from config.candidate_rules import CANDIDATE_ENGINE_MODE
+
+    # 6h 固定返回 rule_pending/null (规则待主任确认)
+    if hour == "6h":
+        return {
+            "num": None, "den": None, "val": None, "val_type": "percent",
+            "data_available": False, "status": "rule_pending",
+        }
 
     d = get_bundle_data_v2(dept_codes, start, end)
     period = start[:7]  # "YYYY-MM"
@@ -104,16 +109,30 @@ def _compute_icu05(dept_codes, start, end, hour):
         pat["candidate_status"] = candidate_info.get("candidate_status", "not_candidate")
         pat["clinical_confirmation_status"] = candidate_info.get("clinical_confirmation_status", "insufficient")
 
-    # Step 2: 高召回分母 — 候选状态不是 not_candidate 的患者
-    qualified_den = [
+    # Step 2: 候选统计
+    cand_summary = compute_candidate_statistics(all_den_candidates)
+
+    # Step 3: Shadow 模式 — 正式分母使用旧口径
+    # 旧口径: K1 AND K2
+    official_den_patients = [
+        p for p in all_den_candidates
+        if p.get("v3", {}).get("k1") == True and p.get("v3", {}).get("k2") == True
+    ]
+
+    # 新口径候选分母 (影子)
+    candidate_den_patients = [
         p for p in all_den_candidates
         if p.get("candidate_status") != "not_candidate"
     ]
 
-    # 候选统计
-    cand_summary = compute_candidate_statistics(all_den_candidates)
+    if CANDIDATE_ENGINE_MODE == "shadow":
+        # shadow 模式: 正式分母使用旧口径
+        qualified_den = official_den_patients
+    else:
+        # active 模式: 正式分母使用候选引擎结果
+        qualified_den = candidate_den_patients
 
-    # Step 3: 分子必须是合格分母的子集
+    # Step 4: 分子必须是合格分母的子集
     den_exclusion_keys = {p.get("exclusion_key") for p in qualified_den if p.get("exclusion_key")}
     num_candidates = d.get(hour_key, [])
     qualified_num = [
@@ -121,7 +140,7 @@ def _compute_icu05(dept_codes, start, end, hour):
         if p.get("exclusion_key") in den_exclusion_keys
     ]
 
-    # Step 4: 应用人工排除
+    # Step 5: 应用人工排除
     ex = apply_exclusions(f"ICU-05-{hour}", dept_codes, period, qualified_num, qualified_den)
     num = len(ex["num_items"])
     den = len(ex["den_items"])
@@ -159,15 +178,12 @@ def _compute_icu05(dept_codes, start, end, hour):
         pass
 
     # 统计新口径差异
-    new_shock_count = sum(1 for p in all_den_candidates
-                          if p.get("v3", {}).get("clinical_layer", {}).get("layer4_shock", {}).get("shock_status") == "confirmed")
-    # 旧口径: K1 AND K2
-    old_shock_count = sum(1 for p in all_den_candidates
-                          if p.get("v3", {}).get("k1") == True and p.get("v3", {}).get("k2") == True)
+    new_shock_count = len(candidate_den_patients)
+    old_shock_count = len(official_den_patients)
     shock_diff = new_shock_count - old_shock_count
 
     # SOFA-2 评分统计
-    sofa2_scores = [p.get("sofa2_total") for p in qualified_den if p.get("sofa2_total") is not None]
+    sofa2_scores = [p.get("sofa2_total") for p in candidate_den_patients if p.get("sofa2_total") is not None]
     sofa2_mean = round(sum(sofa2_scores) / len(sofa2_scores), 1) if sofa2_scores else None
 
     return {
@@ -187,6 +203,8 @@ def _compute_icu05(dept_codes, start, end, hour):
         "probable_count": cand_summary.get("probable_count", 0),
         "pending_review_count": cand_summary.get("pending_review_count", 0),
         "not_candidate_count": cand_summary.get("not_candidate_count", 0),
+        # Shadow 模式信息
+        "candidate_mode": CANDIDATE_ENGINE_MODE,
     }
 
 

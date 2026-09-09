@@ -339,11 +339,9 @@ class TestVentilatorPointInTime:
 
         result = _fetch_ventilator_status_point_in_time(sc, "P001", eval_time, tolerance_hours=4)
 
-        # find_one会按时间排序返回最新，如果返回的是超时数据则False
-        # (实际查询会过滤，这里mock直接返回)
-        # 但函数内部有时间过滤逻辑，所以需要验证
-        # 由于mock绕过了查询，我们测试的是值检查逻辑
-        assert result is True  # mock返回有效值，函数只检查>0
+        # 数据超过tolerance_hours → 视为过期，不判定为通气中
+        # 通气状态: unknown不等于未通气，stale不等于active
+        assert result is False  # 过期数据不应判定为通气中
 
 
 class TestObservationMetadata:

@@ -16,11 +16,14 @@
 """
 
 # 规则版本 (修改规则时 +1)
-CANDIDATE_RULE_VERSION = "1.0.0"
+CANDIDATE_RULE_VERSION = "1.1.0"
 
 # 乳酸阈值 (与 LACTATE_STRICT_GT 相同，供 candidate_engine 使用)
 LACTATE_THRESHOLD = 2.0
 LACTATE_BORDERLINE = 2.0  # 边界值
+
+# 候选引擎模式: shadow=影子运行(不改变正式报表) | active=正式启用
+CANDIDATE_ENGINE_MODE = "shadow"
 
 # 候选通道优先级 (高优先级通道覆盖低优先级)
 CHANNEL_PRIORITY = {
@@ -29,19 +32,28 @@ CHANNEL_PRIORITY = {
     "composite": 3,       # 通道C: 组合证据
     "pending_incomplete": 4,  # 通道D: 证据不完整
     "sofa2_supplement": 5,    # SOFA-2 补充发现
+    "engine_error": 6,        # 引擎异常降级
 }
 
-# 通道A: 明确诊断关键词 (必须排除否定/不确定文本)
-DIAGNOSIS_POSITIVE_KEYWORDS = [
-    "脓毒性休克", "感染性休克", "septic shock", "septic_shock",
-    "脓毒症休克", "败血症休克",
-    "脓毒症", "败血症", "sepsis",
+# ---- 脓毒性休克诊断关键词 (明确休克诊断，可独立进入候选) ----
+SEPTIC_SHOCK_DIAGNOSIS_KEYWORDS = [
+    "脓毒性休克", "感染性休克", "脓毒症休克", "败血症休克",
+    "septic shock", "septic_shock",
 ]
 
+# ---- 脓毒症诊断关键词 (仅有脓毒症时还需休克方向信号) ----
+SEPSIS_ONLY_DIAGNOSIS_KEYWORDS = [
+    "脓毒症", "败血症", "脓毒血症", "sepsis",
+]
+
+# 合并正向关键词 (兼容旧代码)
+DIAGNOSIS_POSITIVE_KEYWORDS = SEPTIC_SHOCK_DIAGNOSIS_KEYWORDS + SEPSIS_ONLY_DIAGNOSIS_KEYWORDS
+
+# 否定/不确定关键词 (不得命中明确诊断)
 DIAGNOSIS_NEGATIVE_KEYWORDS = [
     "排除脓毒症", "排除感染", "脓毒症待排", "感染待排",
     "不支持脓毒症", "非脓毒性", "非感染性休克",
-    "排除", "待排", "否认", "不考虑",
+    "排除", "待排", "否认", "不考虑", "既往史",
 ]
 
 # 脓毒症诊断关键词 (正向/否定) - 别名
@@ -80,9 +92,16 @@ def classify_candidate(
     has_shock_signal: bool,
     evidence_complete: bool,
     has_conflicting_evidence: bool,
+    has_septic_shock_diagnosis: bool = False,
+    has_sepsis_only_diagnosis: bool = False,
 ) -> tuple[str, list[str]]:
     """
     根据证据分类候选等级。
+
+    关键规则:
+      - 脓毒性休克明确诊断可独立进入候选
+      - 仅有脓毒症诊断时，还需至少一个休克方向信号
+      - 单纯感染(无任何休克信号)不进入休克候选
 
     Returns:
         (candidate_status, candidate_pathways)
@@ -91,7 +110,19 @@ def classify_candidate(
 
     # 通道A: 明确诊断
     if has_diagnosis:
-        pathways.append("diagnosis")
+        if has_septic_shock_diagnosis:
+            # 明确脓毒性休克诊断 → 可独立进入候选
+            pathways.append("diagnosis")
+        elif has_sepsis_only_diagnosis and has_shock_signal:
+            # 仅有脓毒症诊断 + 有休克方向信号 → 进入候选
+            pathways.append("diagnosis")
+        elif has_sepsis_only_diagnosis and not has_shock_signal:
+            # 仅有脓毒症诊断但无休克信号 → 不自动进入休克候选
+            # 但记录诊断信息供后续复核
+            pass
+        else:
+            # 通用诊断
+            pathways.append("diagnosis")
 
     # 通道B: 强休克证据
     if has_infection and has_vasopressor and lactate_gt_2:
@@ -105,12 +136,14 @@ def classify_candidate(
     if has_infection and has_vasopressor and not lactate_gt_2:
         # 感染+升压药但乳酸缺失/不满足
         pathways.append("pending_incomplete")
-    elif has_diagnosis and not evidence_complete:
+    elif has_diagnosis and "diagnosis" in pathways and not evidence_complete:
+        # 仅当诊断通道已激活时才添加 pending_incomplete
         pathways.append("pending_incomplete")
 
     if not pathways:
-        if has_infection and not evidence_complete:
-            # 有感染信号但数据不完整，不能排除
+        # 关键: 单纯感染、没有任何休克方向信号 → not_candidate
+        # 不是所有感染患者都进入休克分母
+        if has_infection and has_shock_signal and not evidence_complete:
             return "pending_review", ["pending_incomplete"]
         return "not_candidate", []
 
