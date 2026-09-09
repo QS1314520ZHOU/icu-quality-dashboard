@@ -273,27 +273,46 @@ def extract_candidate(
     if not has_organ_dysfunction:
         missing.append("未检测到器官功能异常信号")
 
-    # ---- 休克信号 ----
-    has_shock_signal = False
+    # ---- 休克信号: 区分 confirmed 和 review ----
+    # confirmed_shock_signal: 电子确认依据 (升压药active/乳酸高/MAP低/明确休克诊断)
+    # review_shock_signal: 包含 confirmed + 升压药unknown (需人工复核)
     shock_evidence = {}
 
-    if has_vasopressor_wide:
-        has_shock_signal = True
+    confirmed_shock_signal = False
+    review_shock_signal = False
+
+    if vasopressor_status == "active":
+        confirmed_shock_signal = True
         shock_evidence["vasopressor_active"] = True
-        supporting.append("评估时点有升压药使用")
+        supporting.append("评估时点有升压药使用 (active)")
 
     if lactate_gt_2:
-        has_shock_signal = True
+        confirmed_shock_signal = True
         shock_evidence["lactate_gt_2"] = True
 
     if map_below_65:
-        has_shock_signal = True
+        confirmed_shock_signal = True
         shock_evidence["map_below_65"] = True
 
-    if not has_shock_signal:
+    if has_septic_shock_diagnosis:
+        confirmed_shock_signal = True
+        shock_evidence["explicit_septic_shock_diagnosis"] = True
+
+    # review 包含 confirmed + unknown 升压药
+    review_shock_signal = confirmed_shock_signal or (vasopressor_status == "unknown")
+
+    if review_shock_signal:
+        shock_evidence["review_signal"] = True
+        if not confirmed_shock_signal:
+            shock_evidence["vasopressor_unknown_review"] = True
+            supporting.append("升压药状态未知，作为复核信号")
+    else:
         missing.append("未检测到休克信号")
 
     # ---- 调用分类函数 ----
+    # review_shock_signal 决定是否进入候选池
+    # confirmed_shock_signal 决定是否可电子确认
+    has_shock_signal = review_shock_signal
     candidate_status, candidate_pathways = classify_candidate(
         has_diagnosis=has_diagnosis,
         has_infection=has_infection is True,
@@ -372,6 +391,8 @@ def extract_candidate(
         },
         "organ_dysfunction_evidence": organ_evidence,
         "shock_evidence": shock_evidence,
+        "confirmed_shock_signal": confirmed_shock_signal,
+        "review_shock_signal": review_shock_signal,
         "clinical_confirmation_status": clinical_confirmation,
         "sofa2_current": sofa2_score,
         "sofa2_baseline": baseline_sofa2,

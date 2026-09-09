@@ -238,46 +238,42 @@ def main():
     print(f"  {YELLOW}注意: 实库对账需要数据库连接{RESET}")
     print(f"  尝试连接 SmartCare / DataCenter...")
 
-    db_check_script = '''
-import sys
+    db_check_script = r'''
+import sys, json
 sys.path.insert(0, ".")
 try:
-    from pymongo import MongoClient
-    from db import SMARTCARE_CFG, DATACENTER_CFG
-    # 直接用配置创建连接 (不缓存)
-    sc_client = MongoClient(
-        host=SMARTCARE_CFG.host, port=SMARTCARE_CFG.port,
-        serverSelectionTimeoutMS=3000
-    )
-    dc_client = MongoClient(
-        host=DATACENTER_CFG.host, port=DATACENTER_CFG.port,
-        serverSelectionTimeoutMS=3000
-    )
-    # 只读测试
-    sc_db = sc_client["SmartCare"]
-    dc_db = dc_client["DataCenter"]
+    from db import get_client
+    sc = get_client("SmartCare")
+    dc = get_client("DataCenter")
+    sc_db = sc["SmartCare"]
+    dc_db = dc["DataCenter"]
+    sc_db.command("ping")
+    dc_db.command("ping")
     drug_count = sc_db.drugExe.count_documents({}, limit=1)
     patient_count = sc_db.patient.count_documents({}, limit=1)
     exam_count = dc_db.VI_ICU_EXAM_ITEM.count_documents({}, limit=1)
     zyyz_count = dc_db.VI_ICU_ZYYZ.count_documents({}, limit=1)
-    import json
-    print(json.dumps({
+    print("ICU05_RESULT=" + json.dumps({
         "connected": True,
         "smartcare_drugExe_sample": drug_count,
         "smartcare_patient_sample": patient_count,
         "datacenter_exam_sample": exam_count,
         "datacenter_zyyz_sample": zyyz_count,
-    }, indent=2))
-    sc_client.close()
-    dc_client.close()
+    }, ensure_ascii=False))
 except Exception as e:
-    import json
-    print(json.dumps({"connected": False, "error": str(e)}, indent=2))
+    print("ICU05_RESULT=" + json.dumps({"connected": False, "error": type(e).__name__}, ensure_ascii=False))
     sys.exit(1)
 '''
 
     db_check_file = BACKEND / "_verify_db_check.py"
     db_check_file.write_text(db_check_script, encoding="utf-8")
+
+    def parse_icu05_result(stdout_text):
+        """从子脚本 stdout 中可靠提取 ICU05_RESULT= 后的 JSON"""
+        for line in stdout_text.splitlines():
+            if line.startswith("ICU05_RESULT="):
+                return json.loads(line[len("ICU05_RESULT="):])
+        return None
 
     try:
         success, stdout, stderr, rc = step(
@@ -287,87 +283,193 @@ except Exception as e:
             timeout=30
         )
 
-        if success and stdout.strip():
-            try:
-                db_stats = json.loads(stdout.strip().split('\n')[-1]) if '{' in stdout else {}
-            except:
-                db_stats = {}
+        db_stats = parse_icu05_result(stdout) if success else None
 
-            if db_stats.get("connected"):
-                print(f"\n  {GREEN}数据库连接成功{RESET}")
-                print(f"  SmartCare drugExe: {db_stats.get('smartcare_drugExe', 'N/A')}")
-                print(f"  SmartCare patient: {db_stats.get('smartcare_patient', 'N/A')}")
-                print(f"  DataCenter exam: {db_stats.get('datacenter_exam', 'N/A')}")
-                print(f"  DataCenter ZYYZ: {db_stats.get('datacenter_zyyz', 'N/A')}")
+        if db_stats and db_stats.get("connected"):
+            print(f"\n  {GREEN}数据库连接成功{RESET}")
 
-                # 实库只读对账: shadow 模式一致性
-                reconcile_script = '''
-import sys, json
+            # 实库生产链对账 (真实链路，非手工构造)
+            reconcile_script = r'''
+import sys, json, traceback
 sys.path.insert(0, ".")
+result = {"status": "error", "error": "unknown"}
 try:
-    from db import get_bundle_data_v2, get_client
-    from config.candidate_rules import CANDIDATE_ENGINE_MODE
+    from datetime import datetime, timedelta
+    from db import get_client, get_bundle_data_v2
+    from summary import _compute_icu05
 
-    # 选一个小范围做只读对账
+    from bson import ObjectId
     sc = get_client("SmartCare")["SmartCare"]
-    # 获取最近的几个患者
-    pats = list(sc.drugExe.find({}, {"pid": 1}).limit(10))
-    if not pats:
-        print(json.dumps({"status": "no_data", "reason": "无药物数据"}))
+    dc = get_client("DataCenter")["DataCenter"]
+
+    # 找一个有 drugExe 数据的 pid
+    sample_doc = sc.drugExe.find_one({}, {"pid": 1, "startTime": 1})
+    if not sample_doc:
+        result = {"status": "no_data", "reason": "drugExe 为空"}
+        print("ICU05_RESULT=" + json.dumps(result, ensure_ascii=False))
         sys.exit(0)
 
-    sample_pid = pats[0].get("pid", "")
-    print(f"  对账样本 pid: {sample_pid[:8]}...")
+    sample_pid = sample_doc.get("pid", "")
 
-    # 检查 candidate_info 结构完整性
-    from scoring.candidate_engine import extract_candidate
-    test_result = extract_candidate(
-        diagnosis_text="脓毒性休克",
-        has_vasopressor_wide=True,
-        vasopressor_status="active",
-        lactate_value=3.5,
-        map_value=55.0,
-    )
-    assert test_result["candidate_status"] != "not_candidate", "脓毒性休克+升压药+乳酸高应为候选"
-    assert test_result["vasopressor_status"] == "active", "vasopressor_status 应为 active"
+    # 找该 pid 对应的 deptCode (drugExe.pid 是 str，patient._id 是 ObjectId)
+    pat_doc = None
+    if sample_pid:
+        try:
+            pat_doc = sc.patient.find_one({"_id": ObjectId(str(sample_pid))}, {"deptCode": 1})
+        except Exception:
+            pass
+    if not pat_doc:
+        pat_doc = sc.patient.find_one({"_id": sample_pid}, {"deptCode": 1})
+    if not pat_doc:
+        # fallback: 取第一个有 deptCode 的 patient
+        pat_doc = sc.patient.find_one({"deptCode": {"$ne": ""}}, {"deptCode": 1})
 
-    # 检查 unknown vasopressor
-    test_unknown = extract_candidate(
-        diagnosis_text="脓毒性休克",
-        has_vasopressor_wide=False,
-        vasopressor_status="unknown",
-        lactate_value=3.5,
-        map_value=55.0,
-    )
-    assert any("升压药状态未知" in m for m in test_unknown["missing_evidence"]), \
-        "vasopressor_status=unknown 应在 missing_evidence 中"
-    assert test_unknown["vasopressor_status"] == "unknown"
+    dept_code = (pat_doc or {}).get("deptCode", "")
 
-    print(json.dumps({
+    if not dept_code:
+        # 最后 fallback: 从 drugExe 的 pid 去 patient 表查任意一个有 deptCode 的
+        for de in sc.drugExe.find({}, {"pid": 1}).limit(10):
+            pid = de.get("pid", "")
+            if not pid:
+                continue
+            try:
+                p = sc.patient.find_one({"_id": ObjectId(str(pid))}, {"deptCode": 1})
+            except Exception:
+                p = sc.patient.find_one({"_id": pid}, {"deptCode": 1})
+            if p and p.get("deptCode"):
+                dept_code = p["deptCode"]
+                break
+
+    # 确定月份范围: 用最新有数据的月份
+    latest_de = sc.drugExe.find_one({}, {"startTime": 1}, sort=[("startTime", -1)])
+    if latest_de and latest_de.get("startTime"):
+        st = latest_de["startTime"]
+        year, month = st.year, st.month
+        # 往前一个月避免当月未完结数据
+        if month == 1:
+            year, month = year - 1, 12
+        else:
+            month -= 1
+    else:
+        now = datetime.now()
+        year, month = now.year, now.month - 1
+        if month < 1:
+            year, month = year - 1, 12
+    start = f"{year}-{month:02d}-01"
+    if month == 12:
+        end = f"{year+1}-01-01"
+    else:
+        end = f"{year}-{month+1:02d}-01"
+
+    dept_codes = [dept_code] if dept_code else []
+
+    if not dept_codes:
+        # fallback: 从 drugExe 里多找几个 pid → deptCode
+        for doc in sc.drugExe.find({}, {"pid": 1}).limit(20):
+            pid = doc.get("pid")
+            p = sc.patient.find_one({"_id": pid}, {"deptCode": 1}) if pid else None
+            if p and p.get("deptCode"):
+                dept_codes = [p["deptCode"]]
+                break
+
+    if not dept_codes:
+        result = {"status": "no_dept", "reason": "无法确定科室"}
+        print("ICU05_RESULT=" + json.dumps(result, ensure_ascii=False))
+        sys.exit(0)
+
+    # 调用生产链: _compute_icu05 → get_bundle_data_v2 → judge_bundle_v3_for_patient
+    # 只取 1h 做对账
+    r1h = _compute_icu05(dept_codes, start, end, "1h")
+
+    # 统计
+    evaluated = r1h.get("raw_candidate_count", 0) + r1h.get("not_candidate_count", 0)
+
+    result = {
         "status": "pass",
-        "candidate_engine_integrity": True,
-        "vasopressor_unknown_review_signal": True,
-        "candidate_mode": CANDIDATE_ENGINE_MODE,
-    }, indent=2))
+        "period": f"{start} ~ {end}",
+        "dept_count": len(dept_codes),
+        "evaluated_event_count": evaluated,
+        "official_den_1h": r1h.get("den"),
+        "official_num_1h": r1h.get("num"),
+        "official_rate_1h": r1h.get("val"),
+        "shadow_den_1h": r1h.get("shadow_den_1h"),
+        "shadow_num_1h": r1h.get("shadow_num_1h"),
+        "shadow_rate_1h": r1h.get("shadow_rate_1h"),
+        "shadow_raw_den": r1h.get("shadow_raw_den"),
+        "high_probability_count": r1h.get("high_probability_count"),
+        "probable_count": r1h.get("probable_count"),
+        "pending_review_count": r1h.get("pending_review_count"),
+        "not_candidate_count": r1h.get("not_candidate_count"),
+        "excluded_num": r1h.get("excluded_num"),
+        "excluded_den": r1h.get("excluded_den"),
+    }
+
+    # 取 3h 对账
+    r3h = _compute_icu05(dept_codes, start, end, "3h")
+    result.update({
+        "official_den_3h": r3h.get("den"),
+        "official_num_3h": r3h.get("num"),
+        "official_rate_3h": r3h.get("val"),
+        "shadow_den_3h": r3h.get("shadow_den_3h"),
+        "shadow_num_3h": r3h.get("shadow_num_3h"),
+        "shadow_rate_3h": r3h.get("shadow_rate_3h"),
+    })
+
+    # 6h 必须返回 rule_pending
+    r6h = _compute_icu05(dept_codes, start, end, "6h")
+    result["6h_status"] = r6h.get("status")
+    result["6h_val"] = r6h.get("val")
+
+    # 验证关键不变量
+    errors = []
+    if r6h.get("status") != "rule_pending":
+        errors.append(f"6h status expected rule_pending, got {r6h.get('status')}")
+    if r6h.get("val") is not None:
+        errors.append(f"6h val expected None, got {r6h.get('val')}")
+
+    # shadow 模式: 正式 den 使用旧口径 (K1 AND K2)，由 _compute_icu05 返回值结构保证
+
+    result["invariant_errors"] = errors
+    result["status"] = "pass" if not errors else "invariant_fail"
+
+    print("ICU05_RESULT=" + json.dumps(result, ensure_ascii=False))
 except Exception as e:
-    print(json.dumps({"status": "error", "error": str(e)}, indent=2))
+    traceback.print_exc()
+    result = {"status": "error", "error": type(e).__name__, "detail": str(e)[:200]}
+    print("ICU05_RESULT=" + json.dumps(result, ensure_ascii=False))
     sys.exit(1)
 '''
-                reconcile_file = BACKEND / "_verify_reconcile.py"
-                reconcile_file.write_text(reconcile_script, encoding="utf-8")
+            reconcile_file = BACKEND / "_verify_reconcile.py"
+            reconcile_file.write_text(reconcile_script, encoding="utf-8")
 
-                step(
-                    "实库只读对账 (shadow 不变量)",
-                    f"{sys.executable} _verify_reconcile.py 2>&1",
-                    cwd=str(BACKEND),
-                    timeout=60
-                )
+            success2, stdout2, stderr2, rc2 = step(
+                "实库生产链对账 (真实链路)",
+                f"{sys.executable} _verify_reconcile.py 2>&1",
+                cwd=str(BACKEND),
+                timeout=120
+            )
+
+            reconcile_result = parse_icu05_result(stdout2) if success2 else None
+            if reconcile_result:
+                print(f"\n  {CYAN}实库对账结果:{RESET}")
+                for k, v in reconcile_result.items():
+                    if k != "status":
+                        print(f"    {k}: {v}")
+                if reconcile_result.get("status") == "pass":
+                    print(f"  {GREEN}实库对账通过{RESET}")
+                else:
+                    print(f"  {RED}实库对账失败: {reconcile_result.get('status')}{RESET}")
+                    failed += 1
+                    results.append(("实库生产链对账", False, 1))
             else:
-                print(f"  {YELLOW}数据库未连接，跳过实库对账{RESET}")
-                skipped += 1
+                print(f"  {RED}实库对账: 无法解析子脚本输出{RESET}")
+                failed += 1
+                results.append(("实库生产链对账 (解析失败)", False, 1))
         else:
-            print(f"  {YELLOW}数据库连接失败，跳过实库对账{RESET}")
-            skipped += 1
+            print(f"  {RED}数据库连接失败，无法执行实库对账{RESET}")
+            failed += 1
+            results.append(("数据库连接", False, 1))
+
     finally:
         # 清理临时文件
         for tmp in ["_verify_db_check.py", "_verify_reconcile.py"]:
@@ -475,11 +577,6 @@ print("ALL SIGNATURE CHECKS PASSED")
     print()
     if failed > 0:
         print(f"  {RED}{BOLD}验收失败: {failed} 项未通过{RESET}")
-        print(f"  {YELLOW}禁止 commit/push/deploy{RESET}")
-        return 1
-    elif skipped > 0:
-        print(f"  {RED}{BOLD}验收未完成: {skipped} 项被跳过 (实库对账未执行){RESET}")
-        print(f"  {YELLOW}需要数据库连接才能声称收口完成{RESET}")
         print(f"  {YELLOW}禁止 commit/push/deploy{RESET}")
         return 1
     else:

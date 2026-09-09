@@ -223,15 +223,17 @@ def _compute_icu05(dept_codes, start, end, hour):
             official_h3_in_shadow.append(p)
     shadow_num_3h_candidates = official_h3_in_shadow
 
-    # Shadow 人工排除
+    # Shadow 人工排除 (1h 和 3h 分别排除，分母可能不同)
     shadow_ex_1h = apply_exclusions(f"ICU-05-1h", dept_codes, period, shadow_num_1h_candidates, shadow_den_patients)
     shadow_ex_3h = apply_exclusions(f"ICU-05-3h", dept_codes, period, shadow_num_3h_candidates, shadow_den_patients)
 
-    shadow_den = len(shadow_ex_1h["den_items"])
+    # 关键: 1h 和 3h 各自使用自己的排除后分母
+    shadow_den_1h = len(shadow_ex_1h["den_items"])
+    shadow_den_3h = len(shadow_ex_3h["den_items"])
     shadow_num_1h = len(shadow_ex_1h["num_items"])
     shadow_num_3h = len(shadow_ex_3h["num_items"])
-    shadow_rate_1h = round(shadow_num_1h / shadow_den * 100, 1) if shadow_den > 0 else 0.0
-    shadow_rate_3h = round(shadow_num_3h / shadow_den * 100, 1) if shadow_den > 0 else 0.0
+    shadow_rate_1h = round(shadow_num_1h / shadow_den_1h * 100, 1) if shadow_den_1h > 0 else 0.0
+    shadow_rate_3h = round(shadow_num_3h / shadow_den_3h * 100, 1) if shadow_den_3h > 0 else 0.0
 
     # Shadow excluded counts
     shadow_excluded_den_1h = shadow_ex_1h["excluded_den"]
@@ -249,13 +251,14 @@ def _compute_icu05(dept_codes, start, end, hour):
         "num": num, "den": den, "val": val, "val_type": "percent",
         "raw_num": ex["raw_num"], "raw_den": ex["raw_den"],
         "excluded_num": ex["excluded_num"], "excluded_den": ex["excluded_den"],
-        # Shadow 模式完整指标
-        "shadow_den_patients_count": shadow_den,
-        "shadow_num_1h_patients_count": shadow_num_1h,
-        "shadow_num_3h_patients_count": shadow_num_3h,
-        "shadow_rate_1h": shadow_rate_1h,
-        "shadow_rate_3h": shadow_rate_3h,
+        # Shadow 模式完整指标 (1h/3h 各自独立分母)
         "shadow_raw_den": shadow_raw_den,
+        "shadow_den_1h": shadow_den_1h,
+        "shadow_num_1h": shadow_num_1h,
+        "shadow_rate_1h": shadow_rate_1h,
+        "shadow_den_3h": shadow_den_3h,
+        "shadow_num_3h": shadow_num_3h,
+        "shadow_rate_3h": shadow_rate_3h,
         "shadow_raw_num_1h": shadow_raw_num_1h,
         "shadow_raw_num_3h": shadow_raw_num_3h,
         "shadow_excluded_den_1h": shadow_excluded_den_1h,

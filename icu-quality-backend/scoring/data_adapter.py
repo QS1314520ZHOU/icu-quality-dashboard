@@ -479,12 +479,20 @@ def _fetch_medications(
     has_vasopressor_wide = False
 
     try:
-        # 查询范围: 时间下界 (可配置) 到 eval_time
-        # 不使用 limit(500) — 用时间下界控制范围
+        # 查询范围: pid 天然对应一次住院事件，无需额外住院边界
+        # 30天 lookback 作为性能保护，但不能漏掉长期活跃药物
+        # 查询: startTime <= eval_time AND (endTime 为空 或 endTime >= eval_time)
+        # 这样捕获: (1)近期开始的药物 (2)早于30天开始但仍在执行的药物
         time_lower_bound = eval_time - timedelta(days=lookback_days)
         drug_docs = list(sc.drugExe.find(
-            {"pid": sc_pid, "startTime": {"$gte": time_lower_bound, "$lte": eval_time}},
-            {"drugList": 1, "drugActionList": 1, "startTime": 1, "weight": 1}
+            {"pid": sc_pid,
+             "startTime": {"$lte": eval_time},
+             "$or": [
+                 {"endTime": None},
+                 {"endTime": {"$gte": eval_time}},
+                 {"startTime": {"$gte": time_lower_bound}},
+             ]},
+            {"drugList": 1, "drugActionList": 1, "startTime": 1, "endTime": 1, "weight": 1}
         ).sort("startTime", 1).max_time_ms(15000))
 
         for doc in drug_docs:
@@ -652,18 +660,33 @@ def _reconstruct_active_intervals(
     从 drugActionList 重建活跃区间。
 
     状态机:
-    1. "开始"/"恢复" → 开启新区间
-    2. "停止"/"暂停"/"取消" → 关闭当前区间
-    3. "调速" → 保持当前区间
+    1. 开始/恢复 → 开启新区间
+    2. 停止/暂停/取消 → 关闭当前区间
+    3. 调速 → 保持当前区间
     4. 缺时间的动作跳过
+
+    兼容两种字段格式:
+    - 实库: action 字段, 英文值 (start/stop/pause/recovery/add/minus)
+    - 测试: type 字段, 中文值 (开始/停止/暂停/恢复/调速/取消)
 
     关键规则:
     - 无动作且有 startTime 时，不得默认永久活跃
-    - 需结合医嘱类型/执行状态/结束时间判断
     - 无法判断时返回空列表（标记 unknown）
 
     返回: [(start, end), ...] 区间列表，end=None 表示仍在进行中
     """
+    # 动作映射: 英文 → 中文 (统一处理)
+    ACTION_MAP = {
+        "start": "开始", "stop": "停止", "pause": "暂停",
+        "recovery": "恢复", "cancel": "取消",
+        "add": "调速", "minus": "调速", "quickAdd": "调速",
+    }
+    # 中文直接透传
+    CN_ACTIONS = {"开始", "停止", "暂停", "恢复", "取消", "调速"}
+
+    START_ACTIONS = {"开始", "恢复"}
+    STOP_ACTIONS = {"停止", "暂停", "取消"}
+
     intervals = []
     current_start = None
 
@@ -674,17 +697,24 @@ def _reconstruct_active_intervals(
     )
 
     for action in sorted_actions:
-        action_type = action.get("type", "")
+        # 兼容两种字段: action (英文) 和 type (中文)
+        raw_action = action.get("action", "") or action.get("type", "")
         action_time = action.get("time")
 
-        if action_type in ("开始", "恢复"):
+        # 统一映射为中文
+        if raw_action in CN_ACTIONS:
+            action_type = raw_action
+        else:
+            action_type = ACTION_MAP.get(raw_action, "")
+
+        if action_type in START_ACTIONS:
             if current_start is None:
                 current_start = action_time
-        elif action_type in ("停止", "暂停", "取消"):
+        elif action_type in STOP_ACTIONS:
             if current_start is not None:
                 intervals.append((current_start, action_time))
                 current_start = None
-        # "调速"等其他动作: 保持当前区间不变
+        # 调速等其他动作: 保持当前区间不变
 
     # 如果最后一个区间未关闭，标记为进行中
     if current_start is not None:
