@@ -249,7 +249,7 @@ class TestVentilatorPointInTime:
     """通气状态点对点检查测试"""
 
     def test_ventilator_active_at_eval_time(self):
-        """eval_time时PEEP>0应返回True"""
+        """eval_time时PEEP>0应返回dict且is_active=True"""
         from unittest.mock import MagicMock
         sc = MagicMock()
         eval_time = datetime(2025, 1, 15, 12, 0, 0)
@@ -262,10 +262,13 @@ class TestVentilatorPointInTime:
 
         result = _fetch_ventilator_status_point_in_time(sc, "P001", eval_time)
 
-        assert result is True
+        # 返回 dict 而非 bool
+        assert isinstance(result, dict)
+        assert result["is_active"] is True
+        assert result["status"] == "active"
 
     def test_ventilator_inactive_when_no_data(self):
-        """无通气数据应返回False"""
+        """无通气数据应返回dict且status=unknown"""
         from unittest.mock import MagicMock
         sc = MagicMock()
         eval_time = datetime(2025, 1, 15, 12, 0, 0)
@@ -274,10 +277,13 @@ class TestVentilatorPointInTime:
 
         result = _fetch_ventilator_status_point_in_time(sc, "P001", eval_time)
 
-        assert result is False
+        # 无数据 → unknown (非 False)
+        assert isinstance(result, dict)
+        assert result["is_active"] is False
+        assert result["status"] == "unknown"
 
     def test_ventilator_inactive_when_peep_zero(self):
-        """PEEP=0应返回False (已停止通气)"""
+        """PEEP=0应返回dict且is_active=False"""
         from unittest.mock import MagicMock
         sc = MagicMock()
         eval_time = datetime(2025, 1, 15, 12, 0, 0)
@@ -290,10 +296,12 @@ class TestVentilatorPointInTime:
 
         result = _fetch_ventilator_status_point_in_time(sc, "P001", eval_time)
 
-        assert result is False
+        assert isinstance(result, dict)
+        assert result["is_active"] is False
+        assert result["status"] == "inactive"
 
     def test_ventilator_active_vt(self):
-        """VT>0应返回True"""
+        """VT>0应返回dict且is_active=True"""
         from unittest.mock import MagicMock
         sc = MagicMock()
         eval_time = datetime(2025, 1, 15, 12, 0, 0)
@@ -306,10 +314,12 @@ class TestVentilatorPointInTime:
 
         result = _fetch_ventilator_status_point_in_time(sc, "P001", eval_time)
 
-        assert result is True
+        assert isinstance(result, dict)
+        assert result["is_active"] is True
+        assert result["status"] == "active"
 
     def test_ventilator_active_pip(self):
-        """PIP>0应返回True"""
+        """PIP>0应返回dict且is_active=True"""
         from unittest.mock import MagicMock
         sc = MagicMock()
         eval_time = datetime(2025, 1, 15, 12, 0, 0)
@@ -322,10 +332,12 @@ class TestVentilatorPointInTime:
 
         result = _fetch_ventilator_status_point_in_time(sc, "P001", eval_time)
 
-        assert result is True
+        assert isinstance(result, dict)
+        assert result["is_active"] is True
+        assert result["status"] == "active"
 
     def test_ventilator_expired_data_ignored(self):
-        """超过tolerance_hours的数据应被忽略"""
+        """超过tolerance_hours的数据应返回stale"""
         from unittest.mock import MagicMock
         sc = MagicMock()
         eval_time = datetime(2025, 1, 15, 12, 0, 0)
@@ -339,9 +351,10 @@ class TestVentilatorPointInTime:
 
         result = _fetch_ventilator_status_point_in_time(sc, "P001", eval_time, tolerance_hours=4)
 
-        # 数据超过tolerance_hours → 视为过期，不判定为通气中
-        # 通气状态: unknown不等于未通气，stale不等于active
-        assert result is False  # 过期数据不应判定为通气中
+        # 数据超过tolerance_hours → stale
+        assert isinstance(result, dict)
+        assert result["is_active"] is False
+        assert result["status"] == "stale"
 
 
 class TestObservationMetadata:

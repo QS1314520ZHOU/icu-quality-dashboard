@@ -1108,32 +1108,29 @@ def get_bundle_data_v2(dept_codes: list, start_date: str, end_date: str) -> dict
             pat["v3"] = v3
             # 分母判定: 使用候选引擎 (高召回四通道)
             # 旧口径: K1 AND K2 → 仅用于影子比对
-            # 新口径: 候选引擎 extract_candidate() → 四通道分级
+            # 新口径: candidate_info 由 judge_bundle_v3_for_patient 唯一计算，此处直接复用
             cl = v3.get("clinical_layer") or {}
             shock_layer = cl.get("layer4_shock", {})
-            new_shock_confirmed = shock_layer.get("shock_status") == "confirmed"
             old_shock_confirmed = v3.get("k1") == True and v3.get("k2") == True
-            # 候选引擎集成
-            try:
-                from scoring.candidate_engine import extract_candidate
-                candidate_info = extract_candidate(v3_result=v3, clinical_layer=cl)
+            # 候选引擎集成: 复用 v3["candidate_info"]，不重复调用 extract_candidate
+            candidate_info = v3.get("candidate_info")
+            if candidate_info and candidate_info.get("candidate_status"):
                 pat["candidate_info"] = candidate_info
                 pat["is_septic_shock_candidate"] = candidate_info.get("is_septic_shock_candidate", False)
                 pat["candidate_status"] = candidate_info.get("candidate_status", "not_candidate")
                 pat["candidate_pathways"] = candidate_info.get("candidate_pathways", [])
                 pat["clinical_confirmation_status"] = candidate_info.get("clinical_confirmation_status", "insufficient")
-            except Exception as _cand_exc:
-                # 关键: 引擎异常不得降级为 not_candidate，必须进入 pending_review
-                # 数据库失败/SOFA失败/字段解析失败 ≠ 非候选
-                logger.warning("Candidate engine failed for %s: %s", pat.get("mrn"), _cand_exc)
+            else:
+                # judge_bundle_v3_for_patient 未返回有效 candidate_info → pending_review
+                logger.warning("No candidate_info in v3 for %s, marking pending_review", pat.get("mrn"))
                 pat["candidate_info"] = {
                     "is_septic_shock_candidate": True,
                     "candidate_status": "pending_review",
                     "candidate_pathways": ["engine_error"],
                     "clinical_confirmation_status": "insufficient",
-                    "candidate_reasons": ["候选引擎执行异常，需人工复核"],
-                    "missing_evidence": ["candidate_engine_failed"],
-                    "error_code": "CANDIDATE_ENGINE_FAILED",
+                    "candidate_reasons": ["候选引擎未返回结果，需人工复核"],
+                    "missing_evidence": ["candidate_info_missing"],
+                    "error_code": "CANDIDATE_INFO_MISSING",
                 }
                 pat["is_septic_shock_candidate"] = True
                 pat["candidate_status"] = "pending_review"
@@ -2449,6 +2446,7 @@ def judge_bundle_v3_for_patient(sc_pid: str, dc_pid: str, mrn: str, t0: datetime
     vaso_name = None
     vaso_start_time = None
     vaso_is_prestarter = False  # 标记是否为T0前开始的用药
+    vasopressor_status = "inactive"  # active / inactive / unknown
     try:
         # 查询T0前后24h内的血管活性药记录
         # 这样可以捕获T0前开始并持续的用药
@@ -2465,19 +2463,26 @@ def judge_bundle_v3_for_patient(sc_pid: str, dc_pid: str, mrn: str, t0: datetime
                 name = str(dl.get('name', ''))
                 in_wide, _ = _classify_vasopressor(name)
                 if in_wide:
+                    actions = vd.get('drugActionList') or []
                     # 检查是否在T0时仍在使用
-                    # 简单逻辑: 如果开始时间<=T0，且没有停止记录，则认为T0时仍在使用
                     is_prestarter = st <= t0
                     if is_prestarter:
+                        # 无动作记录 → 状态未知 (不得默认为活跃或不活跃)
+                        if not actions:
+                            vasopressor_status = "unknown"
+                            vaso_name = name
+                            vaso_start_time = st
+                            break
                         # 检查是否有停止记录
                         has_stop = False
-                        for action in vd.get('drugActionList', []):
+                        for action in actions:
                             action_type = action.get('type', '')
                             if action_type in ['停止', '暂停', '取消']:
                                 has_stop = True
                                 break
                         if not has_stop:
                             has_vasopressor = True
+                            vasopressor_status = "active"
                             vaso_name = name
                             vaso_start_time = st
                             vaso_is_prestarter = True
@@ -2485,11 +2490,12 @@ def judge_bundle_v3_for_patient(sc_pid: str, dc_pid: str, mrn: str, t0: datetime
                     else:
                         # T0后开始的用药
                         has_vasopressor = True
+                        vasopressor_status = "active"
                         vaso_name = name
                         vaso_start_time = st
                         vaso_is_prestarter = False
                         break
-            if has_vasopressor:
+            if has_vasopressor or vasopressor_status == "unknown":
                 break
     except Exception:
         pass
@@ -2717,6 +2723,7 @@ def judge_bundle_v3_for_patient(sc_pid: str, dc_pid: str, mrn: str, t0: datetime
         'has_antibiotic': has_antibiotic,
         'has_culture': has_culture,
         'has_vasopressor': has_vasopressor,
+        'vasopressor_status': vasopressor_status,
         'site_confirmed': site_confirmed,
         'lactate_initial': lactate_initial,
         'gcs_min': gcs_min,
@@ -2859,6 +2866,7 @@ def judge_bundle_v3_for_patient(sc_pid: str, dc_pid: str, mrn: str, t0: datetime
             clinical_layer=cl,
             diagnosis_text=diagnosis_text,
             has_vasopressor_wide=has_vasopressor,
+            vasopressor_status=vasopressor_status,
             lactate_value=lactate_initial,
             map_value=map_min,
             has_fluid_resuscitation=has_fluid_1h,

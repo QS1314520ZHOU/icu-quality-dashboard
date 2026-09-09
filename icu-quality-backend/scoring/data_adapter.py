@@ -455,21 +455,22 @@ def _fetch_ventilator_status(sc, sc_pid: str, eval_time: datetime) -> bool:
 def _fetch_medications(
     sc, sc_pid: str, eval_time: datetime,
     weight_kg: Optional[float],
-    lookback_hours: int = 24
+    lookback_days: int = 30
 ) -> Tuple[List[dict], bool]:
     """
     从 drugExe 提取用药数据，转换为评分器格式。
 
-    关键改进:
-    1. 查询范围扩展: startTime <= eval_time (不限于24h，允许更早开始但仍在使用的药物)
-    2. 重建活跃区间: 按 drugActionList 时间排序，形成有效区间
-    3. 判断评分时点是否正在使用: 药物在 eval_time 时必须处于活跃状态
-    4. 支持暂停后恢复、停止后重新启动等复杂场景
+    关键规则:
+    1. 查询范围: eval_time - lookback_days <= startTime <= eval_time
+       不使用 limit(N)，用时间下界替代 oldest-first limit
+    2. drugActionList 必须按时间排序后处理
+    3. 忽略 eval_time 之后的动作
+    4. 只读取 eval_time 所在活跃区间内最后一个有效速度
+    5. 正确处理暂停/恢复/停止/重启的状态机转换
+    6. 无动作记录 → active_status=unknown (非 active 也非 inactive)
 
     返回:
         (medications, has_vasopressor_wide)
-        medications: [{med_name, route, dose_ugkgmin, admin_end, admin_start, active_intervals}]
-        has_vasopressor_wide: VASO_WIDE 口径是否有活跃升压药
     """
     from .adapter import canon_drug, ne_ugkgmin as calc_ne_dose
     from .bundle_engine import _classify_vasopressor
@@ -478,11 +479,13 @@ def _fetch_medications(
     has_vasopressor_wide = False
 
     try:
-        # 查询范围: startTime <= eval_time (允许更早开始但仍在使用的药物)
+        # 查询范围: 时间下界 (可配置) 到 eval_time
+        # 不使用 limit(500) — 用时间下界控制范围
+        time_lower_bound = eval_time - timedelta(days=lookback_days)
         drug_docs = list(sc.drugExe.find(
-            {"pid": sc_pid, "startTime": {"$lte": eval_time}},
+            {"pid": sc_pid, "startTime": {"$gte": time_lower_bound, "$lte": eval_time}},
             {"drugList": 1, "drugActionList": 1, "startTime": 1, "weight": 1}
-        ).sort("startTime", 1).max_time_ms(15000).limit(500))
+        ).sort("startTime", 1).max_time_ms(15000))
 
         for doc in drug_docs:
             start_time = doc.get("startTime")
@@ -496,35 +499,59 @@ def _fetch_medications(
                 if w and isinstance(w, (int, float)) and 20 < w < 300:
                     doc_weight = float(w)
 
-            # 重建活跃区间
-            active_intervals = _reconstruct_active_intervals(
-                doc.get("drugActionList") or [], start_time
-            )
+            # 关键: 过滤掉 eval_time 之后的动作，按时间排序
+            raw_actions = doc.get("drugActionList") or []
+            actions_before_eval = [
+                a for a in raw_actions
+                if a.get("time") and _aware(a["time"]) <= _aware(eval_time)
+            ]
+            sorted_actions = sorted(actions_before_eval, key=lambda a: a["time"])
+
+            # 重建活跃区间 (使用已排序、已过滤的动作)
+            active_intervals = _reconstruct_active_intervals(sorted_actions, start_time)
 
             # 判断 eval_time 时是否活跃
-            # 关键: 无动作时 active_intervals 为空，此时 is_active 为 False
-            # 但应标记 active_status=unknown 而非直接判定为不活跃
-            has_actions = bool(doc.get("drugActionList"))
+            has_actions = bool(sorted_actions)
             is_active_at_eval = _is_active_at(active_intervals, eval_time)
             if not has_actions and not active_intervals:
-                # 无动作记录: 不得直接判定为活跃或不活跃
-                # 调用方应标记 active_status=unknown
+                # 无动作记录: 不得判定为活跃或不活跃
                 is_active_at_eval = False  # 保守: 不视为活跃
-                # 但仍保留药物证据供人工复核
 
-            # 获取最新泵速 (从活跃区间的最后一个动作)
+            # 获取泵速: 只从 eval_time 所在活跃区间内读取最后一个有效速度
             speed_mlh = 0.0
             admin_end = None
             if is_active_at_eval:
-                # 从最近的动作获取泵速
-                for action in reversed(doc.get("drugActionList") or []):
-                    s = _safe_float(action.get("speed"))
-                    if s is not None and s > 0:
-                        speed_mlh = s
-                        break
+                # 找到 eval_time 所在的活跃区间
+                eval_aware = _aware(eval_time)
+                active_interval = None
+                for start, end in active_intervals:
+                    start_aware = _aware(start)
+                    if end is None:
+                        if eval_aware >= start_aware:
+                            active_interval = (start, end)
+                            break
+                    else:
+                        end_aware = _aware(end)
+                        if start_aware <= eval_aware < end_aware:
+                            active_interval = (start, end)
+                            break
+
+                if active_interval:
+                    interval_start, interval_end = active_interval
+                    # 从该区间内的动作中读取最后一个有效速度
+                    for action in reversed(sorted_actions):
+                        action_time = _aware(action.get("time"))
+                        if action_time < _aware(interval_start):
+                            break  # 超出区间范围
+                        if interval_end and action_time >= _aware(interval_end):
+                            continue  # 在区间结束之后
+                        s = _safe_float(action.get("speed"))
+                        if s is not None and s > 0:
+                            speed_mlh = s
+                            break
             else:
-                # 药物已结束，获取结束时间
-                for action in reversed(doc.get("drugActionList") or []):
+                # 药物不活跃，获取结束时间 (从排序后的动作中)
+                for action in reversed(sorted_actions):
                     at = action.get("type", "")
                     if at in ("停止", "暂停", "取消"):
                         admin_end = action.get("time")
@@ -540,6 +567,14 @@ def _fetch_medications(
 
                 if in_wide and is_active_at_eval:
                     has_vasopressor_wide = True
+
+                # 确定 active_status
+                if not has_actions and not active_intervals:
+                    active_status = "unknown"
+                elif is_active_at_eval:
+                    active_status = "active"
+                else:
+                    active_status = "inactive"
 
                 # 只处理升压药（SOFA 心血管评分需要）
                 if in_strict:
@@ -570,21 +605,13 @@ def _fetch_medications(
                         except Exception:
                             dose_status = "calculation_error"
 
-                    # 确定 route
+                    # 确定 route (从排序后的动作中)
                     route = ""
-                    for action in (doc.get("drugActionList") or []):
+                    for action in sorted_actions:
                         r = action.get("route", "")
                         if r:
                             route = r
                             break
-
-                    # 确定 active_status
-                    if not has_actions and not active_intervals:
-                        active_status = "unknown"
-                    elif is_active_at_eval:
-                        active_status = "active"
-                    else:
-                        active_status = "inactive"
 
                     med = {
                         "med_name": name,
@@ -602,12 +629,6 @@ def _fetch_medications(
                     medications.append(med)
                 elif in_wide and not in_strict:
                     # VASO_WIDE 但非 SOFA 白名单 → 记录但不计算剂量
-                    if not has_actions and not active_intervals:
-                        active_status = "unknown"
-                    elif is_active_at_eval:
-                        active_status = "active"
-                    else:
-                        active_status = "inactive"
                     medications.append({
                         "med_name": name,
                         "route": "",
@@ -708,19 +729,22 @@ def _is_active_at(
 
 def _fetch_ventilator_status_point_in_time(
     sc, sc_pid: str, eval_time: datetime, tolerance_hours: int = 4
-) -> bool:
+) -> dict:
     """
     判断 eval_time 时患者是否正在接受机械通气。
 
     关键逻辑:
     - 分别获取 PEEP、VT、PIP 在 eval_time 前的最后有效状态
     - 综合多个参数共同判断: PEEP>0 或 VT>0 或 PIP>0 → 机械通气中
-    - 找不到证据时返回 False (保守)
+    - 找不到证据时返回 unknown (非 False)
 
-    返回: True=机械通气中, False=未在机械通气
+    返回: {is_active: bool, status: str, details: dict}
+        status: active / inactive / unknown / stale / error
+
+    调用方必须分别保存 ventilator_status (完整dict) 和 is_active (bool)。
+    不得将整个 dict 赋给 bool 变量 — unknown 的非空 dict 会被误判为 True。
     """
-    result = _fetch_ventilator_status_detailed(sc, sc_pid, eval_time, tolerance_hours)
-    return result.get("is_active", False)
+    return _fetch_ventilator_status_detailed(sc, sc_pid, eval_time, tolerance_hours)
 
 
 def _fetch_ventilator_status_detailed(
@@ -904,7 +928,10 @@ def fetch_patient_obs_meds(
     fetch_meta["med_count"] = len(medications)
 
     # 4. 判断高级呼吸支持
-    has_advanced_support = _fetch_ventilator_status_point_in_time(sc, sc_pid, eval_time)
+    ventilator_status = _fetch_ventilator_status_point_in_time(sc, sc_pid, eval_time)
+    # 分别保存: ventilator_status (完整dict含status字段) 和 has_advanced_support (纯bool)
+    # 不得将整个 dict 赋给 bool 变量 — unknown 的非空 dict 会被误判为 True
+    has_advanced_support = bool(ventilator_status.get("is_active", False))
 
     # 5. 检查数据完整性 (使用标准化代码)
     obs_codes = set(obs.get("code") for obs in observations)
@@ -931,6 +958,7 @@ def fetch_patient_obs_meds(
         "observations": observations,
         "medications": medications,
         "has_advanced_support": has_advanced_support,
+        "ventilator_status": ventilator_status,
         "weight_kg": weight_kg,
         "has_vasopressor_wide": has_vaso_wide,
         "data_quality_flags": flags,

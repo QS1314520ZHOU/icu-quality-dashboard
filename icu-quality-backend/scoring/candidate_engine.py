@@ -35,6 +35,7 @@ def extract_candidate(
     infection_evidence: Optional[dict] = None,
     has_vasopressor_wide: bool = False,
     has_vasopressor_strict: bool = False,
+    vasopressor_status: Optional[str] = None,
     lactate_value: Optional[float] = None,
     map_value: Optional[float] = None,
     sofa2_result: Optional[dict] = None,
@@ -89,6 +90,9 @@ def extract_candidate(
             has_vasopressor_wide = v3_result.get("k2") or v3_result.get("has_vasopressor") or False
         if not has_vasopressor_strict:
             has_vasopressor_strict = v3_result.get("has_vasopressor_strict") or False
+        # 升压药状态: unknown 作为复核信号，不得作为电子确认依据
+        if vasopressor_status is None:
+            vasopressor_status = v3_result.get("vasopressor_status", "active" if has_vasopressor_wide else "inactive")
 
         # 乳酸
         if lactate_value is None:
@@ -140,6 +144,12 @@ def extract_candidate(
     supporting = []
     missing = []
     conflicting = []
+
+    # ---- 升压药状态: unknown 作为复核信号 ----
+    # unknown 不得作为电子确认依据 (has_vasopressor_wide 仍为 False)
+    # 但必须进入 missing_evidence 供人工复核
+    if vasopressor_status == "unknown":
+        missing.append("升压药状态未知 (无动作记录)，需人工复核")
 
     # ---- 感染证据 ----
     if infection_evidence is None:
@@ -376,6 +386,7 @@ def extract_candidate(
         "lactate_status": lactate_status,
         "map_value": map_value,
         "has_vasopressor": has_vasopressor_wide,
+        "vasopressor_status": vasopressor_status,
         "has_septic_shock_diagnosis": has_septic_shock_diagnosis,
         "has_sepsis_only_diagnosis": has_sepsis_only_diagnosis,
         "rule_version": CANDIDATE_RULE_VERSION,

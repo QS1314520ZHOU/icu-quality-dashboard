@@ -82,6 +82,7 @@ def compute_sofa_scores(
     observations = data["observations"]
     medications = data["medications"]
     has_advanced_support = data["has_advanced_support"]
+    ventilator_status = data.get("ventilator_status", {"is_active": False, "status": "unknown", "details": {}})
     w_kg = data["weight_kg"]
     flags = list(data["data_quality_flags"])
     fetch_meta = data["fetch_meta"]
@@ -131,6 +132,8 @@ def compute_sofa_scores(
         "t0": t0,
         "fetch_meta": fetch_meta,
         "data_quality_flags": list(set(flags)),
+        "ventilator_status": ventilator_status,
+        "has_advanced_support": has_advanced_support,
         "version_meta": {
             "classic": CLASSIC_SOFA_META,
             "sofa2": SOFA2_META,

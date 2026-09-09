@@ -83,7 +83,7 @@ def _compute_icu05(dept_codes, start, end, hour):
       - 新候选不改变正式 num/den/val
       - 新候选完成 Bundle 时能进入影子分子
     """
-    from scoring.candidate_engine import extract_candidate, compute_candidate_statistics
+    from scoring.candidate_engine import compute_candidate_statistics
     from config.candidate_rules import CANDIDATE_ENGINE_MODE
 
     # 6h 固定返回 rule_pending/null (规则待主任确认)
@@ -97,13 +97,13 @@ def _compute_icu05(dept_codes, start, end, hour):
     period = start[:7]  # "YYYY-MM"
     hour_key = f"h{hour[0]}_patients"
 
-    # Step 1: 使用候选引擎对所有候选患者进行分级
+    # Step 1: 候选信息已在 get_bundle_data_v2 → judge_bundle_v3_for_patient 中唯一计算
+    # 此处直接复用 v3["candidate_info"]，不重复调用 extract_candidate
     all_den_candidates = d.get("den_patients", [])
 
     for pat in all_den_candidates:
         v3 = pat.get("v3", {})
-        clinical_layer = v3.get("clinical_layer")
-        candidate_info = extract_candidate(v3_result=v3, clinical_layer=clinical_layer)
+        candidate_info = v3.get("candidate_info") or pat.get("candidate_info") or {}
         pat["candidate_info"] = candidate_info
         pat["is_septic_shock_candidate"] = candidate_info.get("is_septic_shock_candidate", False)
         pat["candidate_status"] = candidate_info.get("candidate_status", "not_candidate")
@@ -186,10 +186,83 @@ def _compute_icu05(dept_codes, start, end, hour):
     sofa2_scores = [p.get("sofa2_total") for p in candidate_den_patients if p.get("sofa2_total") is not None]
     sofa2_mean = round(sum(sofa2_scores) / len(sofa2_scores), 1) if sofa2_scores else None
 
+    # ============================================================
+    # Shadow 模式完整指标
+    # ============================================================
+    shadow_den_patients = candidate_den_patients
+    shadow_den_exclusion_keys = {p.get("exclusion_key") for p in shadow_den_patients if p.get("exclusion_key")}
+
+    # Shadow 分子: 影子分母中完成 Bundle 的患者
+    # 合并: 旧口径分子(h1_patients) + 新候选影子分子(shadow_h1_patients)
+    # 去重: 用 exclusion_key 防止同一患者重复计入
+    official_h1_in_shadow = [
+        p for p in d.get("h1_patients", [])
+        if p.get("exclusion_key") in shadow_den_exclusion_keys
+    ]
+    shadow_only_h1 = [
+        p for p in d.get("shadow_h1_patients", [])
+        if p.get("exclusion_key") in shadow_den_exclusion_keys
+    ]
+    seen_keys_1h = {p.get("exclusion_key") for p in official_h1_in_shadow if p.get("exclusion_key")}
+    for p in shadow_only_h1:
+        if p.get("exclusion_key") not in seen_keys_1h:
+            official_h1_in_shadow.append(p)
+    shadow_num_1h_candidates = official_h1_in_shadow
+
+    official_h3_in_shadow = [
+        p for p in d.get("h3_patients", [])
+        if p.get("exclusion_key") in shadow_den_exclusion_keys
+    ]
+    shadow_only_h3 = [
+        p for p in d.get("shadow_h3_patients", [])
+        if p.get("exclusion_key") in shadow_den_exclusion_keys
+    ]
+    seen_keys_3h = {p.get("exclusion_key") for p in official_h3_in_shadow if p.get("exclusion_key")}
+    for p in shadow_only_h3:
+        if p.get("exclusion_key") not in seen_keys_3h:
+            official_h3_in_shadow.append(p)
+    shadow_num_3h_candidates = official_h3_in_shadow
+
+    # Shadow 人工排除
+    shadow_ex_1h = apply_exclusions(f"ICU-05-1h", dept_codes, period, shadow_num_1h_candidates, shadow_den_patients)
+    shadow_ex_3h = apply_exclusions(f"ICU-05-3h", dept_codes, period, shadow_num_3h_candidates, shadow_den_patients)
+
+    shadow_den = len(shadow_ex_1h["den_items"])
+    shadow_num_1h = len(shadow_ex_1h["num_items"])
+    shadow_num_3h = len(shadow_ex_3h["num_items"])
+    shadow_rate_1h = round(shadow_num_1h / shadow_den * 100, 1) if shadow_den > 0 else 0.0
+    shadow_rate_3h = round(shadow_num_3h / shadow_den * 100, 1) if shadow_den > 0 else 0.0
+
+    # Shadow excluded counts
+    shadow_excluded_den_1h = shadow_ex_1h["excluded_den"]
+    shadow_excluded_num_1h = shadow_ex_1h["excluded_num"]
+    shadow_excluded_den_3h = shadow_ex_3h["excluded_den"]
+    shadow_excluded_num_3h = shadow_ex_3h["excluded_num"]
+
+    # Shadow raw counts (before exclusions)
+    shadow_raw_den = len(shadow_den_patients)
+    shadow_raw_num_1h = len(shadow_num_1h_candidates)
+    shadow_raw_num_3h = len(shadow_num_3h_candidates)
+
     return {
+        # 正式指标 (旧口径 K1 AND K2，shadow模式不变)
         "num": num, "den": den, "val": val, "val_type": "percent",
         "raw_num": ex["raw_num"], "raw_den": ex["raw_den"],
         "excluded_num": ex["excluded_num"], "excluded_den": ex["excluded_den"],
+        # Shadow 模式完整指标
+        "shadow_den_patients_count": shadow_den,
+        "shadow_num_1h_patients_count": shadow_num_1h,
+        "shadow_num_3h_patients_count": shadow_num_3h,
+        "shadow_rate_1h": shadow_rate_1h,
+        "shadow_rate_3h": shadow_rate_3h,
+        "shadow_raw_den": shadow_raw_den,
+        "shadow_raw_num_1h": shadow_raw_num_1h,
+        "shadow_raw_num_3h": shadow_raw_num_3h,
+        "shadow_excluded_den_1h": shadow_excluded_den_1h,
+        "shadow_excluded_num_1h": shadow_excluded_num_1h,
+        "shadow_excluded_den_3h": shadow_excluded_den_3h,
+        "shadow_excluded_num_3h": shadow_excluded_num_3h,
+        # 其他统计
         "site_confirmed_count": site_confirmed_count,
         "site_unconfirmed_count": site_unconfirmed_count,
         "new_shock_count": new_shock_count,
