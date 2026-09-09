@@ -114,7 +114,7 @@ def _cache_set(key, val):
 
 DETAIL_CACHE_COLLECTION = "icu_indicator_detail_cache"
 # 缓存版本号：修改口径时 +1，旧条目自然失效
-CACHE_VERSION = 7
+CACHE_VERSION = 8
 
 
 def _dept_cache_key(dept_codes: list) -> str:
@@ -1077,6 +1077,37 @@ def query_detail(code: str, period: str, part: str, icu_unit: str = "all"):
             if v3:
                 v3_results[mrn] = v3
 
+        # SOFA 评分摘要构建
+        def _build_sofa_summary(sofa_data):
+            if not sofa_data:
+                return None
+            classic = sofa_data.get("classic", {})
+            sofa2 = sofa_data.get("sofa2", {})
+            return {
+                "classic_score": classic.get("sofa_score"),
+                "classic_components": classic.get("components"),
+                "classic_result_status": classic.get("result_status"),
+                "classic_completeness": classic.get("completeness"),
+                "sofa2_score": sofa2.get("sofa2_score"),
+                "sofa2_components": sofa2.get("components"),
+                "sofa2_result_status": sofa2.get("result_status"),
+                "sofa2_completeness": sofa2.get("completeness"),
+                "sofa2_data_quality_flags": sofa2.get("data_quality_flags", []),
+                "eval_time": sofa_data.get("eval_time"),
+                "version_meta": sofa_data.get("version_meta"),
+            }
+
+        # 临床识别层摘要构建
+        def _build_clinical_layer_summary(cl):
+            if not cl:
+                return None
+            return {
+                "infection": cl.get("layer1_infection"),
+                "organ_dysfunction": cl.get("layer2_organ_dysfunction"),
+                "sepsis": cl.get("layer3_sepsis"),
+                "shock": cl.get("layer4_shock"),
+            }
+
         # 构建 v3 字段的完整映射
         def _build_v3_dict(v3, window):
             # Window decisions are nested by contract.  Merge only the
@@ -1139,6 +1170,13 @@ def query_detail(code: str, period: str, part: str, icu_unit: str = "all"):
                 "site_primary": v3.get("site_primary", ""),
                 "site_secondary": v3.get("site_secondary", []),
                 "site_evidence_type": v3.get("site_evidence_type", ""),
+                # SOFA 评分
+                "sofa": _build_sofa_summary(v3.get("sofa")),
+                # 临床识别层
+                "clinical_layer": _build_clinical_layer_summary(v3.get("clinical_layer")),
+                # 新口径休克状态
+                "shock_status_new": v3.get("shock_status_new"),
+                "sofa2_total": v3.get("sofa2_total"),
             }
 
         hour = code.split("-")[2]  # '1h', '3h', '6h'
@@ -2625,6 +2663,64 @@ def get_bundle_v3_detail(mrn: str, period: str = ""):
             return {"ok": True, "patient": {"mrn": mrn, "name": p.get("name", "")},
                     "v3": {"reason": "NO_T0"}}
     return {"error": f"Patient MRN {mrn} not found in {period} denominator"}
+
+
+@app.get("/api/patients/{pid}/sofa")
+def get_patient_sofa(pid: str, eval_time: str = ""):
+    """获取单患者的正式 SOFA 评分结果（经典 SOFA + SOFA-2）。"""
+    from scoring.sofa_bridge import compute_sofa_scores
+
+    # 查找患者信息
+    for db_name in BED_DB_NAMES:
+        try:
+            db = get_client(db_name)[db_name]
+            # 尝试按 sc_pid 或 mrn 查找
+            pat = None
+            if len(pid) == 24:
+                from bson import ObjectId
+                pat = db.patient.find_one({"_id": ObjectId(pid)})
+            if not pat:
+                pat = db.patient.find_one({"hisPid": pid})
+            if not pat:
+                continue
+
+            sc_pid = str(pat.get("_id", ""))
+            mrn = pat.get("hisPid", pid)
+            dc_pid = pat.get("dcPid", "")
+
+            # 确定评估时间
+            if eval_time:
+                try:
+                    et = datetime.fromisoformat(eval_time)
+                except ValueError:
+                    et = datetime.utcnow()
+            else:
+                et = datetime.utcnow()
+
+            # 获取 T0 (如果有)
+            t0 = None
+            try:
+                from db import get_bundle_data_v2
+                now = datetime.utcnow()
+                data = get_bundle_data_v2([], f"{now.year}-{now.month:02d}-01",
+                                          f"{now.year}-{now.month:02d}-28")
+                for p in data.get("den_patients", []):
+                    if p.get("sc_pid") == sc_pid or p.get("mrn") == mrn:
+                        t0 = p.get("t0")
+                        break
+            except Exception:
+                pass
+
+            result = compute_sofa_scores(
+                sc_pid=sc_pid, mrn=mrn, dc_pid=dc_pid,
+                t0=t0 or et, eval_time=et,
+            )
+            return {"ok": True, "pid": pid, "sofa": result}
+
+        except Exception as e:
+            continue
+
+    return {"error": f"Patient {pid} not found"}
 
 
 # ============================================================

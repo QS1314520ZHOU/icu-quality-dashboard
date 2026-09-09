@@ -1106,8 +1106,17 @@ def get_bundle_data_v2(dept_codes: list, start_date: str, end_date: str) -> dict
             pat["exclusion_key"] = pat["detail_id"]
             v3 = judge_bundle_v3_for_patient(sc_pid, pat.get("_id", ""), pat.get("mrn", ""), t0, diag)
             pat["v3"] = v3
-            # 只有确认脓毒性休克 (K1 AND K2) 的患者才计入分母
-            if v3.get("k1") == True and v3.get("k2") == True:
+            # 分母判定: 旧口径 K1 AND K2 保留；新口径使用 clinical_layer
+            # 旧口径: 确认脓毒性休克 (K1 AND K2) 的患者计入分母
+            # 新口径: clinical_layer.layer4_shock.shock_status == "confirmed"
+            cl = v3.get("clinical_layer") or {}
+            shock_layer = cl.get("layer4_shock", {})
+            new_shock_confirmed = shock_layer.get("shock_status") == "confirmed"
+            old_shock_confirmed = v3.get("k1") == True and v3.get("k2") == True
+            # 当前使用旧口径作为正式判定，新口径作为影子比对
+            pat["shock_status_new"] = shock_layer.get("shock_status")
+            pat["sofa2_total"] = (cl.get("layer2_organ_dysfunction") or {}).get("sofa2_total")
+            if old_shock_confirmed:
                 # Each numerator must use its own window result.  Do not
                 # infer a later window from a shared completion timestamp.
                 if v3.get("bundle_1h", {}).get("finish") is True:
@@ -2754,6 +2763,73 @@ def judge_bundle_v3_for_patient(sc_pid: str, dc_pid: str, mrn: str, t0: datetime
         'vaso_name': vaso_name,
         'vaso_start_time': vaso_start_time,
     })
+
+    # ---- 正式 SOFA 评分 ----
+    try:
+        from scoring.sofa_bridge import compute_sofa_scores, build_clinical_layer
+        from config.indicator_windows import SOFA_GATE_MODE
+
+        sofa_result = compute_sofa_scores(
+            sc_pid=sc_pid, mrn=mrn, dc_pid=dc_pid,
+            t0=t0, eval_time=eval_time, weight_kg=None,
+        )
+        result['sofa'] = {
+            'classic': sofa_result['classic'],
+            'sofa2': sofa_result['sofa2'],
+            'eval_time': str(eval_time),
+            't0': str(t0),
+            'version_meta': sofa_result.get('version_meta', {}),
+        }
+
+        # ---- 临床识别层 ----
+        clinical_layer = build_clinical_layer(
+            sofa_result=sofa_result,
+            infection_evidence={
+                'has_infection': result.get('has_infection'),
+                'i1': result.get('i1'),
+                'i2': result.get('i2'),
+                'i3': result.get('i3'),
+            },
+            has_vasopressor_wide=has_vasopressor,
+            lactate_value=lactate_initial,
+            map_value=map_min,
+            has_fluid_resuscitation=has_fluid_1h,
+            vaso_name=vaso_name,
+        )
+        # 填充 Bundle 完成结果
+        clinical_layer['layer5_bundle'] = {
+            '1h': result.get('bundle_1h'),
+            '3h': result.get('bundle_3h'),
+            '6h': None,
+        }
+        result['clinical_layer'] = clinical_layer
+
+        # ---- 新旧门控对比 (shadow 模式) ----
+        if SOFA_GATE_MODE == "shadow":
+            old_gate = result.get('gate', {})
+            sofa2_score = sofa_result['sofa2'].get('sofa2_score')
+            new_organ_dys = clinical_layer['layer2_organ_dysfunction'].get('has_acute_organ_dysfunction')
+            old_organ_dys = old_gate.get('has_organ_dysfunction')
+            new_sepsis = clinical_layer['layer3_sepsis'].get('is_sepsis')
+            old_shock = old_gate.get('is_septic_shock')
+            new_shock = clinical_layer['layer4_shock'].get('shock_status')
+
+            result['gate_comparison'] = {
+                'mode': 'shadow',
+                'sofa2_total': sofa2_score,
+                'old_organ_dysfunction': old_organ_dys,
+                'new_organ_dysfunction': new_organ_dys,
+                'organ_dysfunction_changed': old_organ_dys != new_organ_dys,
+                'old_is_septic_shock': old_shock,
+                'new_shock_status': new_shock,
+                'shock_changed': (old_shock is True and new_shock != 'confirmed') or
+                                 (old_shock is not True and new_shock == 'confirmed'),
+            }
+    except Exception as e:
+        logger.warning("SOFA scoring failed for sc_pid=%s: %s", sc_pid, e)
+        result['sofa'] = None
+        result['clinical_layer'] = None
+        result['gate_comparison'] = {'mode': 'shadow', 'error': str(e)}
 
     return result
 

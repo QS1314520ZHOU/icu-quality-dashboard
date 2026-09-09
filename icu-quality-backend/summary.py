@@ -75,12 +75,37 @@ def _compute_icu04(dept_codes, start, end):
 
 
 def _compute_icu05(dept_codes, start, end, hour):
-    """ICU-05: Bundle完成率 (1h/3h/6h) — 使用 V2 双集合查询"""
+    """ICU-05: Bundle完成率 (1h/3h/6h) — 使用 V2 双集合查询
+
+    分母逻辑:
+      1. den_patients 是候选列表 (所有通过 T0 映射的患者)
+      2. 先筛选出合格分母: 确诊脓毒性休克的事件 (v3.is_septic_shock=True)
+      3. 再应用人工排除
+      4. 分子 = 分母集合中相应窗口完成 Bundle 的事件
+    """
     d = get_bundle_data_v2(dept_codes, start, end)
-    key = f"h{hour[0]}_num"
-    num_items = d.get(f"h{hour[0]}_patients", [])
-    den_items = d.get("den_patients", [])
-    ex = apply_exclusions(f"ICU-05-{hour}", dept_codes, start[:7], num_items, den_items)
+    period = start[:7]  # "YYYY-MM"
+    hour_key = f"h{hour[0]}_patients"
+
+    # Step 1: 从候选中筛选合格分母 (确诊脓毒性休克)
+    all_den_candidates = d.get("den_patients", [])
+    qualified_den = [
+        p for p in all_den_candidates
+        if p.get("v3", {}).get("is_septic_shock") is True
+    ]
+
+    # Step 2: 分子必须是合格分母的子集
+    # h1_patients/h3_patients 已在 get_bundle_data_v2 中按旧口径筛选
+    # 这里重新按合格分母集合过滤，确保一致性
+    den_exclusion_keys = {p.get("exclusion_key") for p in qualified_den if p.get("exclusion_key")}
+    num_candidates = d.get(hour_key, [])
+    qualified_num = [
+        p for p in num_candidates
+        if p.get("exclusion_key") in den_exclusion_keys
+    ]
+
+    # Step 3: 应用人工排除
+    ex = apply_exclusions(f"ICU-05-{hour}", dept_codes, period, qualified_num, qualified_den)
     num = len(ex["num_items"])
     den = len(ex["den_items"])
     val = round(num / den * 100, 1) if den > 0 else 0.0
@@ -105,8 +130,8 @@ def _compute_icu05(dept_codes, start, end, hour):
                     if ek:
                         confirmed_keys.add(ek)
 
-                # 遍历分母患者，按 exclusion_key 匹配
-                for pat in d.get("den_patients", []):
+                # 遍历合格分母患者，按 exclusion_key 匹配
+                for pat in qualified_den:
                     pid = pat.get("pid") or pat.get("dc_pid") or pat.get("_id") or ""
                     t0 = pat.get("t0")
                     if not pid or not t0:
@@ -119,12 +144,27 @@ def _compute_icu05(dept_codes, start, end, hour):
     except Exception:
         pass
 
+    # 统计新口径差异
+    new_shock_count = sum(1 for p in all_den_candidates
+                          if p.get("v3", {}).get("clinical_layer", {}).get("layer4_shock", {}).get("shock_status") == "confirmed")
+    old_shock_count = len(qualified_den)
+    shock_diff = new_shock_count - old_shock_count
+
+    # SOFA-2 评分统计
+    sofa2_scores = [p.get("sofa2_total") for p in qualified_den if p.get("sofa2_total") is not None]
+    sofa2_mean = round(sum(sofa2_scores) / len(sofa2_scores), 1) if sofa2_scores else None
+
     return {
         "num": num, "den": den, "val": val, "val_type": "percent",
         "raw_num": ex["raw_num"], "raw_den": ex["raw_den"],
         "excluded_num": ex["excluded_num"], "excluded_den": ex["excluded_den"],
         "site_confirmed_count": site_confirmed_count,
         "site_unconfirmed_count": site_unconfirmed_count,
+        "new_shock_count": new_shock_count,
+        "old_shock_count": old_shock_count,
+        "shock_diff": shock_diff,
+        "sofa2_mean": sofa2_mean,
+        "sofa2_scored_count": len(sofa2_scores),
     }
 
 
@@ -462,6 +502,11 @@ def rebuild_summary(dept_codes: list, periods: list, indicators: list = None,
         excluded_den = result.pop("excluded_den", None)
         site_confirmed_count = result.pop("site_confirmed_count", None)
         site_unconfirmed_count = result.pop("site_unconfirmed_count", None)
+        new_shock_count = result.pop("new_shock_count", None)
+        old_shock_count = result.pop("old_shock_count", None)
+        shock_diff = result.pop("shock_diff", None)
+        sofa2_mean = result.pop("sofa2_mean", None)
+        sofa2_scored_count = result.pop("sofa2_scored_count", None)
         # 查询三层人工覆盖计数
         override_count = 0
         try:
@@ -506,6 +551,13 @@ def rebuild_summary(dept_codes: list, periods: list, indicators: list = None,
         if site_confirmed_count is not None:
             doc["site_confirmed_count"] = site_confirmed_count
             doc["site_unconfirmed_count"] = site_unconfirmed_count
+        if new_shock_count is not None:
+            doc["new_shock_count"] = new_shock_count
+            doc["old_shock_count"] = old_shock_count
+            doc["shock_diff"] = shock_diff
+        if sofa2_mean is not None:
+            doc["sofa2_mean"] = sofa2_mean
+            doc["sofa2_scored_count"] = sofa2_scored_count
         return doc
 
     light_first = {

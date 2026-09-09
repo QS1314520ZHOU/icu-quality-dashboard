@@ -28,6 +28,28 @@
       <InfectionSiteSelector v-if="showInfectionSite" :pid="patient.sc_pid || patient.patient_id || ''" />
     </div>
 
+    <!-- SOFA 评分卡片 -->
+    <div class="sofa-card" v-if="data.sofa">
+      <div class="card-title" @click="showSofa = !showSofa">
+        <span>📊 SOFA 评分
+          <span class="sofa-summary" v-if="data.sofa.sofa2_score != null">
+            (SOFA-2: {{ data.sofa.sofa2_score }}分)
+          </span>
+          <span class="sofa-summary" v-else-if="data.sofa.classic_score != null">
+            (经典SOFA: {{ data.sofa.classic_score }}分)
+          </span>
+        </span>
+        <span class="guide-toggle">{{ showSofa ? '▼' : '▶' }}</span>
+      </div>
+      <SofaScorePanel
+        v-if="showSofa"
+        :classicScore="data.sofa.classic_components ? { sofa_score: data.sofa.classic_score, components: data.sofa.classic_components, result_status: data.sofa.classic_result_status, completeness: data.sofa.classic_completeness, data_quality_flags: [] } : null"
+        :sofa2Score="data.sofa.sofa2_components ? { sofa2_score: data.sofa.sofa2_score, components: data.sofa.sofa2_components, result_status: data.sofa.sofa2_result_status, completeness: data.sofa.sofa2_completeness, data_quality_flags: data.sofa.sofa2_data_quality_flags || [] } : null"
+        :sofaData="data.sofa"
+        :clinicalLayer="data.clinical_layer"
+      />
+    </div>
+
     <!-- ====== 分母详情：如何判定为脓毒性休克 ====== -->
     <template v-if="part === 'denominator'">
       <!-- K组 - 脓毒性休克确认 -->
@@ -81,9 +103,11 @@
         </div>
       </div>
 
-      <!-- S组 - 器官功能障碍 -->
+      <!-- S组 - 器官功能障碍 (辅助信号，非门控依据) -->
       <div class="group-card">
-        <div class="card-title">🫀 器官功能障碍 (S1∨S2∨S3∨S4 任一成立)</div>
+        <div class="card-title">🫀 器官功能障碍 — 辅助信号
+          <span class="aux-hint">(S1-S4 为原始数据信号，SOFA 评分见上方卡片)</span>
+        </div>
         <div class="group-items">
           <div class="group-item">
             <span class="item-label">S1 氧合指数 &lt;300</span>
@@ -104,15 +128,16 @@
             <span class="item-detail" v-else>未测量</span>
           </div>
           <div class="group-item">
-            <span class="item-label">S4 血管活性药</span>
+            <span class="item-label">S4 血管活性药 (VASO_WIDE)</span>
             <StatusBadge :value="data.s4" />
             <span class="item-detail" v-if="data.vaso_name">{{ data.vaso_name }}</span>
             <span class="item-detail" v-else>未使用</span>
           </div>
         </div>
         <div class="group-result">
-          <span class="result-label">→ 器官功能障碍</span>
+          <span class="result-label">→ S1-S4 辅助信号</span>
           <StatusBadge :value="data.s1 || data.s2 || data.s3 || data.s4" />
+          <span class="result-path">注意: S4 ≠ K2，门控使用 SOFA 评分</span>
         </div>
       </div>
     </template>
@@ -283,6 +308,7 @@
 import { computed, ref } from 'vue'
 import StatusBadge from './StatusBadge.vue'
 import InfectionSiteSelector from './InfectionSiteSelector.vue'
+import SofaScorePanel from './SofaScorePanel.vue'
 
 const props = defineProps({
   data: { type: Object, default: () => ({}) },
@@ -292,6 +318,7 @@ const props = defineProps({
 
 const showInfectionSite = ref(false)
 const showLactateTable = ref(false)
+const showSofa = ref(false)
 
 const lactate1h3hCount = computed(() => {
   return (props.data.lactate_all || []).filter(l => l.period_label === '1h—3h').length
@@ -472,4 +499,15 @@ function lacRowClass(lac) {
 .lactate-note { margin-top: 8px; font-size: 11px; color: var(--text-sub); line-height: 1.5; }
 .lactate-empty { text-align: center; padding: 20px; color: var(--text-sub); font-size: 0.9em; }
 .timeline-hint { font-size: 10px; color: var(--text-sub); opacity: 0.7; }
+
+/* SOFA 卡片 */
+.sofa-card {
+  background: var(--bg-surface);
+  border: 1px solid var(--border);
+  border-radius: 8px;
+  padding: 12px 16px;
+}
+.sofa-card .card-title { cursor: pointer; display: flex; justify-content: space-between; align-items: center; margin-bottom: 0; }
+.sofa-summary { font-weight: 400; color: var(--text-sub); font-size: 0.9em; }
+.aux-hint { font-weight: 400; color: var(--text-sub); font-size: 0.8em; margin-left: 8px; }
 </style>

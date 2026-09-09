@@ -118,3 +118,9 @@ VALID_SCORE_RULE = "valid_and_nonnull"
 # 窗口自检:True 时,取数窗口里出现 datetime.now() 直接抛异常
 # 影响: 开发期安全网
 WINDOW_CLAMP_STRICT = True
+
+# ---- SOFA 门控模式 ----
+# "shadow" = 新旧门控并行计算，输出对比结果，不影响正式报表
+# "active" = 使用新门控 (SOFA-2 ≥ 2) 作为正式分母判定
+# 影响: ICU-05 分母判定依据
+SOFA_GATE_MODE = "shadow"
