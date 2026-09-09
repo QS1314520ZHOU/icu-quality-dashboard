@@ -51,6 +51,19 @@ EXCLUSION_REASONS: Dict[str, Dict[str, str]] = {
         "research_exclusion": "研究排除",
         "documentation_correction": "文书纠正",
     },
+    # 候选排除相关 (新增)
+    "candidate_exclusion": {
+        "non_infectious_shock": "非感染性休克",
+        "cardiogenic_shock": "心源性休克",
+        "hypovolemic_shock": "低血容量性休克",
+        "postop_routine_vasopressor": "术后常规升压药",
+        "chronic_hyperlactatemia": "慢性高乳酸",
+        "non_current_event": "非当前住院事件",
+        "duplicate_event": "重复事件",
+        "data_linkage_error": "数据关联错误",
+        "not_indicator_scope": "不符合本院指标口径",
+        "other": "其他",
+    },
 }
 
 

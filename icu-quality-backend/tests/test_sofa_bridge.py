@@ -211,7 +211,8 @@ def test_lactate_borderline():
 # ============================================================
 
 def test_map_recovered_vasopressor_dependent():
-    """MAP=75, 但仍在泵去甲肾上腺素 → map_recovered=True, 仍算休克"""
+    """MAP=75, 但仍在泵去甲肾上腺素 → map_recovered=True
+    容量已评估时 confirmed; 容量未知时 pending_review"""
     eval_time = _utc(2026, 1, 15, 12)
 
     observations = [
@@ -225,6 +226,7 @@ def test_map_recovered_vasopressor_dependent():
 
     sofa_result = compute_sofa_scores_from_data(observations, medications, eval_time)
 
+    # Case 1: 容量未知 → pending_review (§13 修复)
     clinical = build_clinical_layer(
         sofa_result,
         infection_evidence={"has_infection": True, "i1": True, "i2": False, "i3": False},
@@ -234,8 +236,20 @@ def test_map_recovered_vasopressor_dependent():
     )
     assert clinical["layer4_shock"]["map_recovered"] is True, \
         "MAP=75 with vasopressor should be map_recovered=True"
-    assert clinical["layer4_shock"]["shock_status"] == "confirmed", \
-        f"Expected confirmed, got {clinical['layer4_shock']['shock_status']}"
+    assert clinical["layer4_shock"]["shock_status"] == "pending_review", \
+        f"Expected pending_review (volume unknown), got {clinical['layer4_shock']['shock_status']}"
+
+    # Case 2: 容量已评估 → confirmed
+    clinical2 = build_clinical_layer(
+        sofa_result,
+        infection_evidence={"has_infection": True, "i1": True, "i2": False, "i3": False},
+        has_vasopressor_wide=True,
+        lactate_value=3.5,
+        map_value=75,
+        has_fluid_resuscitation=True,
+    )
+    assert clinical2["layer4_shock"]["shock_status"] == "confirmed", \
+        f"Expected confirmed (volume assessed), got {clinical2['layer4_shock']['shock_status']}"
 
 
 # ============================================================

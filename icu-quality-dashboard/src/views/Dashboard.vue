@@ -236,6 +236,40 @@
             Sepsis Bundle
           </div>
           <FunnelBundleChart :data="bundleFunnelData" :height="260" />
+          <!-- 候选引擎统计 -->
+          <div v-if="icu05CandidateStats" class="candidate-stats">
+            <div class="candidate-stats-title">
+              <span class="candidate-stats-icon">🎯</span>
+              候选引擎统计
+            </div>
+            <div class="candidate-stats-grid">
+              <div class="candidate-stat-item">
+                <span class="stat-label">原始候选</span>
+                <span class="stat-value">{{ icu05CandidateStats.raw_candidate_count }}</span>
+              </div>
+              <div class="candidate-stat-item high-prob">
+                <span class="stat-label">高概率</span>
+                <span class="stat-value">{{ icu05CandidateStats.high_probability_count }}</span>
+              </div>
+              <div class="candidate-stat-item probable">
+                <span class="stat-label">很可能</span>
+                <span class="stat-value">{{ icu05CandidateStats.probable_count }}</span>
+              </div>
+              <div class="candidate-stat-item pending">
+                <span class="stat-label">待复核</span>
+                <span class="stat-value">{{ icu05CandidateStats.pending_review_count }}</span>
+              </div>
+            </div>
+            <div class="candidate-stats-compare">
+              <span class="compare-label">新口径确诊: <strong>{{ icu05CandidateStats.new_shock_count }}</strong></span>
+              <span class="compare-divider">|</span>
+              <span class="compare-label">旧口径确诊: <strong>{{ icu05CandidateStats.old_shock_count }}</strong></span>
+              <span class="compare-divider">|</span>
+              <span class="compare-label" :class="{ 'diff-positive': icu05CandidateStats.shock_diff > 0, 'diff-negative': icu05CandidateStats.shock_diff < 0 }">
+                差异: <strong>{{ icu05CandidateStats.shock_diff > 0 ? '+' : '' }}{{ icu05CandidateStats.shock_diff }}</strong>
+              </span>
+            </div>
+          </div>
         </div>
 
         <!-- 镇痛镇静雷达 -->
@@ -519,6 +553,21 @@ const bundleFunnelData = computed(() => {
       value: row?.value || 0,
     };
   });
+});
+
+// ICU-05 候选引擎统计
+const icu05CandidateStats = computed(() => {
+  const row = rowsByCode.value['ICU-05-1h'] || rowsByCode.value['ICU-05-3h'];
+  if (!row) return null;
+  return {
+    raw_candidate_count: row.raw_candidate_count || 0,
+    high_probability_count: row.high_probability_count || 0,
+    probable_count: row.probable_count || 0,
+    pending_review_count: row.pending_review_count || 0,
+    new_shock_count: row.new_shock_count || 0,
+    old_shock_count: row.old_shock_count || 0,
+    shock_diff: row.shock_diff || 0,
+  };
 });
 
 // ---- 镇痛镇静雷达 ----
@@ -915,4 +964,43 @@ onMounted(() => {
   .db-header-right { width: 100%; }
   .ring-grid { grid-template-columns: 1fr; }
 }
+
+/* Candidate Stats */
+.candidate-stats {
+  margin-top: 12px; padding: 12px 14px;
+  background: var(--bg-subtle); border-radius: var(--radius-sm);
+  border: 1px solid var(--border);
+}
+.candidate-stats-title {
+  display: flex; align-items: center; gap: 6px;
+  font-size: var(--fs-caption); font-weight: 600; color: var(--text-title);
+  margin-bottom: 10px;
+}
+.candidate-stats-icon { font-size: 14px; }
+.candidate-stats-grid {
+  display: grid; grid-template-columns: repeat(4, 1fr); gap: 8px;
+  margin-bottom: 10px;
+}
+.candidate-stat-item {
+  display: flex; flex-direction: column; align-items: center;
+  padding: 8px 6px; border-radius: var(--radius-sm);
+  background: var(--bg-surface); border: 1px solid var(--border);
+}
+.candidate-stat-item .stat-label {
+  font-size: 11px; color: var(--text-sub); margin-bottom: 4px;
+}
+.candidate-stat-item .stat-value {
+  font-size: 18px; font-weight: 700; color: var(--text-title);
+  font-variant-numeric: tabular-nums;
+}
+.candidate-stat-item.high-prob { border-left: 3px solid var(--good); }
+.candidate-stat-item.probable { border-left: 3px solid var(--brand); }
+.candidate-stat-item.pending { border-left: 3px solid var(--warn); }
+.candidate-stats-compare {
+  display: flex; align-items: center; gap: 8px;
+  font-size: 11px; color: var(--text-sub);
+}
+.compare-divider { color: var(--border); }
+.diff-positive { color: var(--good); }
+.diff-negative { color: var(--danger); }
 </style>

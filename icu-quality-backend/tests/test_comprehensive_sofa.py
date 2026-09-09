@@ -529,7 +529,7 @@ class TestVolumeState:
         assert clinical["layer4_shock"]["shock_status"] == "pending_review"
 
     def test_volume_unknown_map_recovered(self):
-        """容量状态不明 + MAP已恢复但仍依赖升压药 → confirmed（升压药依赖即为证据）"""
+        """容量状态不明 + MAP已恢复但仍依赖升压药 → pending_review (§13修复)"""
         eval_time = _utc(2026, 1, 15, 12)
         obs = [
             {"code": "param_bg_Lac", "value_number": 3.5, "unit": "mmol/L", "observed_at": _utc(2026, 1, 15, 10)},
@@ -548,9 +548,10 @@ class TestVolumeState:
             map_value=75,
             has_fluid_resuscitation=None,  # 容量状态不明
         )
-        # MAP已恢复(75>=65)但仍依赖升压药 → map_recovered=True → confirmed
+        # MAP已恢复(75>=65)但仍依赖升压药 → map_recovered=True
+        # 容量状态不明 → pending_review (§13修复: 不自动confirmed)
         assert clinical["layer4_shock"]["map_recovered"] is True
-        assert clinical["layer4_shock"]["shock_status"] == "confirmed"
+        assert clinical["layer4_shock"]["shock_status"] == "pending_review"
 
     def test_volume_adequate_confirms(self):
         """容量状态已知 + 充分 → 可确认"""

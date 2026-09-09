@@ -821,6 +821,11 @@ def compute_sofa2(
     else:
         result_status = "insufficient"
 
+    # 部分评分字段 (§5)
+    measured_component_sum = sum(valid_scores) if valid_scores else None
+    score_lower_bound = measured_component_sum  # 最低可能分 = 已测分
+    missing_components = [name for name, score in components.items() if score is None]
+
     return {
         "sofa2_score": total,
         "components": components,
@@ -828,4 +833,7 @@ def compute_sofa2(
         "meta": info,
         "result_status": result_status,
         "completeness": completeness,
+        "measured_component_sum": measured_component_sum,
+        "score_lower_bound": score_lower_bound,
+        "missing_components": missing_components,
     }

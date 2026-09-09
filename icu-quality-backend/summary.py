@@ -75,28 +75,45 @@ def _compute_icu04(dept_codes, start, end):
 
 
 def _compute_icu05(dept_codes, start, end, hour):
-    """ICU-05: Bundle完成率 (1h/3h/6h) — 使用 V2 双集合查询
+    """ICU-05: Bundle完成率 (1h/3h/6h) — 使用 V2 双集合查询 + 高召回候选引擎
 
-    分母逻辑:
+    分母逻辑 (修改为高召回候选池):
       1. den_patients 是候选列表 (所有通过 T0 映射的患者)
-      2. 先筛选出合格分母: 确诊脓毒性休克的事件 (v3.is_septic_shock=True)
-      3. 再应用人工排除
-      4. 分子 = 分母集合中相应窗口完成 Bundle 的事件
+      2. 使用候选引擎提取高召回候选 (四通道: 诊断/强休克/组合/待复核)
+      3. 候选状态不是 not_candidate 的患者进入分母
+      4. 应用人工排除
+      5. 分子 = 分母集合中相应窗口完成 Bundle 的事件
+
+    业务目标: 系统尽可能自动提取候选，不确定患者进入待复核而不是提前过滤。
     """
+    from scoring.candidate_engine import extract_candidate, compute_candidate_statistics
+
     d = get_bundle_data_v2(dept_codes, start, end)
     period = start[:7]  # "YYYY-MM"
     hour_key = f"h{hour[0]}_patients"
 
-    # Step 1: 从候选中筛选合格分母 (确诊脓毒性休克)
+    # Step 1: 使用候选引擎对所有候选患者进行分级
     all_den_candidates = d.get("den_patients", [])
+
+    for pat in all_den_candidates:
+        v3 = pat.get("v3", {})
+        clinical_layer = v3.get("clinical_layer")
+        candidate_info = extract_candidate(v3_result=v3, clinical_layer=clinical_layer)
+        pat["candidate_info"] = candidate_info
+        pat["is_septic_shock_candidate"] = candidate_info.get("is_septic_shock_candidate", False)
+        pat["candidate_status"] = candidate_info.get("candidate_status", "not_candidate")
+        pat["clinical_confirmation_status"] = candidate_info.get("clinical_confirmation_status", "insufficient")
+
+    # Step 2: 高召回分母 — 候选状态不是 not_candidate 的患者
     qualified_den = [
         p for p in all_den_candidates
-        if p.get("v3", {}).get("is_septic_shock") is True
+        if p.get("candidate_status") != "not_candidate"
     ]
 
-    # Step 2: 分子必须是合格分母的子集
-    # h1_patients/h3_patients 已在 get_bundle_data_v2 中按旧口径筛选
-    # 这里重新按合格分母集合过滤，确保一致性
+    # 候选统计
+    cand_summary = compute_candidate_statistics(all_den_candidates)
+
+    # Step 3: 分子必须是合格分母的子集
     den_exclusion_keys = {p.get("exclusion_key") for p in qualified_den if p.get("exclusion_key")}
     num_candidates = d.get(hour_key, [])
     qualified_num = [
@@ -104,7 +121,7 @@ def _compute_icu05(dept_codes, start, end, hour):
         if p.get("exclusion_key") in den_exclusion_keys
     ]
 
-    # Step 3: 应用人工排除
+    # Step 4: 应用人工排除
     ex = apply_exclusions(f"ICU-05-{hour}", dept_codes, period, qualified_num, qualified_den)
     num = len(ex["num_items"])
     den = len(ex["den_items"])
@@ -117,8 +134,6 @@ def _compute_icu05(dept_codes, start, end, hour):
         from db import get_infection_site, build_exclusion_key, _get_infection_site_collection
         from config.indicator_windows import SITE_REQUIRED
         if SITE_REQUIRED:
-            period = start[:7]  # "YYYY-MM"
-            # 查询该期间已确认的感染部位记录
             coll = _get_infection_site_collection()
             if coll is not None:
                 confirmed_keys = set()
@@ -130,7 +145,6 @@ def _compute_icu05(dept_codes, start, end, hour):
                     if ek:
                         confirmed_keys.add(ek)
 
-                # 遍历合格分母患者，按 exclusion_key 匹配
                 for pat in qualified_den:
                     pid = pat.get("pid") or pat.get("dc_pid") or pat.get("_id") or ""
                     t0 = pat.get("t0")
@@ -147,7 +161,9 @@ def _compute_icu05(dept_codes, start, end, hour):
     # 统计新口径差异
     new_shock_count = sum(1 for p in all_den_candidates
                           if p.get("v3", {}).get("clinical_layer", {}).get("layer4_shock", {}).get("shock_status") == "confirmed")
-    old_shock_count = len(qualified_den)
+    # 旧口径: K1 AND K2
+    old_shock_count = sum(1 for p in all_den_candidates
+                          if p.get("v3", {}).get("k1") == True and p.get("v3", {}).get("k2") == True)
     shock_diff = new_shock_count - old_shock_count
 
     # SOFA-2 评分统计
@@ -165,6 +181,12 @@ def _compute_icu05(dept_codes, start, end, hour):
         "shock_diff": shock_diff,
         "sofa2_mean": sofa2_mean,
         "sofa2_scored_count": len(sofa2_scores),
+        # 候选引擎统计
+        "raw_candidate_count": cand_summary.get("raw_candidate_count", 0),
+        "high_probability_count": cand_summary.get("high_probability_count", 0),
+        "probable_count": cand_summary.get("probable_count", 0),
+        "pending_review_count": cand_summary.get("pending_review_count", 0),
+        "not_candidate_count": cand_summary.get("not_candidate_count", 0),
     }
 
 

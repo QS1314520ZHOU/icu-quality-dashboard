@@ -88,7 +88,37 @@ def on_startup():
     ensure_infection_site_indexes()
     ensure_ai_cache()
     ensure_clinical_indexes()
+    # 注入升压药标签 (VASO_WIDE)
+    _inject_vaso_wide_labels()
     _start_scheduler()
+
+
+def _inject_vaso_wide_labels():
+    """从医院药物字典注入 classification=='血管活性' 的药物名称到 bundle_engine。"""
+    try:
+        from scoring.bundle_engine import set_vaso_wide_labels
+        sc = get_client("SmartCare")["SmartCare"]
+        # 从 configDrug 表读取血管活性药物
+        vaso_drugs = list(sc.configDrug.find(
+            {"classification": {"$regex": "血管活性", "$options": "i"}},
+            {"name": 1, "_id": 0}
+        ))
+        labels = {d["name"].strip().lower() for d in vaso_drugs if d.get("name")}
+        if labels:
+            set_vaso_wide_labels(labels)
+            print(f"[startup] VASO_WIDE_LABELS injected: {len(labels)} drugs")
+        else:
+            # 兜底: 使用常见升压药名称
+            fallback = {
+                "去甲肾上腺素", "多巴胺", "多巴酚丁胺", "肾上腺素",
+                "血管加压素", "苯肾上腺素", "米力农", "左西孟旦",
+                "norepinephrine", "dopamine", "dobutamine", "epinephrine",
+                "vasopressin", "phenylephrine", "milrinone", "levosimendan",
+            }
+            set_vaso_wide_labels(fallback)
+            print(f"[startup] VASO_WIDE_LABELS fallback: {len(fallback)} drugs")
+    except Exception as e:
+        print(f"[startup] WARNING: VASO_WIDE_LABELS injection failed: {e}")
 
 # 简易缓存（TTL 60秒，支持 nocache 参数强制刷新）
 _cache = {}
@@ -114,7 +144,7 @@ def _cache_set(key, val):
 
 DETAIL_CACHE_COLLECTION = "icu_indicator_detail_cache"
 # 缓存版本号：修改口径时 +1，旧条目自然失效
-CACHE_VERSION = 8
+CACHE_VERSION = 9
 
 
 def _dept_cache_key(dept_codes: list) -> str:
@@ -1194,6 +1224,14 @@ def query_detail(code: str, period: str, part: str, icu_unit: str = "all"):
                 # 新口径休克状态
                 "shock_status_new": v3.get("shock_status_new"),
                 "sofa2_total": v3.get("sofa2_total"),
+                # 候选引擎结果 (直接从 v3 读取，而非 clinical_layer.candidate)
+                "candidate_status": v3.get("candidate_status") or (v3.get("clinical_layer") or {}).get("candidate", {}).get("candidate_status"),
+                "candidate_pathways": v3.get("candidate_pathways") or (v3.get("clinical_layer") or {}).get("candidate", {}).get("candidate_pathways", []),
+                "candidate_reasons": v3.get("candidate_reasons") or (v3.get("clinical_layer") or {}).get("candidate", {}).get("candidate_reasons", []),
+                "clinical_confirmation_status": v3.get("clinical_confirmation_status") or (v3.get("clinical_layer") or {}).get("candidate", {}).get("clinical_confirmation_status"),
+                "supporting_evidence": v3.get("supporting_evidence") or (v3.get("clinical_layer") or {}).get("candidate", {}).get("supporting_evidence", []),
+                "missing_evidence": v3.get("missing_evidence") or (v3.get("clinical_layer") or {}).get("candidate", {}).get("missing_evidence", []),
+                "is_septic_shock_candidate": v3.get("is_septic_shock_candidate", False),
             }
 
         hour = code.split("-")[2]  # '1h', '3h', '6h'
@@ -1219,6 +1257,11 @@ def query_detail(code: str, period: str, part: str, icu_unit: str = "all"):
                     "diagnose": p.get("diagnose", ""),
                     "sc_pid": p.get("sc_pid", ""),
                     "v3": _build_v3_dict(v3, hour),
+                    # 候选引擎字段
+                    "candidate_status": p.get("candidate_status") or v3.get("candidate_status", "not_candidate"),
+                    "candidate_pathways": p.get("candidate_pathways") or v3.get("candidate_pathways", []),
+                    "clinical_confirmation_status": p.get("clinical_confirmation_status") or v3.get("clinical_confirmation_status", "insufficient"),
+                    "is_septic_shock_candidate": p.get("is_septic_shock_candidate") or v3.get("is_septic_shock_candidate", False),
                 })
             _enrich_admission_discharge(items, dept_codes)
             for item in items:
@@ -1230,8 +1273,12 @@ def query_detail(code: str, period: str, part: str, icu_unit: str = "all"):
             for d in den_patients:
                 mrn = d.get("mrn", "")
                 v3 = d.get("v3", {})
-                # 只显示确诊脓毒性休克的患者（K1 AND K2 都成立）
-                if not v3.get("is_septic_shock"):
+                # 候选池: 显示所有候选患者(含pending_review)
+                # 新口径: candidate_status != "not_candidate"
+                # 兼容旧逻辑: 如果没有candidate引擎结果，用is_septic_shock
+                candidate_status = d.get("candidate_status") or v3.get("candidate_status")
+                is_candidate = d.get("is_septic_shock_candidate") or v3.get("is_septic_shock_candidate", False)
+                if not is_candidate and candidate_status == "not_candidate" and not v3.get("is_septic_shock"):
                     continue
                 # 获取 admission_type
                 sc_pid = d.get("sc_pid")
@@ -1257,6 +1304,11 @@ def query_detail(code: str, period: str, part: str, icu_unit: str = "all"):
                     "diagnose": d.get("diagnose", ""),
                     "sc_pid": d.get("sc_pid", ""),
                     "v3": _build_v3_dict(v3, hour),
+                    # 候选引擎字段 (顶层，供前端直接读取)
+                    "candidate_status": d.get("candidate_status") or v3.get("candidate_status", "not_candidate"),
+                    "candidate_pathways": d.get("candidate_pathways") or v3.get("candidate_pathways", []),
+                    "clinical_confirmation_status": d.get("clinical_confirmation_status") or v3.get("clinical_confirmation_status", "insufficient"),
+                    "is_septic_shock_candidate": d.get("is_septic_shock_candidate") or v3.get("is_septic_shock_candidate", False),
                 })
             _enrich_admission_discharge(items, dept_codes)
             for item in items:
@@ -2746,9 +2798,10 @@ def get_patient_sofa(pid: str, eval_time: str = "", event_id: str = ""):
         et = datetime.utcnow()
 
     # 获取 T0
-    # 优先从 event_id 获取，否则直接使用 eval_time 作为 T0
-    # 不再调用 get_bundle_data_v2 扫描全月候选 (性能优化)
+    # 优先从 event_id 获取，否则不使用eval_time作为fallback
+    # 修复: eval_time只表示评分时点，不等于T0(感染时点)
     t0 = None
+    t0_source = None
     if event_id:
         try:
             from bson import ObjectId
@@ -2758,15 +2811,14 @@ def get_patient_sofa(pid: str, eval_time: str = "", event_id: str = ""):
                     event = db.events.find_one({"_id": ObjectId(event_id)})
                     if event:
                         t0 = event.get("t0") or event.get("admit_time")
+                        t0_source = "event"
                         break
                 except Exception:
                     continue
         except Exception as e:
             logger.warning("Event lookup failed for event_id=%s: %s", event_id, e)
 
-    if t0 is None:
-        # 无法确定T0，使用eval_time作为T0（标记为假设性）
-        t0 = et
+    t0_status = "found" if t0 else "missing"
 
     # 计算SOFA评分
     try:
@@ -2781,8 +2833,9 @@ def get_patient_sofa(pid: str, eval_time: str = "", event_id: str = ""):
             "mrn": mrn,
             "dc_pid": dc_pid,
             "t0": t0.isoformat() if t0 else None,
+            "t0_status": t0_status,
+            "t0_source": t0_source,
             "eval_time": et.isoformat() if et else None,
-            "t0_source": "bundle_candidate" if t0 != et else "eval_time_fallback",
             "sofa": result,
         }
     except Exception as e:

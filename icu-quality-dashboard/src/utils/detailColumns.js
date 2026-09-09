@@ -217,10 +217,36 @@ function resolveTriTubeCols(code, part) {
  * ICU-05 Bundle 列定义
  * ============================================================ */
 
+/* 候选状态中文映射 */
+const CANDIDATE_STATUS_MAP = {
+  'high_probability': '高概率',
+  'probable': '很可能',
+  'pending_review': '待复核',
+  'not_candidate': '非候选',
+}
+const CONFIRMATION_STATUS_MAP = {
+  'confirmed': '已确诊',
+  'pending_review': '待复核',
+  'insufficient': '证据不足',
+}
+
 function resolveIcu05Cols(part) {
   return [
     COL_PATIENT_ID,
     COL_NAME,
+    { header: '候选状态', get: (p) => {
+      const status = p.candidate_status || 'not_candidate'
+      const label = CANDIDATE_STATUS_MAP[status] || status
+      // 候选路径: 从 candidate_pathways 列表中取第一个
+      const pathways = p.candidate_pathways || p.candidate_info?.candidate_pathways || []
+      const pathway = pathways[0] || p.candidate_info?.pathway
+      const pathwayLabel = pathway ? ` (${pathway})` : ''
+      return `${label}${pathwayLabel}`
+    }},
+    { header: '临床确认', get: (p) => {
+      const status = p.clinical_confirmation_status || 'insufficient'
+      return CONFIRMATION_STATUS_MAP[status] || status
+    }},
     { header: '入科诊断', get: (p) => {
       const diag = p.diagnose || ''
       return diag.length > 30 ? diag.slice(0, 30) + '...' : diag

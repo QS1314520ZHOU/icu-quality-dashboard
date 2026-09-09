@@ -19,6 +19,58 @@
       </div>
     </div>
 
+    <!-- 候选引擎状态 -->
+    <div class="candidate-card" v-if="patient.candidate_status && patient.candidate_status !== 'not_candidate'">
+      <div class="card-title" @click="showCandidate = !showCandidate">
+        <span>🎯 候选引擎判定
+          <span class="candidate-badge" :class="candidateBadgeClass">{{ candidateStatusLabel }}</span>
+          <span class="candidate-pathway" v-if="candidatePathways.length">路径 {{ candidatePathways.join(', ') }}</span>
+        </span>
+        <span class="guide-toggle">{{ showCandidate ? '▼' : '▶' }}</span>
+      </div>
+      <div v-if="showCandidate" class="candidate-detail">
+        <div class="candidate-row">
+          <span class="candidate-label">候选状态:</span>
+          <span class="candidate-value" :class="candidateBadgeClass">{{ candidateStatusLabel }}</span>
+        </div>
+        <div class="candidate-row">
+          <span class="candidate-label">临床确认:</span>
+          <span class="candidate-value">{{ confirmationStatusLabel }}</span>
+        </div>
+        <div class="candidate-row" v-if="candidatePathways.length">
+          <span class="candidate-label">纳入路径:</span>
+          <span class="candidate-value">{{ pathwayDescription }}</span>
+        </div>
+        <div class="candidate-row" v-if="candidateReasons.length">
+          <span class="candidate-label">判定原因:</span>
+          <div class="candidate-details">
+            <div v-for="(reason, idx) in candidateReasons" :key="idx" class="detail-item">
+              <span class="detail-icon positive">✓</span>
+              <span class="detail-text">{{ reason }}</span>
+            </div>
+          </div>
+        </div>
+        <div class="candidate-row" v-if="supportingEvidence.length">
+          <span class="candidate-label">支持证据:</span>
+          <div class="candidate-details">
+            <div v-for="(ev, idx) in supportingEvidence" :key="idx" class="detail-item">
+              <span class="detail-icon positive">✓</span>
+              <span class="detail-text">{{ ev }}</span>
+            </div>
+          </div>
+        </div>
+        <div class="candidate-row" v-if="missingEvidence.length">
+          <span class="candidate-label">缺失证据:</span>
+          <div class="candidate-details">
+            <div v-for="(ev, idx) in missingEvidence" :key="idx" class="detail-item">
+              <span class="detail-icon neutral">?</span>
+              <span class="detail-text">{{ ev }}</span>
+            </div>
+          </div>
+        </div>
+      </div>
+    </div>
+
     <!-- 感染部位选择 -->
     <div class="infection-site-card">
       <div class="card-title" @click="showInfectionSite = !showInfectionSite">
@@ -319,6 +371,71 @@ const props = defineProps({
 const showInfectionSite = ref(false)
 const showLactateTable = ref(false)
 const showSofa = ref(false)
+const showCandidate = ref(false)
+
+// 候选引擎状态映射
+const CANDIDATE_STATUS_MAP = {
+  'high_probability': '高概率脓毒性休克',
+  'probable': '很可能脓毒性休克',
+  'pending_review': '待人工复核',
+  'not_candidate': '非候选',
+}
+const CONFIRMATION_STATUS_MAP = {
+  'confirmed': '临床已确诊',
+  'pending_review': '待复核',
+  'insufficient': '证据不足',
+}
+const PATHWAY_MAP = {
+  'diagnosis': '通道A - 明确诊断',
+  'strong_shock': '通道B - 强休克证据',
+  'combined_evidence': '通道C - 组合证据',
+  'pending_incomplete': '通道D - 待复核',
+  'sofa2_supplement': 'SOFA-2补充',
+  // 兼容旧格式
+  'A': '通道A - 明确诊断',
+  'B': '通道B - 强休克证据',
+  'C': '通道C - 组合证据',
+  'D': '通道D - 待复核',
+}
+
+const candidateStatusLabel = computed(() => {
+  return CANDIDATE_STATUS_MAP[props.patient.candidate_status] || props.patient.candidate_status || '—'
+})
+
+const confirmationStatusLabel = computed(() => {
+  return CONFIRMATION_STATUS_MAP[props.patient.clinical_confirmation_status] || props.patient.clinical_confirmation_status || '—'
+})
+
+const candidateBadgeClass = computed(() => {
+  const status = props.patient.candidate_status
+  if (status === 'high_probability') return 'candidate-high'
+  if (status === 'probable') return 'candidate-probable'
+  if (status === 'pending_review') return 'candidate-pending'
+  return 'candidate-none'
+})
+
+const pathwayDescription = computed(() => {
+  // 从 candidate_pathways 列表中取第一个
+  const pathways = props.patient.candidate_pathways || props.patient.candidate_info?.candidate_pathways || []
+  const pathway = pathways[0] || props.patient.candidate_info?.pathway
+  return PATHWAY_MAP[pathway] || pathway || '—'
+})
+
+const candidatePathways = computed(() => {
+  return props.patient.candidate_pathways || props.patient.candidate_info?.candidate_pathways || []
+})
+
+const candidateReasons = computed(() => {
+  return props.patient.candidate_reasons || props.patient.candidate_info?.candidate_reasons || []
+})
+
+const supportingEvidence = computed(() => {
+  return props.patient.supporting_evidence || props.patient.candidate_info?.supporting_evidence || []
+})
+
+const missingEvidence = computed(() => {
+  return props.patient.missing_evidence || props.patient.candidate_info?.missing_evidence || []
+})
 
 const lactate1h3hCount = computed(() => {
   return (props.data.lactate_all || []).filter(l => l.period_label === '1h—3h').length
@@ -510,4 +627,49 @@ function lacRowClass(lac) {
 .sofa-card .card-title { cursor: pointer; display: flex; justify-content: space-between; align-items: center; margin-bottom: 0; }
 .sofa-summary { font-weight: 400; color: var(--text-sub); font-size: 0.9em; }
 .aux-hint { font-weight: 400; color: var(--text-sub); font-size: 0.8em; margin-left: 8px; }
+
+/* 候选引擎卡片 */
+.candidate-card {
+  background: var(--bg-surface);
+  border: 1px solid var(--border);
+  border-radius: 8px;
+  padding: 12px 16px;
+}
+.candidate-card .card-title { cursor: pointer; display: flex; justify-content: space-between; align-items: center; margin-bottom: 0; }
+.candidate-badge {
+  display: inline-block; padding: 2px 10px; border-radius: 12px;
+  font-size: 12px; font-weight: 600; margin-left: 8px;
+}
+.candidate-high { background: #e8f5e9; color: #2e7d32; }
+.candidate-probable { background: #e3f2fd; color: #1565c0; }
+.candidate-pending { background: #fff3e0; color: #e65100; }
+.candidate-none { background: #f5f5f5; color: #757575; }
+.candidate-pathway {
+  font-size: 12px; color: var(--text-sub); margin-left: 8px;
+  padding: 2px 8px; background: var(--bg-subtle); border-radius: 4px;
+}
+.candidate-detail {
+  margin-top: 12px; padding-top: 12px; border-top: 1px solid var(--border-light);
+}
+.candidate-row {
+  display: flex; align-items: flex-start; margin-bottom: 8px; font-size: 0.9em;
+}
+.candidate-label {
+  min-width: 100px; color: var(--text-sub); font-weight: 500; flex-shrink: 0;
+}
+.candidate-value { color: var(--text-body); }
+.candidate-details {
+  display: flex; flex-direction: column; gap: 4px;
+}
+.detail-item {
+  display: flex; align-items: center; gap: 6px; font-size: 0.85em;
+}
+.detail-icon {
+  width: 18px; height: 18px; display: flex; align-items: center; justify-content: center;
+  border-radius: 50%; font-size: 11px; font-weight: 700; flex-shrink: 0;
+}
+.detail-icon.positive { background: #e8f5e9; color: #2e7d32; }
+.detail-icon.negative { background: #ffebee; color: #c62828; }
+.detail-icon.neutral { background: #f5f5f5; color: #757575; }
+.detail-text { color: var(--text-body); }
 </style>

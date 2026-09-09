@@ -237,19 +237,18 @@ def build_clinical_layer(
     """
     基于 SOFA 评分结果构建五层临床识别结构。
 
-    Args:
-        sofa_result: compute_sofa_scores 返回值
-        infection_evidence: {has_infection, i1, i2, i3}
-        has_vasopressor_wide: VASO_WIDE 口径升压药
-        lactate_value: 乳酸值 (用于休克判定)
-        map_value: MAP 值 (用于休克判定)
-        has_fluid_resuscitation: 是否有液体复苏
-        vaso_name: 升压药名称
+    关键改进:
+    1. 候选信号(candidate_signal)与临床确认(clinical_confirmation_status)分离
+    2. 部分评分标记 measured_component_sum / score_lower_bound / missing_components
+    3. 基线未知时标记假设，不默认已确认
+    4. 休克确认: MAP恢复不绕过容量判断; has_fluid=False不自动confirmed
+    5. 6h Bundle: rule_pending 状态
 
     Returns:
         五层临床识别结构
     """
     from config.indicator_windows import SOFA_GATE_MODE
+    from config.candidate_rules import BUNDLE_6H_STATUS
 
     sofa2 = sofa_result.get("sofa2", {})
     classic = sofa_result.get("classic", {})
@@ -273,16 +272,24 @@ def build_clinical_layer(
     }
 
     # ---- Layer 2: 急性器官功能障碍 ----
-    # 区分: 当前SOFA-2总分 / 基线SOFA-2 / delta / 是否有证据支持"感染相关急性变化"
-    # 设计原则:
-    #   - 当前SOFA-2总分≥2 → has_acute_organ_dysfunction=True (门控逻辑不变)
-    #   - 但 acute_basis 区分基线是否已知，前端可据此显示假设标记
-    #   - 基线已知时用 delta≥2 判定，基线未知时用当前≥2 + 标记假设
-    baseline_sofa2 = sofa_result.get("sofa2_baseline", {}).get("sofa2_score")
+    # SOFA-2 基线 (从 sofa_result 获取)
+    sofa2_baseline_info = sofa_result.get("sofa2_baseline", {})
+    baseline_sofa2 = sofa2_baseline_info.get("sofa2_score")
+    baseline_status = sofa2_baseline_info.get("baseline_status", "unknown")
     baseline_known = baseline_sofa2 is not None
     delta = None
     if sofa2_score is not None and baseline_sofa2 is not None:
         delta = sofa2_score - baseline_sofa2
+
+    # 部分评分: 计算下限和缺失组件
+    measured_component_sum = None
+    score_lower_bound = None
+    missing_components = []
+    if sofa2_status == "partial":
+        valid_scores = [s for s in sofa2_components.values() if s is not None]
+        measured_component_sum = sum(valid_scores) if valid_scores else 0
+        score_lower_bound = measured_component_sum
+        missing_components = [k for k, v in sofa2_components.items() if v is None]
 
     # 当前总分≥2 → 有器官功能障碍信号
     current_score_elevated = sofa2_score is not None and sofa2_score >= 2
@@ -313,11 +320,18 @@ def build_clinical_layer(
         has_acute_organ_dysfunction = None
         acute_basis = "insufficient_data"
 
+    # 部分评分: 不能直接确认急性变化
+    if sofa2_status == "partial" and has_acute_organ_dysfunction is True:
+        if acute_basis == "baseline_unknown_current_ge_2":
+            # 部分评分+基线未知 → 候选信号但不确认
+            pass  # has_acute_organ_dysfunction 保持 True 作为候选信号
+
     layer2 = {
         "sofa2_total": sofa2_score,
         "sofa2_baseline": baseline_sofa2,
         "sofa2_delta": delta,
         "baseline_known": baseline_known,
+        "baseline_status": baseline_status,
         "acute_assumption_applied": acute_assumption_applied,
         "sofa2_components": sofa2_components,
         "sofa2_completeness": sofa2_completeness,
@@ -326,6 +340,10 @@ def build_clinical_layer(
         "has_acute_organ_dysfunction": has_acute_organ_dysfunction,
         "acute_basis": acute_basis,
         "current_score_elevated": current_score_elevated,
+        # 部分评分详情
+        "measured_component_sum": measured_component_sum,
+        "score_lower_bound": score_lower_bound,
+        "missing_components": missing_components,
         # S1-S4 保留为辅助信号
         "s1_signal": _organ_signal(sofa2_components, "respiratory"),
         "s2_signal": _organ_signal(classic.get("components", {}), "central_nervous_system"),
@@ -334,22 +352,20 @@ def build_clinical_layer(
     }
 
     # ---- Layer 3: 脓毒症判定 ----
-    # 脓毒症 = 感染 + 急性器官功能变化
-    # 门控逻辑: has_acute_organ_dysfunction=True (含基线未知假设) → is_sepsis=True
-    # 但 sepsis_basis 区分是否基于假设
     is_sepsis = None
     sepsis_basis = "sepsis3_sofa2"
     if has_infection is True and has_acute_organ_dysfunction is True:
         is_sepsis = True
         if acute_basis == "baseline_unknown_current_ge_2":
             sepsis_basis = "sepsis3_sofa2_pending_baseline"
+        elif sofa2_status == "partial":
+            sepsis_basis = "sepsis3_sofa2_partial_score"
         else:
             sepsis_basis = "sepsis3_sofa2_confirmed"
     elif has_infection is False:
         is_sepsis = False
     elif has_acute_organ_dysfunction is False and has_infection is True:
         is_sepsis = False
-    # else: 不确定
 
     layer3 = {
         "is_sepsis": is_sepsis,
@@ -358,12 +374,11 @@ def build_clinical_layer(
     }
 
     # ---- Layer 4: 脓毒性休克判定 ----
-    # 独立于 K1∧K2 布尔判定
-    # 脓毒性休克 = 脓毒症 + 持续需要升压药维持MAP + 乳酸>2 + 容量状态
+    # 修复: MAP恢复不绕过容量判断; has_fluid=False不自动confirmed
     shock_criteria = {
         "sepsis_confirmed": is_sepsis,
         "sepsis_basis": sepsis_basis,
-        "persistent_hypotension": None,
+        "map_below_65_observed": None,  # 修复: 单次MAP不等于持续低血压
         "vasopressor_required": None,
         "vasopressor_active_at_eval": None,
         "lactate_gt_2": None,
@@ -383,10 +398,10 @@ def build_clinical_layer(
             shock_criteria["lactate_gt_2"] = lactate_value > 2
             shock_criteria["lactate_borderline"] = False
 
-    # MAP 持续低血压
+    # MAP 观测 (修复: 不是"持续"低血压，是"观测到"低于65)
     map_recovered = False
     if map_value is not None:
-        shock_criteria["persistent_hypotension"] = map_value < 65
+        shock_criteria["map_below_65_observed"] = map_value < 65
         if map_value >= 65 and has_vasopressor_wide:
             map_recovered = True
 
@@ -394,7 +409,7 @@ def build_clinical_layer(
     shock_criteria["vasopressor_required"] = has_vasopressor_wide
     shock_criteria["vasopressor_active_at_eval"] = has_vasopressor_wide
 
-    # 综合判定
+    # 综合判定 (修复: MAP恢复不绕过容量判断)
     shock_status = _determine_shock_status(
         is_sepsis=is_sepsis,
         has_vasopressor=has_vasopressor_wide,
@@ -414,12 +429,32 @@ def build_clinical_layer(
         "vaso_name": vaso_name,
     }
 
-    # ---- Layer 5: Bundle 完成 (由调用方填充) ----
+    # ---- Layer 5: Bundle 完成 ----
+    # 6h: 如果规则待确认，显示 status=rule_pending
     layer5 = {
         "1h": None,
         "3h": None,
-        "6h": None,
+        "6h": {"status": BUNDLE_6H_STATUS} if BUNDLE_6H_STATUS == "rule_pending" else None,
     }
+
+    # ---- 候选信号与临床确认分离 ----
+    from scoring.candidate_engine import extract_candidate
+    candidate_info = extract_candidate(
+        diagnosis_text=infection_evidence.get("diagnosis_text"),
+        infection_evidence=infection_evidence,
+        has_vasopressor_wide=has_vasopressor_wide,
+        lactate_value=lactate_value,
+        map_value=map_value,
+        sofa2_result=sofa2,
+        classic_sofa_result=classic,
+        has_fluid_resuscitation=has_fluid_resuscitation,
+        s1_s4_signals={
+            "s1": _organ_signal_bool(sofa2_components, "respiratory"),
+            "s2": _organ_signal_bool(classic.get("components", {}), "central_nervous_system"),
+            "s3": _organ_signal_bool(classic.get("components", {}), "cardiovascular"),
+            "s4": has_vasopressor_wide,
+        },
+    )
 
     return {
         "layer1_infection": layer1,
@@ -427,11 +462,20 @@ def build_clinical_layer(
         "layer3_sepsis": layer3,
         "layer4_shock": layer4,
         "layer5_bundle": layer5,
+        "candidate": candidate_info,
     }
 
 
 def _organ_signal(components: dict, organ: str) -> Optional[bool]:
     """将器官分值转换为辅助信号 (≥1 为 True)。"""
+    score = components.get(organ)
+    if score is None:
+        return None
+    return score >= 1
+
+
+def _organ_signal_bool(components: dict, organ: str) -> Optional[bool]:
+    """将器官分值转换为布尔信号，None时返回None。"""
     score = components.get(organ)
     if score is None:
         return None
@@ -482,9 +526,12 @@ def _determine_shock_status(
     # 乳酸 > 2 + 升压药
     # 检查 MAP 状态
     if map_recovered:
-        # MAP 已恢复但仍依赖升压药 → 仍算休克
-        # 升压药依赖本身就是休克证据（容量复苏后仍需升压药维持MAP）
-        return "confirmed"
+        # MAP 已恢复但仍依赖升压药
+        # 升压药依赖本身就是休克证据，但容量状态必须已评估才能 confirmed
+        if has_fluid is True:
+            return "confirmed"
+        # 容量未知或明确不满足 → pending_review (候选但不自动确认)
+        return "pending_review"
 
     if map_value is not None and map_value >= 65 and not map_recovered:
         # MAP 正常且无升压药依赖 → 不确定
@@ -494,7 +541,11 @@ def _determine_shock_status(
     if has_fluid is None:
         return "pending_review"  # 液体复苏状态未知，不得自动confirmed
 
-    # 满足所有条件
+    if has_fluid is False:
+        # 明确不满足容量复苏 → pending_review (候选但不自动确认)
+        return "pending_review"
+
+    # 满足所有条件: 升压药 + 乳酸>2 + MAP低 + 容量已评估
     return "confirmed"
 
 

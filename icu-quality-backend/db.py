@@ -1106,16 +1106,32 @@ def get_bundle_data_v2(dept_codes: list, start_date: str, end_date: str) -> dict
             pat["exclusion_key"] = pat["detail_id"]
             v3 = judge_bundle_v3_for_patient(sc_pid, pat.get("_id", ""), pat.get("mrn", ""), t0, diag)
             pat["v3"] = v3
-            # 分母判定: 旧口径 K1 AND K2 保留；新口径使用 clinical_layer
-            # 旧口径: 确认脓毒性休克 (K1 AND K2) 的患者计入分母
-            # 新口径: clinical_layer.layer4_shock.shock_status == "confirmed"
+            # 分母判定: 使用候选引擎 (高召回四通道)
+            # 旧口径: K1 AND K2 → 仅用于影子比对
+            # 新口径: 候选引擎 extract_candidate() → 四通道分级
             cl = v3.get("clinical_layer") or {}
             shock_layer = cl.get("layer4_shock", {})
             new_shock_confirmed = shock_layer.get("shock_status") == "confirmed"
             old_shock_confirmed = v3.get("k1") == True and v3.get("k2") == True
-            # 当前使用旧口径作为正式判定，新口径作为影子比对
+            # 候选引擎集成
+            try:
+                from scoring.candidate_engine import extract_candidate
+                candidate_info = extract_candidate(v3_result=v3, clinical_layer=cl)
+                pat["candidate_info"] = candidate_info
+                pat["is_septic_shock_candidate"] = candidate_info.get("is_septic_shock_candidate", False)
+                pat["candidate_status"] = candidate_info.get("candidate_status", "not_candidate")
+                pat["candidate_pathways"] = candidate_info.get("candidate_pathways", [])
+                pat["clinical_confirmation_status"] = candidate_info.get("clinical_confirmation_status", "insufficient")
+            except Exception:
+                pat["candidate_info"] = {"candidate_status": "not_candidate", "is_septic_shock_candidate": False}
+                pat["is_septic_shock_candidate"] = False
+                pat["candidate_status"] = "not_candidate"
+                pat["candidate_pathways"] = []
+                pat["clinical_confirmation_status"] = "insufficient"
+            # 影子比对字段保留
             pat["shock_status_new"] = shock_layer.get("shock_status")
             pat["sofa2_total"] = (cl.get("layer2_organ_dysfunction") or {}).get("sofa2_total")
+            # 当前使用旧口径作为分子判定，候选引擎作为分母判定 (summary.py 中使用)
             if old_shock_confirmed:
                 # Each numerator must use its own window result.  Do not
                 # infer a later window from a shared completion timestamp.
@@ -1178,10 +1194,16 @@ def get_bundle_data_v2(dept_codes: list, start_date: str, end_date: str) -> dict
             logger.warning("V3 judgment failed for %s: %s", pat.get("mrn"), _exc)
             continue
 
-    # 重新计算分母（确认脓毒性休克的患者数）
-    confirmed_shock = sum(1 for p in result["den_patients"]
-                         if p.get("v3", {}).get("k1") == True and p.get("v3", {}).get("k2") == True)
-    result["total"] = confirmed_shock
+    # 重新计算分母（候选引擎：高召回四通道）
+    # 新口径：candidate_status != "not_candidate" 进分母
+    # 旧口径：K1 AND K2 仅用于影子比对
+    confirmed_candidates = sum(1 for p in result["den_patients"]
+                               if p.get("candidate_status", "not_candidate") != "not_candidate")
+    old_shock_count = sum(1 for p in result["den_patients"]
+                          if p.get("v3", {}).get("k1") == True and p.get("v3", {}).get("k2") == True)
+    result["total"] = confirmed_candidates
+    # 影子比对字段
+    result["old_shock_count"] = old_shock_count
 
     return result
 
@@ -2830,6 +2852,40 @@ def judge_bundle_v3_for_patient(sc_pid: str, dc_pid: str, mrn: str, t0: datetime
         result['sofa'] = None
         result['clinical_layer'] = None
         result['gate_comparison'] = {'mode': 'shadow', 'error': str(e)}
+
+    # ---- 候选引擎集成 (高召回四通道) ----
+    try:
+        from scoring.candidate_engine import extract_candidate
+        cl = result.get('clinical_layer') or {}
+        candidate_info = extract_candidate(
+            v3_result=result,
+            clinical_layer=cl,
+            diagnosis_text=diagnosis_text,
+            has_vasopressor_wide=has_vasopressor,
+            lactate_value=lactate_initial,
+            map_value=map_min,
+            has_fluid_resuscitation=has_fluid_1h,
+        )
+        result['candidate_info'] = candidate_info
+        result['candidate_status'] = candidate_info.get('candidate_status', 'not_candidate')
+        result['is_septic_shock_candidate'] = candidate_info.get('is_septic_shock_candidate', False)
+        result['candidate_pathways'] = candidate_info.get('candidate_pathways', [])
+        result['candidate_reasons'] = candidate_info.get('candidate_reasons', [])
+        result['clinical_confirmation_status'] = candidate_info.get('clinical_confirmation_status', 'insufficient')
+        result['supporting_evidence'] = candidate_info.get('supporting_evidence', [])
+        result['missing_evidence'] = candidate_info.get('missing_evidence', [])
+        result['conflicting_evidence'] = candidate_info.get('conflicting_evidence', [])
+    except Exception as e:
+        logger.warning("Candidate engine failed for sc_pid=%s: %s", sc_pid, e)
+        result['candidate_info'] = {'candidate_status': 'not_candidate', 'is_septic_shock_candidate': False}
+        result['candidate_status'] = 'not_candidate'
+        result['is_septic_shock_candidate'] = False
+        result['candidate_pathways'] = []
+        result['candidate_reasons'] = []
+        result['clinical_confirmation_status'] = 'insufficient'
+        result['supporting_evidence'] = []
+        result['missing_evidence'] = []
+        result['conflicting_evidence'] = []
 
     return result
 

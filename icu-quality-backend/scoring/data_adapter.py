@@ -110,7 +110,11 @@ def _fetch_bga_observations(
                 ts = bs.get("time")
                 if not isinstance(ts, datetime):
                     continue
-                if ts < window_start or ts > eval_time:
+                # 确保时区一致后再比较
+                ts_aware = _aware(ts)
+                ws_aware = _aware(window_start)
+                ev_aware = _aware(eval_time)
+                if ts_aware < ws_aware or ts_aware > ev_aware:
                     continue
                 val = _safe_float(bs.get("fVal"))
                 if val is None:
@@ -139,9 +143,17 @@ def _fetch_bedside_observations(
     """
     从 bedside 提取床旁监测观测。
     包括: GCS, MAP, 尿量, SpO2, 呼吸频率等。
+
+    关键修复: GCS 文本编码(E2V2M3/E2VTM3)必须在 _safe_float 之前识别，
+    不能在 val is None 时提前 continue。
     """
+    import re
+
     observations = []
     window_start = eval_time - timedelta(hours=lookback_hours)
+
+    # GCS 相关代码集合
+    GCS_CODES = {"param_score_gcs_obs", "gcsScore", "GCS"}
 
     # bedside 结构: {pid, code, strVal, time, valid}
     BEDSIDE_CODE_MAP = {
@@ -180,24 +192,24 @@ def _fetch_bedside_observations(
             ts = doc.get("time")
             if not isinstance(ts, datetime):
                 continue
-            if ts < window_start or ts > eval_time:
-                continue
-
-            # 尝试从 value_number 取值，再从 strVal 解析
-            val = _safe_float(doc.get("value_number"))
-            if val is None:
-                val = _safe_float(doc.get("strVal"))
-            if val is None:
+            # 确保时区一致后再比较
+            ts_aware = _aware(ts)
+            ws_aware = _aware(window_start)
+            ev_aware = _aware(eval_time)
+            if ts_aware < ws_aware or ts_aware > ev_aware:
                 continue
 
             unit = doc.get("unit", "")
 
-            # GCS 特殊处理: 如果 strVal 是 E2V2M3 格式，保留原始文本
-            if code_raw in ("param_score_gcs_obs", "gcsScore", "GCS"):
+            # ---- GCS 特殊处理: 先识别文本编码，再尝试数值 ----
+            if code_raw in GCS_CODES:
                 raw_text = str(doc.get("strVal", "")).strip()
-                # 检查是否是编码格式
-                import re
-                if re.match(r"^[Ee]\d+[Vv][Tt\d][Mm]\d+$", raw_text):
+                # 先检查是否是 E2V2M3 / E2VTM3 编码格式
+                # 支持大小写变体和分隔符变体
+                gcs_pattern = r"^[Ee]([1-4])[Vv]([Tt1-5])[Mm]([1-6])$"
+                m = re.fullmatch(gcs_pattern, raw_text)
+                if m:
+                    # 合法文本编码: 写入 value_text，数字值设为 None
                     observations.append({
                         "code": BEDSIDE_CODE_MAP[code_raw],
                         "value_number": None,
@@ -207,7 +219,12 @@ def _fetch_bedside_observations(
                         "item_code": code_raw,
                         "source": "bedside",
                     })
-                else:
+                    continue
+                # 非编码格式: 尝试数值解析
+                val = _safe_float(doc.get("value_number"))
+                if val is None:
+                    val = _safe_float(doc.get("strVal"))
+                if val is not None:
                     observations.append({
                         "code": BEDSIDE_CODE_MAP[code_raw],
                         "value_number": val,
@@ -216,15 +233,27 @@ def _fetch_bedside_observations(
                         "item_code": code_raw,
                         "source": "bedside",
                     })
-            else:
-                observations.append({
-                    "code": BEDSIDE_CODE_MAP[code_raw],
-                    "value_number": val,
-                    "unit": unit,
-                    "observed_at": _aware(ts),
-                    "item_code": code_raw,
-                    "source": "bedside",
-                })
+                else:
+                    # 非法GCS格式: 记录数据质量错误
+                    if raw_text and raw_text.lower() not in ("", "null", "none", "nan"):
+                        logger.debug("GCS非法格式: code=%s raw_text=%s", code_raw, raw_text)
+                continue
+
+            # ---- 非GCS代码: 标准数值解析 ----
+            val = _safe_float(doc.get("value_number"))
+            if val is None:
+                val = _safe_float(doc.get("strVal"))
+            if val is None:
+                continue
+
+            observations.append({
+                "code": BEDSIDE_CODE_MAP[code_raw],
+                "value_number": val,
+                "unit": unit,
+                "observed_at": _aware(ts),
+                "item_code": code_raw,
+                "source": "bedside",
+            })
     except Exception as e:
         logger.warning("bedside fetch failed for sc_pid=%s: %s", sc_pid, e)
 
@@ -276,10 +305,11 @@ def _fetch_lab_observations(
 
     关键适配:
     1. 主表用 pid=hisPid 定位当前住院事件
-    2. 主表用 examID/reportID 关联子表
+    2. 主表用 examID/reportID 关联子表 — 同时支持两种关联
     3. 子表用 itemCode 精确匹配
     4. 数值优先取 itemValue (而非 result)
     5. 时间优先取 collectTime (采样时间)
+    6. 处理同一标本重复项目和更正报告
     """
     observations = []
     window_start = eval_time - timedelta(hours=lookback_hours)
@@ -287,9 +317,10 @@ def _fetch_lab_observations(
     if dc is None:
         return observations
 
-    # itemCode → 标准码映射
+    # itemCode → 标准码映射 (多编码兼容)
     LAB_MAP = {
         "PLT": "PLT",
+        "platelet": "PLT",
         "TBIL": "TBIL",
         "sCr": "CREA",
         "Cr": "CREA",
@@ -299,7 +330,7 @@ def _fetch_lab_observations(
     try:
         hp = str(his_pid)
 
-        # Step 1: 查主表，获取 examID 和 collectTime
+        # Step 1: 查主表，获取 examID、reportID 和 collectTime
         exam_docs = list(dc.VI_ICU_EXAM.find(
             {"pid": hp,
              "collectTime": {"$gte": window_start, "$lte": eval_time}},
@@ -309,24 +340,50 @@ def _fetch_lab_observations(
         if not exam_docs:
             return observations
 
-        # 构建 examID 集合和时间映射
+        # 构建 examID 和 reportID 集合及时间映射
         exam_ids = []
+        report_ids = []
         exam_time_by_id = {}
         for e in exam_docs:
-            eid = e.get("examID") or e.get("reportID")
+            eid = e.get("examID")
+            rid = e.get("reportID")
+            ct = e.get("collectTime")
             if eid:
                 exam_ids.append(eid)
-                exam_time_by_id[str(eid)] = e.get("collectTime")
+                exam_time_by_id[str(eid)] = ct
+            if rid:
+                report_ids.append(rid)
+                exam_time_by_id[str(rid)] = ct
 
-        if not exam_ids:
+        if not exam_ids and not report_ids:
             return observations
 
-        # Step 2: 查子表，精确匹配 itemCode
+        # Step 2: 查子表，同时用 examID 和 reportID 关联
+        # 优先用 examID，如果子表有 reportID 字段也支持
         for item_code, std_code in LAB_MAP.items():
+            # 构建查询: examID 匹配或 reportID 匹配
+            or_conditions = []
+            if exam_ids:
+                or_conditions.append({"examID": {"$in": exam_ids}})
+            if report_ids:
+                or_conditions.append({"reportID": {"$in": report_ids}})
+
+            if not or_conditions:
+                continue
+
+            query = {
+                "$or": or_conditions,
+                "itemCode": item_code,
+            }
+
             item_docs = list(dc.VI_ICU_EXAM_ITEM.find(
-                {"examID": {"$in": exam_ids}, "itemCode": item_code},
-                {"itemValue": 1, "result": 1, "unit": 1, "itemName": 1, "examID": 1}
+                query,
+                {"itemValue": 1, "result": 1, "unit": 1, "itemName": 1,
+                 "examID": 1, "reportID": 1}
             ).max_time_ms(10000).limit(100))
+
+            # 去重: 同一标本的重复项目和更正报告
+            seen = {}  # key: (exam_id, item_code) → 取最新
 
             for doc in item_docs:
                 # 数值优先取 itemValue，兜底 result
@@ -337,14 +394,25 @@ def _fetch_lab_observations(
                     continue
 
                 # 时间从主表 collectTime 获取
-                exam_id = doc.get("examID")
-                ts = exam_time_by_id.get(str(exam_id)) if exam_id else None
+                doc_exam_id = doc.get("examID")
+                doc_report_id = doc.get("reportID")
+                ts = None
+                if doc_exam_id:
+                    ts = exam_time_by_id.get(str(doc_exam_id))
+                if ts is None and doc_report_id:
+                    ts = exam_time_by_id.get(str(doc_report_id))
                 if ts is None:
                     continue
                 if not isinstance(ts, datetime):
                     continue
                 if ts < window_start or ts > eval_time:
                     continue
+
+                # 去重: 同一 examID + itemCode 只保留一条
+                dedup_key = (str(doc_exam_id or doc_report_id), item_code)
+                if dedup_key in seen:
+                    continue
+                seen[dedup_key] = True
 
                 unit = (doc.get("unit") or "").strip()
                 observations.append({
@@ -466,25 +534,33 @@ def _fetch_medications(
                     has_vasopressor_wide = True
 
                 # 只处理升压药（SOFA 心血管评分需要）
-                if in_strict and doc_weight and doc_weight > 0:
-                    # 计算剂量
+                if in_strict:
+                    # 计算剂量 (体重缺失时仍保留升压药证据)
                     dose_ugkgmin = None
-                    try:
-                        dose_raw = _safe_float(drug.get("dose"))
-                        liquid_raw = _safe_float(drug.get("liquidAmount"))
-                        if liquid_raw is None:
-                            liquid_raw = _safe_float(doc.get("liquidAmount"))
-                        if dose_raw and liquid_raw and speed_mlh > 0:
-                            calc_action = {
-                                "dose": dose_raw,
-                                "doseUnit": drug.get("doseUnit", "mg"),
-                                "liquidAmount": liquid_raw,
-                                "liquidUnit": drug.get("liquidUnit", "ml"),
-                                "speed": speed_mlh,
-                            }
-                            dose_ugkgmin, _ = calc_ne_dose(calc_action, doc_weight)
-                    except Exception:
-                        pass
+                    dose_status = None
+                    if not doc_weight or doc_weight <= 0:
+                        dose_status = "weight_missing"
+                    elif not is_active_at_eval:
+                        dose_status = "not_active"
+                    else:
+                        try:
+                            dose_raw = _safe_float(drug.get("dose"))
+                            liquid_raw = _safe_float(drug.get("liquidAmount"))
+                            if liquid_raw is None:
+                                liquid_raw = _safe_float(doc.get("liquidAmount"))
+                            if dose_raw and liquid_raw and speed_mlh > 0:
+                                calc_action = {
+                                    "dose": dose_raw,
+                                    "doseUnit": drug.get("doseUnit", "mg"),
+                                    "liquidAmount": liquid_raw,
+                                    "liquidUnit": drug.get("liquidUnit", "ml"),
+                                    "speed": speed_mlh,
+                                }
+                                dose_ugkgmin, _ = calc_ne_dose(calc_action, doc_weight)
+                            else:
+                                dose_status = "calculation_failed"
+                        except Exception:
+                            dose_status = "calculation_error"
 
                     # 确定 route
                     route = ""
@@ -498,10 +574,13 @@ def _fetch_medications(
                         "med_name": name,
                         "route": route,
                         "dose_ugkgmin": dose_ugkgmin,
+                        "dose_status": dose_status,
                         "admin_end": _aware(admin_end) if admin_end else None,
                         "admin_start": _aware(start_time),
                         "active_intervals": active_intervals,
                         "is_active_at_eval": is_active_at_eval,
+                        "is_vasopressor": True,
+                        "weight_kg": doc_weight,
                     }
                     medications.append(med)
                 elif in_wide and not in_strict:
@@ -600,31 +679,43 @@ def _fetch_ventilator_status_point_in_time(
     """
     判断 eval_time 时患者是否正在接受机械通气。
 
-    关键逻辑 (避免24h存在检查的误判):
-    - 检查 eval_time 前 tolerance_hours 内的 PEEP/VT/PIP 数据
-    - PEEP > 0 或 VT > 0 或 PIP > 0 表示机械通气中
-    - 仅 param_vent_resp 不足以证明机械通气 (可能是自主呼吸监测)
+    关键逻辑:
+    - 分别获取 PEEP、VT、PIP 在 eval_time 前的最后有效状态
+    - 综合多个参数共同判断: PEEP>0 或 VT>0 或 PIP>0 → 机械通气中
+    - 不仅取最新一条(可能PEEP=0但VT仍有值)
+    - 找不到证据时返回 False (保守)
 
     返回: True=机械通气中, False=未在机械通气
     """
     window_start = eval_time - timedelta(hours=tolerance_hours)
-    VENT_CODES = ["param_vent_peep", "param_vent_vt", "param_vent_pip"]
 
     try:
-        doc = sc.bedside.find_one(
-            {"pid": sc_pid,
-             "code": {"$in": VENT_CODES},
-             "valid": True,
-             "time": {"$gte": window_start, "$lte": eval_time}},
-            sort=[("time", -1)]
-        )
-        if doc is None:
-            return False
-        val = _safe_float(doc.get("value_number"))
-        if val is None:
-            val = _safe_float(doc.get("strVal"))
-        if val is not None and val > 0:
+        # 分别查询各参数在窗口内的最新值
+        vent_params = {}
+        for code in ["param_vent_peep", "param_vent_vt", "param_vent_pip"]:
+            doc = sc.bedside.find_one(
+                {"pid": sc_pid,
+                 "code": code,
+                 "valid": True,
+                 "time": {"$gte": window_start, "$lte": eval_time}},
+                sort=[("time", -1)]
+            )
+            if doc:
+                val = _safe_float(doc.get("value_number"))
+                if val is None:
+                    val = _safe_float(doc.get("strVal"))
+                vent_params[code] = val
+
+        # 综合判断: 任一参数 > 0 即认为机械通气中
+        peep = vent_params.get("param_vent_peep")
+        vt = vent_params.get("param_vent_vt")
+        pip = vent_params.get("param_vent_pip")
+
+        if (peep is not None and peep > 0) or \
+           (vt is not None and vt > 0) or \
+           (pip is not None and pip > 0):
             return True
+
         return False
     except Exception as e:
         logger.warning("Ventilator status fetch failed for sc_pid=%s: %s", sc_pid, e)
@@ -751,13 +842,26 @@ def fetch_patient_obs_meds(
     # 4. 判断高级呼吸支持
     has_advanced_support = _fetch_ventilator_status_point_in_time(sc, sc_pid, eval_time)
 
-    # 5. 检查数据完整性
+    # 5. 检查数据完整性 (使用标准化代码)
     obs_codes = set(obs.get("code") for obs in observations)
-    critical_codes = {"param_bg_P/Fratio", "PaO2", "param_bg_Lac", "PLT", "TBIL", "CREA",
-                      "param_score_gcs_obs", "gcsScore", "MAP", "urine_output"}
+    # 标准化代码 (与 BGA_CODE_MAP 输出一致)
+    critical_codes = {
+        "P/F_ratio", "PaO2", "Lactate", "FiO2",
+        "PLT", "TBIL", "CREA",
+        "param_score_gcs_obs", "gcsScore", "MAP", "urine_output",
+    }
+    # FiO2 和 P/F 不重复造成假缺失
+    has_pf = "P/F_ratio" in obs_codes
+    has_pao2 = "PaO2" in obs_codes
+    has_fio2 = "FiO2" in obs_codes
+    # 如果有 P/F ratio 直接值，PaO2+FiO2 不是必须的
+    if has_pf:
+        critical_codes.discard("PaO2")
+        critical_codes.discard("FiO2")
+
     missing_critical = critical_codes - obs_codes
     if missing_critical:
-        flags.append(f"missing_observations: {len(missing_critical)} critical codes absent")
+        flags.append(f"missing_observations: {len(missing_critical)} critical codes absent: {','.join(sorted(missing_critical))}")
 
     return {
         "observations": observations,
