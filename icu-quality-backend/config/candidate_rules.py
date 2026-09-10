@@ -23,7 +23,7 @@ LACTATE_THRESHOLD = 2.0
 LACTATE_BORDERLINE = 2.0  # 边界值
 
 # 候选引擎模式: shadow=影子运行(不改变正式报表) | active=正式启用
-CANDIDATE_ENGINE_MODE = "shadow"
+CANDIDATE_ENGINE_MODE = "active"
 
 # 候选通道优先级 (高优先级通道覆盖低优先级)
 CHANNEL_PRIORITY = {

@@ -365,6 +365,28 @@ def main():
     dept_codes = resolve_dept_codes(args.dept)
     months = month_range(*args.months.split(":"))
 
+    # 注入升压药白名单 (同 main.py startup 逻辑)
+    try:
+        from scoring.bundle_engine import set_vaso_wide_labels
+        sc = get_client("SmartCare")["SmartCare"]
+        vaso_drugs = list(sc.configDrug.find(
+            {"classification": {"$regex": "血管活性", "$options": "i"}},
+            {"name": 1, "_id": 0}
+        ))
+        labels = {d["name"].strip() for d in vaso_drugs if d.get("name")}
+        if labels:
+            set_vaso_wide_labels(labels)
+            print(f"[startup] VASO_WIDE_LABELS injected: {len(labels)} drugs")
+        else:
+            fallback = {
+                "去甲肾上腺素", "多巴胺", "多巴酚丁胺", "肾上腺素",
+                "血管加压素", "间羟胺", "苯肾上腺素",
+            }
+            set_vaso_wide_labels(fallback)
+            print(f"[startup] VASO_WIDE_LABELS fallback: {len(fallback)} drugs")
+    except Exception as e:
+        print(f"[startup] WARNING: VASO_WIDE_LABELS injection failed: {e}")
+
     print(f"ICU-05 审计: {months[0]} ~ {months[-1]}, dept={args.dept}")
     print(f"科室代码: {dept_codes}")
     print(f"CANDIDATE_ENGINE_MODE: {CANDIDATE_ENGINE_MODE}")
