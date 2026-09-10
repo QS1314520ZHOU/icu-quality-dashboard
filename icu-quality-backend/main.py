@@ -2443,6 +2443,45 @@ def indicator_list(period: str, icu_unit: str = "all", end_period: str = "", noc
                         agg[code]["num"] = r.get("numerator", 0)
                         agg[code]["den"] = r.get("denominator", 0)
 
+        # ICU-05 跨月实时计算
+        try:
+            from scoring.bundle_engine import set_vaso_wide_labels
+            sc = get_client("SmartCare")["SmartCare"]
+            vaso_drugs = list(sc.configDrug.find(
+                {"classification": {"$regex": "血管活性", "$options": "i"}},
+                {"name": 1, "_id": 0}
+            ))
+            labels = {d["name"].strip() for d in vaso_drugs if d.get("name")}
+            if labels:
+                set_vaso_wide_labels(labels)
+        except Exception:
+            pass
+
+        dept_codes = _resolve_dept_codes(icu_unit)
+        for hour in ("1h", "3h", "6h"):
+            code = f"ICU-05-{hour}"
+            agg[code] = {"num": 0, "den": 0, "unit": "‰", "name": NAME_MAP.get(code, code),
+                         "monthly": {}, "diag_fields": {}}
+            for mon in month_labels:
+                try:
+                    from summary import _compute_icu05
+                    import calendar
+                    y, m = map(int, mon.split("-"))
+                    end_day = calendar.monthrange(y, m)[1]
+                    icu05_data = _compute_icu05(dept_codes, f"{mon}-01", f"{mon}-{end_day:02d}", hour)
+                    if icu05_data:
+                        agg[code]["num"] += icu05_data.get("numerator", 0)
+                        agg[code]["den"] += icu05_data.get("denominator", 0)
+                        agg[code]["monthly"][mon] = icu05_data.get("value", 0)
+                        for df in ("candidate_den", "high_probability_count", "probable_count",
+                                   "pending_review_count", "not_candidate_count", "raw_candidate_count"):
+                            if icu05_data.get(df) is not None:
+                                agg[code]["diag_fields"][df] = agg[code]["diag_fields"].get(df, 0) + icu05_data[df]
+                        if icu05_data.get("candidate_mode"):
+                            agg[code]["diag_fields"]["candidate_mode"] = icu05_data["candidate_mode"]
+                except Exception as e:
+                    logger.warning("ICU-05-%s realtime failed for %s: %s", hour, mon, e)
+
         result = []
         for code in UNIT_MAP:
             if code not in agg:
@@ -2489,11 +2528,77 @@ def indicator_list(period: str, icu_unit: str = "all", end_period: str = "", noc
         return result
 
     # 单月查询
-    rows = summary_module.read_summary(_resolve_dept_codes(icu_unit), [period])
+    dept_codes = _resolve_dept_codes(icu_unit)
+    rows = summary_module.read_summary(dept_codes, [period])
     if rows:
         result = [_summary_row_to_api(r) for r in rows]
     else:
         result = []
+
+    # ICU-05 实时计算 (覆盖预聚合数据)
+    try:
+        from scoring.bundle_engine import set_vaso_wide_labels
+        sc = get_client("SmartCare")["SmartCare"]
+        vaso_drugs = list(sc.configDrug.find(
+            {"classification": {"$regex": "血管活性", "$options": "i"}},
+            {"name": 1, "_id": 0}
+        ))
+        labels = {d["name"].strip() for d in vaso_drugs if d.get("name")}
+        if labels:
+            set_vaso_wide_labels(labels)
+    except Exception:
+        pass
+
+    start_date = f"{period}-01"
+    import calendar
+    y, m = map(int, period.split("-"))
+    end_day = calendar.monthrange(y, m)[1]
+    end_date = f"{period}-{end_day:02d}"
+
+    for hour in ("1h", "3h", "6h"):
+        try:
+            from summary import _compute_icu05
+            icu05_data = _compute_icu05(dept_codes, start_date, end_date, hour)
+            if icu05_data:
+                code = f"ICU-05-{hour}"
+                # 查找并替换或追加
+                found = False
+                for i, r in enumerate(result):
+                    if r.get("code") == code:
+                        result[i] = _summary_row_to_api({
+                            "indicator": code,
+                            "denominator": icu05_data.get("denominator"),
+                            "numerator": icu05_data.get("numerator"),
+                            "value": icu05_data.get("value"),
+                            "candidate_den": icu05_data.get("candidate_den"),
+                            "candidate_mode": icu05_data.get("candidate_mode"),
+                            "high_probability_count": icu05_data.get("high_probability_count"),
+                            "probable_count": icu05_data.get("probable_count"),
+                            "pending_review_count": icu05_data.get("pending_review_count"),
+                            "not_candidate_count": icu05_data.get("not_candidate_count"),
+                            "raw_candidate_count": icu05_data.get("raw_candidate_count"),
+                            "diagnosis_based_count": icu05_data.get("diagnosis_based_count"),
+                        })
+                        found = True
+                        break
+                if not found:
+                    result.append(_summary_row_to_api({
+                        "indicator": code,
+                        "denominator": icu05_data.get("denominator"),
+                        "numerator": icu05_data.get("numerator"),
+                        "value": icu05_data.get("value"),
+                        "candidate_den": icu05_data.get("candidate_den"),
+                        "candidate_mode": icu05_data.get("candidate_mode"),
+                        "high_probability_count": icu05_data.get("high_probability_count"),
+                        "probable_count": icu05_data.get("probable_count"),
+                        "pending_review_count": icu05_data.get("pending_review_count"),
+                        "not_candidate_count": icu05_data.get("not_candidate_count"),
+                        "raw_candidate_count": icu05_data.get("raw_candidate_count"),
+                        "diagnosis_based_count": icu05_data.get("diagnosis_based_count"),
+                    }))
+        except Exception as e:
+            logger.warning("ICU-05-%s realtime compute failed: %s", hour, e)
+
     existing_codes = {r.get("code") for r in result}
     for code in UNIT_MAP:
         if code not in existing_codes:
