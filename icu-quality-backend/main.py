@@ -1111,8 +1111,8 @@ def query_detail(code: str, period: str, part: str, icu_unit: str = "all"):
         def _build_sofa_summary(sofa_data):
             if not sofa_data:
                 return None
-            classic = sofa_data.get("classic", {})
-            sofa2 = sofa_data.get("sofa2", {})
+            classic = sofa_data.get("classic") or {}
+            sofa2 = sofa_data.get("sofa2") or {}
             return {
                 "classic_score": classic.get("sofa_score"),
                 "classic_components": classic.get("components"),
@@ -1136,7 +1136,7 @@ def query_detail(code: str, period: str, part: str, icu_unit: str = "all"):
         def _build_clinical_layer_summary(cl):
             if not cl:
                 return None
-            layer2 = cl.get("layer2_organ_dysfunction", {})
+            layer2 = cl.get("layer2_organ_dysfunction") or {}
             return {
                 "infection": cl.get("layer1_infection"),
                 "organ_dysfunction": {
@@ -1161,9 +1161,9 @@ def query_detail(code: str, period: str, part: str, icu_unit: str = "all"):
                 return {}
             # Window decisions are nested by contract.  Merge only the
             # explicitly requested window with encounter-level evidence.
-            v3 = {**v3, **v3.get(f"bundle_{window}", {})}
+            v3 = {**v3, **(v3.get(f"bundle_{window}") or {})}
             # 构建乳酸完整记录（序列化时间字段）
-            lac_all = v3.get("lactate_all", [])
+            lac_all = v3.get("lactate_all") or []
             lactate_all_serialized = []
             for lac in lac_all:
                 item = dict(lac)
