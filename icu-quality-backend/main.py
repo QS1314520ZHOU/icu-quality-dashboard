@@ -540,6 +540,14 @@ def _summary_row_to_api(r: dict) -> dict:
     census = r.get("census")
     if census:
         result_row["census"] = census
+    # ICU-05 诊断字段透传
+    for diag_field in ("candidate_mode", "raw_candidate_count", "high_probability_count",
+                       "probable_count", "pending_review_count", "not_candidate_count",
+                       "diagnosis_based_count", "candidate_den",
+                       "raw_num", "raw_den", "excluded_num", "excluded_den",
+                       "new_shock_count", "old_shock_count", "shock_diff"):
+        if r.get(diag_field) is not None:
+            result_row[diag_field] = r[diag_field]
     return result_row
 
 
@@ -1985,6 +1993,28 @@ def get_all_indicators(start: date, end: date, dept: str = "all"):
             item = next((x for x in live if x.get("code") == code), None)
             trend[code].append(item.get("value") if item else None)
 
+    # 缺失月份检测 (从 rows 中提取)
+    data_complete = True
+    missing_periods = []
+    aggregation_periods = month_labels
+    for r in rows:
+        if r.get("data_complete") is False:
+            data_complete = False
+        if r.get("missing_periods"):
+            missing_periods = r["missing_periods"]
+        break  # 所有行共享相同的 missing_periods
+
+    # ICU-05 诊断字段 (从 rows 中提取)
+    icu05_diag = {}
+    for r in rows:
+        if r.get("code", "").startswith("ICU-05"):
+            for df in ("candidate_mode", "raw_candidate_count", "high_probability_count",
+                       "probable_count", "pending_review_count", "not_candidate_count",
+                       "diagnosis_based_count", "candidate_den"):
+                if r.get(df) is not None:
+                    icu05_diag[df] = r[df]
+            break
+
     return {
         "values": values,
         "numerators": numerators,
@@ -1994,6 +2024,12 @@ def get_all_indicators(start: date, end: date, dept: str = "all"):
         "periods": month_labels,
         "rows": rows,
         "updated_at": datetime.now().isoformat(timespec="seconds"),
+        # 数据完整性
+        "data_complete": data_complete,
+        "missing_periods": missing_periods,
+        "aggregation_periods": aggregation_periods,
+        # ICU-05 诊断字段
+        **icu05_diag,
     }
 
 @app.post("/api/ai/analyze")
@@ -2370,7 +2406,12 @@ def indicator_list(period: str, icu_unit: str = "all", end_period: str = "", noc
         else:
             rows_by_month = {}
 
-        agg = {}       # code → {num, den, unit, name, monthly: {mon: val}}
+        # 检测缺失月份
+        months_with_data = set(rows_by_month.keys())
+        missing_periods = [m for m in month_labels if m not in months_with_data]
+        data_complete = len(missing_periods) == 0
+
+        agg = {}       # code → {num, den, unit, name, monthly: {mon: val}, diag_fields}
         for mon in month_labels:
             rows = rows_by_month.get(mon) or []
             if rows_by_month.get(mon):
@@ -2379,10 +2420,19 @@ def indicator_list(period: str, icu_unit: str = "all", end_period: str = "", noc
                 code = r.get("indicator") or r.get("code")
                 if code not in agg:
                     agg[code] = {"num": 0, "den": 0, "unit": UNIT_MAP.get(code, ""),
-                                 "name": NAME_MAP.get(code, code), "monthly": {}}
+                                 "name": NAME_MAP.get(code, code), "monthly": {},
+                                 "diag_fields": {}}
                 agg[code]["num"] += r.get("numerator", 0)
                 agg[code]["den"] += r.get("denominator", 0)
                 agg[code]["monthly"][mon] = r.get("value", 0)
+                # 累加诊断字段
+                for df in ("raw_candidate_count", "high_probability_count", "probable_count",
+                           "pending_review_count", "not_candidate_count", "diagnosis_based_count",
+                           "candidate_den", "raw_num", "raw_den", "excluded_num", "excluded_den"):
+                    if r.get(df) is not None:
+                        agg[code]["diag_fields"][df] = agg[code]["diag_fields"].get(df, 0) + r[df]
+                if r.get("candidate_mode"):
+                    agg[code]["diag_fields"]["candidate_mode"] = r["candidate_mode"]
 
         # ICU-02/03 是时点值(人数/床位数),跨月不累加,取最后一个月
         for code in ("ICU-02", "ICU-03"):
@@ -2414,7 +2464,7 @@ def indicator_list(period: str, icu_unit: str = "all", end_period: str = "", noc
                 val = round(v["num"] / v["den"], 1) if v["den"] > 0 else 0
             else:
                 val = round(v["num"] / v["den"] * 100, 1) if v["den"] > 0 else 0
-            result.append({
+            row = {
                 "code": code,
                 "name": v["name"],
                 "numerator": v["num"],
@@ -2424,7 +2474,15 @@ def indicator_list(period: str, icu_unit: str = "all", end_period: str = "", noc
                 "status": "unknown" if val is None else eval_status(code, val),
                 "months": month_labels,
                 "monthly": [v["monthly"].get(mon) for mon in month_labels],
-            })
+                # 缺失月份检测
+                "data_complete": data_complete,
+                "missing_periods": missing_periods,
+                "aggregation_periods": month_labels,
+            }
+            # 诊断字段
+            if v.get("diag_fields"):
+                row.update(v["diag_fields"])
+            result.append(row)
         result = sorted(result, key=lambda x: x["code"])
         result = _ensure_no_data_indicator_rows(result)
         _cache_set(ck, result)

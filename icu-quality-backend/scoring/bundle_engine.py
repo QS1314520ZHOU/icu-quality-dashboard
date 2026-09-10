@@ -514,8 +514,43 @@ def judge_bundle_v3(patient_data: Dict[str, Any]) -> Dict[str, Any]:
         "culture_time": culture_time_3h,
     })
 
+    # ---- 6h 窗口判定 ----
+    w6h = patient_data.get("w6h", {})
+    t0_6h = t0 + timedelta(hours=6)
+
+    abx_time_6h = w6h.get("antibiotic_time")
+    culture_time_6h = w6h.get("culture_time")
+    a1_6h = judge_A1_lactate_measured(w6h.get("lactate_initial"), _br.A1_RULE)
+    b1_6h = judge_B1_antibiotic_time(abx_time_6h) if _in_window(abx_time_6h, t0_6h) else None
+    b2_6h = judge_B2_culture_time(culture_time_6h) if _in_window(culture_time_6h, t0_6h) else None
+    b3_6h, b3_reason_6h = judge_B3_step2(b1_6h, b2_6h, abx_time_6h, culture_time_6h)
+    c1_6h = judge_C1_map_trigger(w6h.get("map_min"))
+    c2_6h = judge_C2_lactate_trigger(w6h.get("lactate_max"))
+    # 6h C3: 液体量 >= 1500ml (6h 窗口)
+    c3_6h = judge_C3_3h_fluid(w6h.get("fluid_ml"), threshold=1500)
+
+    # 6h 完成判定: 第一步(A1) AND 第二步(B3) AND 第三步(C3)
+    # 6h 特有: 复测乳酸也算一个达标项
+    has_lactate_recheck = w6h.get("has_lactate_recheck", False)
+
+    result_6h = judge_bundle_finish_v3(a1_6h, b3_6h, c1_6h, c2_6h, c3_6h, b3_reason_6h)
+    # 6h 特有: 复测乳酸是额外要求
+    if result_6h.get("finish") is True and not has_lactate_recheck:
+        result_6h["finish"] = None  # 缺失复测乳酸，无法判定
+        result_6h["reasons"].append("LACTATE_RECHECK_MISSING")
+    result_6h.update({
+        "a1": a1_6h, "b1": b1_6h, "b2": b2_6h, "b3": b3_6h,
+        "c1": c1_6h, "c2": c2_6h, "c3": c3_6h,
+        "t0": t0,
+        "b3_reason": b3_reason_6h,
+        "has_lactate_recheck": has_lactate_recheck,
+        "antibiotic_time": abx_time_6h,
+        "culture_time": culture_time_6h,
+    })
+
     return {
         "bundle_1h": result_1h,
         "bundle_3h": result_3h,
+        "bundle_6h": result_6h,
         "gate": gate,
     }

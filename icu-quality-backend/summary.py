@@ -82,16 +82,15 @@ def _compute_icu05(dept_codes, start, end, hour):
       - candidate_shadow_num/candidate_shadow_den 使用候选引擎结果
       - 新候选不改变正式 num/den/val
       - 新候选完成 Bundle 时能进入影子分子
+
+    6h 规则:
+      - 分母与 1h/3h 共享 (K1 AND K2 在 shadow 模式)
+      - 分子: 3h Bundle 达标 AND 复测乳酸已做 AND 液体>=1500ml
+      - #fix: 移除硬编码 None 返回，实现真实6h判定
     """
     from scoring.candidate_engine import compute_candidate_statistics
     from config.candidate_rules import CANDIDATE_ENGINE_MODE
-
-    # 6h 固定返回 rule_pending/null (规则待主任确认)
-    if hour == "6h":
-        return {
-            "num": None, "den": None, "val": None, "val_type": "percent",
-            "data_available": False, "status": "rule_pending",
-        }
+    from config.bundle_rules import BUNDLE_6H_IMPLEMENTED
 
     d = get_bundle_data_v2(dept_codes, start, end)
     period = start[:7]  # "YYYY-MM"
@@ -224,35 +223,62 @@ def _compute_icu05(dept_codes, start, end, hour):
             official_h3_in_shadow.append(p)
     shadow_num_3h_candidates = official_h3_in_shadow
 
-    # Shadow 人工排除 (1h 和 3h 分别排除，分母可能不同)
+    # Shadow 人工排除 (1h, 3h, 6h 分别排除，分母可能不同)
     shadow_ex_1h = apply_exclusions(f"ICU-05-1h", dept_codes, period, shadow_num_1h_candidates, shadow_den_patients)
     shadow_ex_3h = apply_exclusions(f"ICU-05-3h", dept_codes, period, shadow_num_3h_candidates, shadow_den_patients)
 
-    # 关键: 1h 和 3h 各自使用自己的排除后分母
+    # 6h shadow
+    official_h6_in_shadow = [
+        p for p in d.get("h6_patients", [])
+        if p.get("exclusion_key") in shadow_den_exclusion_keys
+    ]
+    shadow_only_h6 = [
+        p for p in d.get("shadow_h6_patients", [])
+        if p.get("exclusion_key") in shadow_den_exclusion_keys
+    ]
+    seen_keys_6h = {p.get("exclusion_key") for p in official_h6_in_shadow if p.get("exclusion_key")}
+    for p in shadow_only_h6:
+        if p.get("exclusion_key") not in seen_keys_6h:
+            official_h6_in_shadow.append(p)
+    shadow_num_6h_candidates = official_h6_in_shadow
+    shadow_ex_6h = apply_exclusions(f"ICU-05-6h", dept_codes, period, shadow_num_6h_candidates, shadow_den_patients)
+
+    # 关键: 1h, 3h, 6h 各自使用自己的排除后分母
     shadow_den_1h = len(shadow_ex_1h["den_items"])
     shadow_den_3h = len(shadow_ex_3h["den_items"])
+    shadow_den_6h = len(shadow_ex_6h["den_items"])
     shadow_num_1h = len(shadow_ex_1h["num_items"])
     shadow_num_3h = len(shadow_ex_3h["num_items"])
+    shadow_num_6h = len(shadow_ex_6h["num_items"])
     shadow_rate_1h = round(shadow_num_1h / shadow_den_1h * 100, 1) if shadow_den_1h > 0 else 0.0
     shadow_rate_3h = round(shadow_num_3h / shadow_den_3h * 100, 1) if shadow_den_3h > 0 else 0.0
+    shadow_rate_6h = round(shadow_num_6h / shadow_den_6h * 100, 1) if shadow_den_6h > 0 else 0.0
 
     # Shadow excluded counts
     shadow_excluded_den_1h = shadow_ex_1h["excluded_den"]
     shadow_excluded_num_1h = shadow_ex_1h["excluded_num"]
     shadow_excluded_den_3h = shadow_ex_3h["excluded_den"]
     shadow_excluded_num_3h = shadow_ex_3h["excluded_num"]
+    shadow_excluded_den_6h = shadow_ex_6h["excluded_den"]
+    shadow_excluded_num_6h = shadow_ex_6h["excluded_num"]
 
     # Shadow raw counts (before exclusions)
     shadow_raw_den = len(shadow_den_patients)
     shadow_raw_num_1h = len(shadow_num_1h_candidates)
     shadow_raw_num_3h = len(shadow_num_3h_candidates)
+    shadow_raw_num_6h = len(shadow_num_6h_candidates)
+
+    # 诊断计数
+    diagnosis_based_count = sum(1 for p in all_den_candidates
+                                if p.get("candidate_status") in ("high_probability", "probable")
+                                and "diagnosis" in (p.get("candidate_pathways") or []))
 
     return {
         # 正式指标 (旧口径 K1 AND K2，shadow模式不变)
         "num": num, "den": den, "val": val, "val_type": "percent",
         "raw_num": ex["raw_num"], "raw_den": ex["raw_den"],
         "excluded_num": ex["excluded_num"], "excluded_den": ex["excluded_den"],
-        # Shadow 模式完整指标 (1h/3h 各自独立分母)
+        # Shadow 模式完整指标 (1h/3h/6h 各自独立分母)
         "shadow_raw_den": shadow_raw_den,
         "shadow_den_1h": shadow_den_1h,
         "shadow_num_1h": shadow_num_1h,
@@ -260,12 +286,18 @@ def _compute_icu05(dept_codes, start, end, hour):
         "shadow_den_3h": shadow_den_3h,
         "shadow_num_3h": shadow_num_3h,
         "shadow_rate_3h": shadow_rate_3h,
+        "shadow_den_6h": shadow_den_6h,
+        "shadow_num_6h": shadow_num_6h,
+        "shadow_rate_6h": shadow_rate_6h,
         "shadow_raw_num_1h": shadow_raw_num_1h,
         "shadow_raw_num_3h": shadow_raw_num_3h,
+        "shadow_raw_num_6h": shadow_raw_num_6h,
         "shadow_excluded_den_1h": shadow_excluded_den_1h,
         "shadow_excluded_num_1h": shadow_excluded_num_1h,
         "shadow_excluded_den_3h": shadow_excluded_den_3h,
         "shadow_excluded_num_3h": shadow_excluded_num_3h,
+        "shadow_excluded_den_6h": shadow_excluded_den_6h,
+        "shadow_excluded_num_6h": shadow_excluded_num_6h,
         # 其他统计
         "site_confirmed_count": site_confirmed_count,
         "site_unconfirmed_count": site_unconfirmed_count,
@@ -280,6 +312,9 @@ def _compute_icu05(dept_codes, start, end, hour):
         "probable_count": cand_summary.get("probable_count", 0),
         "pending_review_count": cand_summary.get("pending_review_count", 0),
         "not_candidate_count": cand_summary.get("not_candidate_count", 0),
+        # 诊断统计
+        "diagnosis_based_count": diagnosis_based_count,
+        "candidate_den": len(candidate_den_patients),
         # Shadow 模式信息
         "candidate_mode": CANDIDATE_ENGINE_MODE,
     }
@@ -624,6 +659,15 @@ def rebuild_summary(dept_codes: list, periods: list, indicators: list = None,
         shock_diff = result.pop("shock_diff", None)
         sofa2_mean = result.pop("sofa2_mean", None)
         sofa2_scored_count = result.pop("sofa2_scored_count", None)
+        # 新增诊断字段
+        raw_candidate_count = result.pop("raw_candidate_count", None)
+        high_probability_count = result.pop("high_probability_count", None)
+        probable_count = result.pop("probable_count", None)
+        pending_review_count = result.pop("pending_review_count", None)
+        not_candidate_count = result.pop("not_candidate_count", None)
+        candidate_mode = result.pop("candidate_mode", None)
+        diagnosis_based_count = result.pop("diagnosis_based_count", None)
+        candidate_den = result.pop("candidate_den", None)
         # 查询三层人工覆盖计数
         override_count = 0
         try:
@@ -675,6 +719,23 @@ def rebuild_summary(dept_codes: list, periods: list, indicators: list = None,
         if sofa2_mean is not None:
             doc["sofa2_mean"] = sofa2_mean
             doc["sofa2_scored_count"] = sofa2_scored_count
+        # 新增诊断字段
+        if raw_candidate_count is not None:
+            doc["raw_candidate_count"] = raw_candidate_count
+        if high_probability_count is not None:
+            doc["high_probability_count"] = high_probability_count
+        if probable_count is not None:
+            doc["probable_count"] = probable_count
+        if pending_review_count is not None:
+            doc["pending_review_count"] = pending_review_count
+        if not_candidate_count is not None:
+            doc["not_candidate_count"] = not_candidate_count
+        if candidate_mode is not None:
+            doc["candidate_mode"] = candidate_mode
+        if diagnosis_based_count is not None:
+            doc["diagnosis_based_count"] = diagnosis_based_count
+        if candidate_den is not None:
+            doc["candidate_den"] = candidate_den
         return doc
 
     light_first = {

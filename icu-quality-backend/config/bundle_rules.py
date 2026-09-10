@@ -44,6 +44,11 @@ SHOCK_RULE = "and"
 # 影响: 分母大小，True 会排除部位未确认的病例
 SITE_REQUIRED = False
 
+# ---- 6h 实现状态 ----
+# True = 6h 已实现完整判定逻辑；False = 6h 仍返回 rule_pending
+# 影响: ICU-05-6h 是否参与正式统计
+BUNDLE_6H_IMPLEMENTED = True
+
 # ---- 6h 路径 2 判定项 ----
 # 6h 第二步包含的具体项目清单
 # 影响: 6h 达标判定的完整性

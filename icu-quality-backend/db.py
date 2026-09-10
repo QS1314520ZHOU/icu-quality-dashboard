@@ -1144,6 +1144,7 @@ def get_bundle_data_v2(dept_codes: list, start_date: str, end_date: str) -> dict
             # Use (d.get(key) or {}) to safely default to empty dict
             bundle_1h = v3.get("bundle_1h") or {}
             bundle_3h = v3.get("bundle_3h") or {}
+            bundle_6h = v3.get("bundle_6h") or {}
             if old_shock_confirmed:
                 if bundle_1h.get("finish") is True:
                     result["h1_num"] += 1
@@ -1151,17 +1152,22 @@ def get_bundle_data_v2(dept_codes: list, start_date: str, end_date: str) -> dict
                 if bundle_3h.get("finish") is True:
                     result["h3_num"] += 1
                     result["h3_patients"].append(pat)
+                if bundle_6h.get("finish") is True:
+                    result["h6_num"] += 1
+                    result["h6_patients"].append(pat)
             # 影子分子: 候选引擎结果不为 not_candidate 的患者
             # 新候选分子不受旧K1/K2过滤
             is_shadow_candidate = pat.get("candidate_status", "not_candidate") != "not_candidate"
             if is_shadow_candidate:
                 if bundle_1h.get("finish") is True:
                     if not old_shock_confirmed:
-                        # 仅当不在旧分子中时才添加到影子分子
                         result.setdefault("shadow_h1_patients", []).append(pat)
                 if bundle_3h.get("finish") is True:
                     if not old_shock_confirmed:
                         result.setdefault("shadow_h3_patients", []).append(pat)
+                if bundle_6h.get("finish") is True:
+                    if not old_shock_confirmed:
+                        result.setdefault("shadow_h6_patients", []).append(pat)
         except Exception as _exc:
             logger.warning("V3 judgment failed for %s: %s", pat.get("mrn"), _exc)
             continue
@@ -2662,10 +2668,11 @@ def judge_bundle_v3_for_patient(sc_pid: str, dc_pid: str, mrn: str, t0: datetime
     # ---- C3: 液体 ----
     has_fluid_1h = False
     fluid_3h_ml = 0
+    fluid_6h_ml = 0
     try:
         fluid_keywords_list = list(CRYSTALLOID_KEYWORDS | COLLOID_KEYWORDS)
         fluid_docs = list(sc.drugExe.find(
-            {'pid': sc_pid, 'startTime': {'$gte': t0, '$lte': t0_3h}},
+            {'pid': sc_pid, 'startTime': {'$gte': t0, '$lte': t0_6h}},
             {'drugList.name': 1, 'drugList.liquidAmount': 1, 'startTime': 1}
         ))
         for fd in fluid_docs:
@@ -2680,9 +2687,13 @@ def judge_bundle_v3_for_patient(sc_pid: str, dc_pid: str, mrn: str, t0: datetime
                     if hours <= 1:
                         has_fluid_1h = True
                     liquid = dl.get('liquidAmount')
-                    if liquid and hours <= 3:
+                    if liquid:
                         try:
-                            fluid_3h_ml += float(liquid)
+                            liq_ml = float(liquid)
+                            if hours <= 3:
+                                fluid_3h_ml += liq_ml
+                            if hours <= 6:
+                                fluid_6h_ml += liq_ml
                         except (ValueError, TypeError):
                             pass
     except Exception:
@@ -2720,6 +2731,12 @@ def judge_bundle_v3_for_patient(sc_pid: str, dc_pid: str, mrn: str, t0: datetime
     blood_1h = blood_culture_time if blood_culture_time and t0 <= blood_culture_time <= min(t0_1h, eval_time) else None
     blood_3h = blood_culture_time if blood_culture_time and t0 <= blood_culture_time <= min(t0_3h, eval_time) else None
 
+    # 6h 窗口数据
+    lac_6h = _window_values(lac_values, t0_6h)
+    map_6h = _window_values(map_values, t0_6h)
+    abx_6h = antibiotic_time if antibiotic_time and t0 <= antibiotic_time <= min(t0_6h, eval_time) else None
+    blood_6h = blood_culture_time if blood_culture_time and t0 <= blood_culture_time <= min(t0_6h, eval_time) else None
+
     patient_data = {
         't0': t0,
         'eval_time': eval_time,
@@ -2735,7 +2752,6 @@ def judge_bundle_v3_for_patient(sc_pid: str, dc_pid: str, mrn: str, t0: datetime
         'pf_ratio_min': pf_ratio_min,
         'map_min': map_min,
         # 1h 窗口数据（用于 A1/B1/B2/B3/C1/C2/C3）
-        # 注意: 1h窗口数据应该只包含T0~T0+1h的数据
         'w1h': {
             'lactate_initial': lac_1h[0]['value'] if lac_1h else None,
             'lactate_max': max((x['value'] for x in lac_1h), default=None),
@@ -2745,7 +2761,6 @@ def judge_bundle_v3_for_patient(sc_pid: str, dc_pid: str, mrn: str, t0: datetime
             'has_fluid': has_fluid_1h,
         },
         # 3h 窗口数据
-        # 注意: 3h窗口数据应该只包含T0~T0+3h的数据
         'w3h': {
             'lactate_initial': lac_3h[0]['value'] if lac_3h else None,
             'lactate_max': max((x['value'] for x in lac_3h), default=None),
@@ -2753,6 +2768,17 @@ def judge_bundle_v3_for_patient(sc_pid: str, dc_pid: str, mrn: str, t0: datetime
             'antibiotic_time': abx_3h,
             'culture_time': blood_3h,
             'fluid_ml': fluid_3h_ml,
+        },
+        # 6h 窗口数据
+        'w6h': {
+            'lactate_initial': lac_6h[0]['value'] if lac_6h else None,
+            'lactate_max': max((x['value'] for x in lac_6h), default=None),
+            'map_min': min((x['value'] for x in map_6h), default=None),
+            'antibiotic_time': abx_6h,
+            'culture_time': blood_6h,
+            'fluid_ml': fluid_6h_ml,
+            'has_lactate_recheck': lactate_recheck_value is not None,
+            'lactate_recheck_value': lactate_recheck_value,
         },
     }
 

@@ -26,7 +26,7 @@ def setup_module():
 def test_window_contract_has_no_ambiguous_top_level_finish():
     t0 = datetime(2026, 1, 1, 8)
     result = engine.judge_bundle_v3(_patient(t0))
-    assert set(result) == {"bundle_1h", "bundle_3h", "gate"}
+    assert set(result) == {"bundle_1h", "bundle_3h", "bundle_6h", "gate"}
     assert "finish" not in result
 
 
