@@ -114,9 +114,10 @@ def _compute_icu05(dept_codes, start, end, hour):
 
     # Step 3: Shadow 模式 — 正式分母使用旧口径
     # 旧口径: K1 AND K2
+    # #fix: .get(key, {}) returns None when key exists with None value
     official_den_patients = [
         p for p in all_den_candidates
-        if p.get("v3", {}).get("k1") == True and p.get("v3", {}).get("k2") == True
+        if (p.get("v3") or {}).get("k1") == True and (p.get("v3") or {}).get("k2") == True
     ]
 
     # 新口径候选分母 (影子)

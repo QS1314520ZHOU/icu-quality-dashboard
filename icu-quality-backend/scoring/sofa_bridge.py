@@ -253,8 +253,9 @@ def build_clinical_layer(
     from config.indicator_windows import SOFA_GATE_MODE
     from config.candidate_rules import BUNDLE_6H_STATUS
 
-    sofa2 = sofa_result.get("sofa2", {})
-    classic = sofa_result.get("classic", {})
+    # #fix: .get(key, {}) returns None when key exists with None value
+    sofa2 = sofa_result.get("sofa2") or {}
+    classic = sofa_result.get("classic") or {}
 
     sofa2_score = sofa2.get("sofa2_score")
     sofa2_components = sofa2.get("components", {})
@@ -276,7 +277,8 @@ def build_clinical_layer(
 
     # ---- Layer 2: 急性器官功能障碍 ----
     # SOFA-2 基线 (从 sofa_result 获取)
-    sofa2_baseline_info = sofa_result.get("sofa2_baseline", {})
+    # #fix: .get(key, {}) returns None when key exists with None value
+    sofa2_baseline_info = sofa_result.get("sofa2_baseline") or {}
     baseline_sofa2 = sofa2_baseline_info.get("sofa2_score")
     baseline_status = sofa2_baseline_info.get("baseline_status", "unknown")
     baseline_known = baseline_sofa2 is not None

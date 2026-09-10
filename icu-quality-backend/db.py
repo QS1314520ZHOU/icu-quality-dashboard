@@ -1140,22 +1140,26 @@ def get_bundle_data_v2(dept_codes: list, start_date: str, end_date: str) -> dict
             pat["shock_status_new"] = shock_layer.get("shock_status")
             pat["sofa2_total"] = (cl.get("layer2_organ_dysfunction") or {}).get("sofa2_total")
             # 旧口径分子: K1 AND K2 (正式分子)
+            # #fix: .get(key, {}) returns None when key exists with None value
+            # Use (d.get(key) or {}) to safely default to empty dict
+            bundle_1h = v3.get("bundle_1h") or {}
+            bundle_3h = v3.get("bundle_3h") or {}
             if old_shock_confirmed:
-                if v3.get("bundle_1h", {}).get("finish") is True:
+                if bundle_1h.get("finish") is True:
                     result["h1_num"] += 1
                     result["h1_patients"].append(pat)
-                if v3.get("bundle_3h", {}).get("finish") is True:
+                if bundle_3h.get("finish") is True:
                     result["h3_num"] += 1
                     result["h3_patients"].append(pat)
             # 影子分子: 候选引擎结果不为 not_candidate 的患者
             # 新候选分子不受旧K1/K2过滤
             is_shadow_candidate = pat.get("candidate_status", "not_candidate") != "not_candidate"
             if is_shadow_candidate:
-                if v3.get("bundle_1h", {}).get("finish") is True:
+                if bundle_1h.get("finish") is True:
                     if not old_shock_confirmed:
                         # 仅当不在旧分子中时才添加到影子分子
                         result.setdefault("shadow_h1_patients", []).append(pat)
-                if v3.get("bundle_3h", {}).get("finish") is True:
+                if bundle_3h.get("finish") is True:
                     if not old_shock_confirmed:
                         result.setdefault("shadow_h3_patients", []).append(pat)
         except Exception as _exc:
@@ -1166,8 +1170,9 @@ def get_bundle_data_v2(dept_codes: list, start_date: str, end_date: str) -> dict
     from config.candidate_rules import CANDIDATE_ENGINE_MODE
 
     # 旧口径: K1 AND K2 → 正式分母 (shadow 模式下不改变)
+    # #fix: .get(key, {}) returns None when key exists with None value
     old_shock_count = sum(1 for p in result["den_patients"]
-                          if p.get("v3", {}).get("k1") == True and p.get("v3", {}).get("k2") == True)
+                          if (p.get("v3") or {}).get("k1") == True and (p.get("v3") or {}).get("k2") == True)
 
     # 新口径: 候选引擎结果 → 影子分母
     candidate_count = sum(1 for p in result["den_patients"]

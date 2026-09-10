@@ -73,12 +73,20 @@ def extract_candidate(
         - rule_version: str
     """
     # ---- 适配器: 从 v3_result 提取参数 ----
+    # #fix: `or` 会吞掉 False (definitive negative), 必须用 is not None 保护
     if v3_result is not None:
         # 从 v3_result 提取感染证据
         if infection_evidence is None:
-            i1 = v3_result.get("i1") or v3_result.get("infection_evidence", {}).get("i1")
-            i2 = v3_result.get("i2") or v3_result.get("infection_evidence", {}).get("i2")
-            i3 = v3_result.get("i3") or v3_result.get("infection_evidence", {}).get("i3")
+            # #fix: 不用 `or` — False 是有效判定值 (明确无感染), 不得被后续 None 覆盖
+            i1 = v3_result.get("i1")
+            if i1 is None:
+                i1 = (v3_result.get("infection_evidence") or {}).get("i1")
+            i2 = v3_result.get("i2")
+            if i2 is None:
+                i2 = (v3_result.get("infection_evidence") or {}).get("i2")
+            i3 = v3_result.get("i3")
+            if i3 is None:
+                i3 = (v3_result.get("infection_evidence") or {}).get("i3")
             has_infection = (i1 is True) or (i2 is True) or (i3 is True)
             infection_evidence = {
                 "has_infection": has_infection,
@@ -86,10 +94,15 @@ def extract_candidate(
             }
 
         # 升压药
+        # #fix: 不用 `or` — False 是有效判定值, 不得被后续 None/False 覆盖
         if not has_vasopressor_wide:
-            has_vasopressor_wide = v3_result.get("k2") or v3_result.get("has_vasopressor") or False
+            k2_val = v3_result.get("k2")
+            if k2_val is not None:
+                has_vasopressor_wide = bool(k2_val)
+            else:
+                has_vasopressor_wide = bool(v3_result.get("has_vasopressor"))
         if not has_vasopressor_strict:
-            has_vasopressor_strict = v3_result.get("has_vasopressor_strict") or False
+            has_vasopressor_strict = bool(v3_result.get("has_vasopressor_strict"))
         # 升压药状态: unknown 作为复核信号，不得作为电子确认依据
         if vasopressor_status is None:
             vasopressor_status = v3_result.get("vasopressor_status", "active" if has_vasopressor_wide else "inactive")
