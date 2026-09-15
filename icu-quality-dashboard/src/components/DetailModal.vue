@@ -31,29 +31,37 @@
       <div v-if="showGuide" class="guide-content">
         <div class="guide-section">
           <div class="guide-label">分母:</div>
-          <div class="guide-text">入院24h内进ICU且确诊脓毒性休克的患者</div>
+          <div class="guide-text">感染诊断 + 休克标准（MAP&lt;70 或升压药）+ 乳酸检测，三者同时满足的 ICU 患者</div>
         </div>
         <div class="guide-section">
           <div class="guide-label">T0:</div>
-          <div class="guide-text">入科后第一条医嘱时间 (VI_ICU_ZYYZ.orderTime)</div>
+          <div class="guide-text">max(感染诊断时间, 休克标准时间, 首次乳酸检测时间)</div>
         </div>
         <div class="guide-section">
-          <div class="guide-label">判定流程:</div>
+          <div class="guide-label">时间窗:</div>
+          <div class="guide-text">1h/3h/6h 为三个<strong>独立时间窗</strong>，各自独立判定，不存在依赖关系</div>
+        </div>
+        <div class="guide-section">
+          <div class="guide-label">Bundle 三步:</div>
           <div class="guide-flow">
-            <span class="flow-step">S1-S4 器官障碍</span>
-            <span class="flow-arrow">→</span>
-            <span class="flow-step">I1-I3 感染证据</span>
-            <span class="flow-arrow">→</span>
-            <span class="flow-step">K1+K2 脓毒性休克</span>
-            <span class="flow-arrow">→</span>
-            <span class="flow-step">A1+B3+C3 Bundle完成</span>
+            <span class="flow-step">A1 乳酸检测</span>
+            <span class="flow-arrow">+</span>
+            <span class="flow-step">B3 血培养先于抗生素</span>
+            <span class="flow-arrow">+</span>
+            <span class="flow-step">C3 液体复苏</span>
           </div>
         </div>
         <div class="guide-section">
-          <div class="guide-label">完成判定:</div>
-          <div class="guide-text">
-            第一步 A1(乳酸测定) + 第二步 B3(血培养先于抗生素) + 第三步 C3(液体达标)
-          </div>
+          <div class="guide-label">1h vs 3h/6h:</div>
+          <div class="guide-text">1h 仅要求液体复苏<strong>存在</strong>（任意量）；3h/6h 要求液体累计<strong>≥1500ml</strong></div>
+        </div>
+        <div class="guide-section">
+          <div class="guide-label">6h 特殊要求:</div>
+          <div class="guide-text">6h 额外要求<strong>乳酸复测</strong>（T0+1h 后第二次检测）；未复测 → 数据缺失（None），不计入达标</div>
+        </div>
+        <div class="guide-section">
+          <div class="guide-label">判定结果:</div>
+          <div class="guide-text">True=达标 / False=未达标 / None=数据缺失（不计入达标率分子）</div>
         </div>
         <div class="guide-section">
           <div class="guide-label">点击患者行:</div>
