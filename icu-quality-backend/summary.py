@@ -27,6 +27,17 @@ from db import (
 )
 
 # ============================================================
+# 常量
+# ============================================================
+# 必需指标列表，用于检查月度完整性
+REQUIRED_INDICATORS = frozenset([
+    "ICU-01", "ICU-02", "ICU-03", "ICU-04", "ICU-05",
+    "ICU-06", "ICU-07", "ICU-08", "ICU-09", "ICU-10",
+    "ICU-11", "ICU-12", "ICU-13", "ICU-14", "ICU-15",
+    "ICU-16", "ICU-17", "ICU-18", "ICU-19", "CAUTI",
+])
+
+# ============================================================
 # 1. 指标 → 取数函数 映射表
 # ============================================================
 
@@ -796,20 +807,60 @@ def _natural_months_back(n: int) -> list:
 
 
 def find_missing_periods(dept_codes: list, periods: list) -> list:
-    """检查预聚合表中缺失的月份列表。"""
+    """检查预聚合表中缺失的月份列表（按指标维度检查）。
+    只要该月份有任何指标缺失，就返回该月份。
+    兼容旧格式（无indicator字段的记录视为完整）。
+    """
     for db_name in BED_DB_NAMES:
         try:
             db = get_client(db_name)[db_name]
             coll = db[SUMMARY_COLLECTION]
             dept_key = ",".join(dept_codes) if len(dept_codes) > 1 else (dept_codes[0] if dept_codes else "all")
-            existing = {
-                doc["period"]
-                for doc in coll.find(
-                    {"dept_code": dept_key, "period": {"$in": periods}},
-                    {"period": 1, "_id": 0},
-                )
-            }
-            return [p for p in periods if p not in existing]
+
+            # 获取所有已存在记录的 (period, indicator) 组合
+            existing_docs = list(coll.find(
+                {"dept_code": dept_key, "period": {"$in": periods}},
+                {"period": 1, "indicator": 1, "_id": 0},
+            ))
+
+            # 按 period 分组，记录每个 period 有哪些 indicator
+            existing_indicators = {}
+            has_old_format = set()  # 记录有旧格式（无indicator）的period
+            for doc in existing_docs:
+                p = doc["period"]
+                ind = doc.get("indicator")
+                if p not in existing_indicators:
+                    existing_indicators[p] = set()
+                if ind:
+                    existing_indicators[p].add(ind)
+                else:
+                    # 旧格式记录（无indicator字段或indicator为空）
+                    has_old_format.add(p)
+
+            # 对于每个 period，检查是否有任何指标缺失
+            # 如果一个 period 没有任何记录，肯定缺失
+            # 如果一个 period 有旧格式记录（无indicator），视为完整（向后兼容）
+            missing = []
+            for p in periods:
+                if p not in existing_indicators:
+                    # 完全无记录
+                    missing.append(p)
+                elif p in has_old_format:
+                    # 有旧格式记录，视为完整（向后兼容）
+                    pass
+                else:
+                    # 有新格式记录，检查是否所有必需指标都有
+                    indicators = existing_indicators[p]
+                    if len(indicators) >= len(REQUIRED_INDICATORS):
+                        # 已完整
+                        pass
+                    else:
+                        # 检查缺失哪些指标
+                        missing_inds = REQUIRED_INDICATORS - indicators
+                        if missing_inds:
+                            logger.info("[find_missing] %s missing indicators: %s", p, missing_inds)
+                            missing.append(p)
+            return missing
         except Exception:
             continue
     return list(periods)

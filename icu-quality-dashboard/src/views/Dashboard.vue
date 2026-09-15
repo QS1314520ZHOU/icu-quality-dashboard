@@ -48,6 +48,10 @@
       <svg class="spin-icon" viewBox="0 0 16 16" fill="none" stroke="currentColor" stroke-width="1.5"><path d="M8 1v4M8 11v4M1 8h4M11 8h4M3.05 3.05l2.83 2.83M10.12 10.12l2.83 2.83M3.05 12.95l2.83-2.83M10.12 5.88l2.83-2.83"/></svg>
       后台补算中，正在处理缺失月份: {{ missingPeriods.join(', ') }}。页面将在完成后自动刷新。
     </div>
+    <div v-else-if="rebuildError" class="state error">
+      <svg viewBox="0 0 16 16" fill="none" stroke="currentColor" stroke-width="1.5"><path d="M8 1L15 14H1L8 1zM8 6v4M8 12h.01"/></svg>
+      补算失败: {{ rebuildError }}
+    </div>
     <div v-else-if="!dataComplete && missingPeriods.length" class="state warning">
       <svg viewBox="0 0 16 16" fill="none" stroke="currentColor" stroke-width="1.5"><path d="M8 1L15 14H1L8 1zM8 6v4M8 12h.01"/></svg>
       部分月份数据缺失 ({{ missingPeriods.join(', ') }})，显示为「/」。点击刷新可触发补算。
@@ -362,7 +366,7 @@
 import { ref, computed, inject, onMounted, onUnmounted, watch } from 'vue';
 import { INDICATORS, getStatusConfig, statusText as getStatusLabel } from '../config/indicators.js';
 import { INDICATOR_GROUPS, getGroupStats } from '../config/indicatorGroups.js';
-import { fetchCommandCenter, fetchDetail } from '../api/index.js';
+import { fetchCommandCenter, fetchDetail, fetchRebuildStatus } from '../api/index.js';
 import { getMoM, getYoY, formatDelta, formatValue } from '../utils/compare.js';
 
 // 组件
@@ -414,6 +418,7 @@ const censusTrend = ref([]);
 
 // 补算状态
 const rebuilding = ref(false);
+const rebuildError = ref(null);
 const missingPeriods = ref([]);
 const dataComplete = ref(true);
 let rebuildPollTimer = null;
@@ -733,19 +738,29 @@ async function loadYoYData() {
 }
 
 // ---- 补算轮询 ----
+const MAX_POLL_FAILURES = 6; // 连续失败6次后停止轮询
+let pollFailureCount = 0;
+
 function startRebuildPolling() {
   if (rebuildPollTimer) return;
+  pollFailureCount = 0;
   rebuildPollTimer = setInterval(async () => {
     try {
       const status = await fetchRebuildStatus();
+      pollFailureCount = 0; // 重置失败计数
       if (!status.rebuilding) {
         rebuilding.value = false;
+        rebuildError.value = null;
         stopRebuildPolling();
-        // 刷新数据
         loadData(true);
       }
-    } catch {
-      // 轮询失败，保持当前状态
+    } catch (e) {
+      pollFailureCount++;
+      if (pollFailureCount >= MAX_POLL_FAILURES) {
+        rebuilding.value = false;
+        rebuildError.value = `轮询失败: ${e.message || '网络错误'}`;
+        stopRebuildPolling();
+      }
     }
   }, 5000);
 }
