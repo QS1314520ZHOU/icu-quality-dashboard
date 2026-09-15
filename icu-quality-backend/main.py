@@ -231,6 +231,11 @@ def _cache_set(key, val):
     _cache[key] = {"val": val, "ts": time_module.time()}
 
 
+def _cache_clear():
+    """清理进程内缓存。"""
+    _cache.clear()
+
+
 DETAIL_CACHE_COLLECTION = "icu_indicator_detail_cache"
 # 缓存版本号：修改口径时 +1，旧条目自然失效
 CACHE_VERSION = 9

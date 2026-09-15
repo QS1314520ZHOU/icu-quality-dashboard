@@ -40,6 +40,7 @@ def compute_sofa_scores(
     t0: datetime,
     eval_time: Optional[datetime] = None,
     weight_kg: Optional[float] = None,
+    batch_lab_cache: Optional[dict] = None,
 ) -> dict:
     """
     正式 SOFA 评分入口。
@@ -52,6 +53,7 @@ def compute_sofa_scores(
         t0: T0 时间
         eval_time: 评估时间，默认 T0+24h
         weight_kg: 体重 (可选)
+        batch_lab_cache: 批量预加载的检验数据缓存 {his_pid: {observations, status, ...}}
 
     Returns:
         {
@@ -62,6 +64,7 @@ def compute_sofa_scores(
             "fetch_meta": {...},
             "data_quality_flags": [...],
             "version_meta": {classic: {...}, sofa2: {...}},
+            "data_complete": bool,
         }
     """
     from scoring.data_adapter import fetch_patient_obs_meds
@@ -77,8 +80,9 @@ def compute_sofa_scores(
         eval_time = t0 + timedelta(hours=24)
     eval_time = _aware(eval_time)
 
-    # 1. 提取数据
-    data = fetch_patient_obs_meds(sc_pid, mrn, dc_pid, t0, eval_time, weight_kg)
+    # 1. 提取数据（支持批量缓存）
+    data = fetch_patient_obs_meds(sc_pid, mrn, dc_pid, t0, eval_time, weight_kg,
+                                  batch_lab_cache=batch_lab_cache)
     observations = data["observations"]
     medications = data["medications"]
     has_advanced_support = data["has_advanced_support"]
@@ -86,6 +90,7 @@ def compute_sofa_scores(
     w_kg = data["weight_kg"]
     flags = list(data["data_quality_flags"])
     fetch_meta = data["fetch_meta"]
+    data_complete = data.get("data_complete", True)
 
     # 2. 运行经典 SOFA
     classic_result = None
@@ -138,6 +143,7 @@ def compute_sofa_scores(
             "classic": CLASSIC_SOFA_META,
             "sofa2": SOFA2_META,
         },
+        "data_complete": data_complete,
     }
 
 

@@ -284,6 +284,33 @@ def _compute_icu05(dept_codes, start, end, hour):
                                 if p.get("candidate_status") in ("high_probability", "probable")
                                 and "diagnosis" in (p.get("candidate_pathways") or []))
 
+    # 检查数据完整性
+    data_complete = True
+    failed_pids = []
+    failed_sources = []
+    timeout_count = 0
+    query_error_count = 0
+    truncated_count = 0
+
+    for pat in all_den_candidates:
+        v3 = pat.get("v3") or {}
+        sofa = v3.get("sofa") or {}
+        if sofa.get("data_complete") is False:
+            data_complete = False
+            pat_his_pid = pat.get("hisPid") or pat.get("mrn") or pat.get("_id")
+            failed_pids.append(pat_his_pid)
+            # 检查失败原因
+            fetch_meta = sofa.get("fetch_meta") or {}
+            if fetch_meta.get("lab_status") == "timeout":
+                timeout_count += 1
+                failed_sources.append(f"{pat_his_pid}:lab_timeout")
+            elif fetch_meta.get("lab_status") == "query_error":
+                query_error_count += 1
+                failed_sources.append(f"{pat_his_pid}:lab_query_error")
+            elif fetch_meta.get("lab_truncated"):
+                truncated_count += 1
+                failed_sources.append(f"{pat_his_pid}:lab_truncated")
+
     return {
         # 正式指标 (旧口径 K1 AND K2，shadow模式不变)
         "num": num, "den": den, "val": val, "val_type": "percent",
@@ -328,6 +355,13 @@ def _compute_icu05(dept_codes, start, end, hour):
         "candidate_den": len(candidate_den_patients),
         # Shadow 模式信息
         "candidate_mode": CANDIDATE_ENGINE_MODE,
+        # 数据完整性
+        "data_complete": data_complete,
+        "failed_pids": failed_pids,
+        "failed_sources": failed_sources,
+        "timeout_count": timeout_count,
+        "query_error_count": query_error_count,
+        "truncated_count": truncated_count,
     }
 
 

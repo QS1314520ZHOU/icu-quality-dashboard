@@ -68,7 +68,8 @@ def batch_fetch_lab_observations(
     his_pids: List[str],
     eval_time: datetime,
     lookback_hours: int = 24,
-) -> Dict[str, List[dict]]:
+    seen: Optional[set] = None,
+) -> Dict[str, dict]:
     """
     批量查询检验数据，替代逐患者 N+1 查询。
 
@@ -77,23 +78,28 @@ def batch_fetch_lab_observations(
         his_pids: 批量患者 ID 列表
         eval_time: 评估时间
         lookback_hours: 回溯窗口（小时）
+        seen: 可选的外部 seen 集合，用于跨批次去重
 
     Returns:
-        {his_pid: [observations]}
-        每个 observation 格式:
-        {
-            "code": str,           # 标准码 (PLT/TBIL/CREA)
-            "value_number": float, # 检验值
-            "unit": str,           # 单位
-            "observed_at": datetime, # 采样时间
-            "item_name": str,      # 原始项目名
-            "source": str,         # "VI_ICU_EXAM_ITEM"
-        }
+        {his_pid: {"observations": [...], "status": str, "error": str|None, "data_complete": bool}}
+        status 取值: "success" | "no_data" | "timeout" | "query_error"
     """
     window_start = eval_time - timedelta(hours=lookback_hours)
-    result = {pid: [] for pid in his_pids}
+
+    # 初始化结果：每个患者有 observations, status, error, data_complete
+    result = {pid: {"observations": [], "status": "success", "error": None, "data_complete": True}
+              for pid in his_pids}
+
+    # 如果未提供 seen 集合，使用内部集合
+    internal_seen = seen is None
+    if internal_seen:
+        seen = set()
 
     if not his_pids or dc is None:
+        if dc is None:
+            for pid in his_pids:
+                result[pid] = {"observations": [], "status": "query_error",
+                               "error": "DataCenter unavailable", "data_complete": False}
         return result
 
     logger.info("batch_fetch_lab: %d patients, window=%s to %s",
@@ -101,6 +107,7 @@ def batch_fetch_lab_observations(
 
     # Step 1: 分块查询 VI_ICU_EXAM
     exam_by_pid = {}  # his_pid → [{examID, reportID, collectTime}]
+    chunk_failed_pids = set()
 
     for i in range(0, len(his_pids), CHUNK_SIZE):
         chunk = his_pids[i:i + CHUNK_SIZE]
@@ -113,6 +120,11 @@ def batch_fetch_lab_observations(
                 },
                 {"pid": 1, "examID": 1, "reportID": 1, "collectTime": 1}
             ).max_time_ms(15000).limit(5000))
+
+            # 检测 limit 截断
+            if len(exam_docs) >= 5000:
+                logger.warning("VI_ICU_EXAM chunk %d-%d hit limit(5000), possible truncation",
+                             i, i + CHUNK_SIZE)
 
             for doc in exam_docs:
                 pid = doc.get("pid")
@@ -127,9 +139,26 @@ def batch_fetch_lab_observations(
             logger.debug("VI_ICU_EXAM chunk %d-%d: %d docs", i, i + CHUNK_SIZE, len(exam_docs))
 
         except Exception as e:
+            error_msg = str(e)
+            if "MaxTimeMSExpired" in error_msg:
+                chunk_status = "timeout"
+            else:
+                chunk_status = "query_error"
+
+            for pid in chunk:
+                result[pid] = {"observations": [], "status": chunk_status,
+                               "error": error_msg, "data_complete": False}
+                chunk_failed_pids.add(pid)
+
             logger.warning("VI_ICU_EXAM batch query failed for chunk %d-%d: %s",
                          i, i + CHUNK_SIZE, e)
-            continue  # 继续处理下一块
+            continue
+
+    # 标记无检验数据的患者（不是查询失败，而是确实没有数据）
+    for pid in his_pids:
+        if pid not in exam_by_pid and pid not in chunk_failed_pids:
+            result[pid] = {"observations": [], "status": "no_data",
+                           "error": None, "data_complete": True}
 
     if not exam_by_pid:
         logger.info("batch_fetch_lab: no exam docs found")
@@ -183,14 +212,38 @@ def batch_fetch_lab_observations(
                  "unit": 1, "itemName": 1}
             ).max_time_ms(15000).limit(10000))
 
+            # 检测 limit 截断
+            if len(items) >= 10000:
+                logger.warning("VI_ICU_EXAM_ITEM exam chunk %d-%d hit limit(10000), possible truncation",
+                             i, i + CHUNK_SIZE)
+
             # 处理查询结果
             _process_exam_items(items, exam_time_map, exam_pid_map,
-                              LAB_MAP, result, window_start, eval_time)
+                              LAB_MAP, result, window_start, eval_time, seen)
 
             logger.debug("VI_ICU_EXAM_ITEM exam chunk %d-%d: %d items",
                         i, i + CHUNK_SIZE, len(items))
 
         except Exception as e:
+            error_msg = str(e)
+            if "MaxTimeMSExpired" in error_msg:
+                chunk_status = "timeout"
+            else:
+                chunk_status = "query_error"
+
+            # 找出受影响的患者
+            affected_pids = set()
+            for eid in chunk:
+                pid = exam_pid_map.get(str(eid))
+                if pid:
+                    affected_pids.add(pid)
+
+            for pid in affected_pids:
+                if result[pid]["status"] == "success":
+                    result[pid]["status"] = chunk_status
+                    result[pid]["error"] = error_msg
+                    result[pid]["data_complete"] = False
+
             logger.warning("VI_ICU_EXAM_ITEM batch query failed for exam chunk %d-%d: %s",
                          i, i + CHUNK_SIZE, e)
             continue
@@ -209,22 +262,50 @@ def batch_fetch_lab_observations(
                  "unit": 1, "itemName": 1}
             ).max_time_ms(15000).limit(10000))
 
+            # 检测 limit 截断
+            if len(items) >= 10000:
+                logger.warning("VI_ICU_EXAM_ITEM report chunk %d-%d hit limit(10000), possible truncation",
+                             i, i + CHUNK_SIZE)
+
             _process_exam_items(items, exam_time_map, exam_pid_map,
-                              LAB_MAP, result, window_start, eval_time)
+                              LAB_MAP, result, window_start, eval_time, seen)
 
             logger.debug("VI_ICU_EXAM_ITEM report chunk %d-%d: %d items",
                         i, i + CHUNK_SIZE, len(items))
 
         except Exception as e:
+            error_msg = str(e)
+            if "MaxTimeMSExpired" in error_msg:
+                chunk_status = "timeout"
+            else:
+                chunk_status = "query_error"
+
+            affected_pids = set()
+            for rid in chunk:
+                pid = exam_pid_map.get(str(rid))
+                if pid:
+                    affected_pids.add(pid)
+
+            for pid in affected_pids:
+                if result[pid]["status"] == "success":
+                    result[pid]["status"] = chunk_status
+                    result[pid]["error"] = error_msg
+                    result[pid]["data_complete"] = False
+
             logger.warning("VI_ICU_EXAM_ITEM batch query failed for report chunk %d-%d: %s",
                          i, i + CHUNK_SIZE, e)
             continue
 
     # 统计结果
-    total_obs = sum(len(obs) for obs in result.values())
-    patients_with_data = sum(1 for obs in result.values() if obs)
-    logger.info("batch_fetch_lab complete: %d patients with data, %d total observations",
-                patients_with_data, total_obs)
+    total_obs = sum(len(r["observations"]) for r in result.values())
+    patients_with_data = sum(1 for r in result.values() if r["observations"])
+    patients_timeout = sum(1 for r in result.values() if r["status"] == "timeout")
+    patients_query_error = sum(1 for r in result.values() if r["status"] == "query_error")
+    patients_no_data = sum(1 for r in result.values() if r["status"] == "no_data")
+    logger.info("batch_fetch_lab complete: %d/%d patients with data, %d observations "
+                "(timeout=%d, query_error=%d, no_data=%d)",
+                patients_with_data, len(his_pids), total_obs,
+                patients_timeout, patients_query_error, patients_no_data)
 
     return result
 
@@ -234,9 +315,10 @@ def _process_exam_items(
     exam_time_map: Dict[str, datetime],
     exam_pid_map: Dict[str, str],
     lab_map: Dict[str, str],
-    result: Dict[str, List[dict]],
+    result: Dict[str, Any],
     window_start: datetime,
     eval_time: datetime,
+    seen: Optional[set] = None,
 ) -> None:
     """
     处理检验项目结果，去重并分配给患者。
@@ -246,11 +328,15 @@ def _process_exam_items(
         exam_time_map: exam_id_str → collectTime
         exam_pid_map: exam_id_str → his_pid
         lab_map: itemCode → std_code 映射
-        result: 输出结果字典 {his_pid: [observations]}
+        result: 输出结果字典 {his_pid: {"observations": [...], ...}}
         window_start: 时间窗口开始
         eval_time: 评估时间
+        seen: 可选的外部 seen 集合，用于跨批次去重
     """
-    seen = {}  # (pid, exam_id, item_code) → True
+    # 如果未提供 seen 集合，使用内部集合
+    internal_seen = seen is None
+    if internal_seen:
+        seen = set()
 
     for doc in items:
         # 提取检验值
@@ -287,7 +373,7 @@ def _process_exam_items(
         dedup_key = (pid, exam_id_str, item_code)
         if dedup_key in seen:
             continue
-        seen[dedup_key] = True
+        seen.add(dedup_key)
 
         # 标准化代码
         std_code = lab_map.get(item_code)
@@ -295,7 +381,7 @@ def _process_exam_items(
             continue
 
         # 添加观测
-        result[pid].append({
+        result[pid]["observations"].append({
             "code": std_code,
             "value_number": raw_val,
             "unit": (doc.get("unit") or "").strip(),
@@ -310,6 +396,7 @@ def batch_fetch_lab_observations_with_status(
     his_pids: List[str],
     eval_time: datetime,
     lookback_hours: int = 24,
+    seen: Optional[set] = None,
 ) -> Tuple[Dict[str, List[dict]], Dict[str, str], List[str]]:
     """
     带状态返回的批量查询版本。
@@ -321,14 +408,23 @@ def batch_fetch_lab_observations_with_status(
           status 取值: "success" | "no_data" | "timeout" | "query_error"
         - failed_pids: 查询失败的患者列表
     """
+    # 如果未提供 seen 集合，使用内部集合
+    internal_seen = seen is None
+    if internal_seen:
+        seen = set()
     window_start = eval_time - timedelta(hours=lookback_hours)
-    result = {pid: [] for pid in his_pids}
+    # 使用与 batch_fetch_lab_observations 相同的格式
+    result = {pid: {"observations": [], "status": "success", "error": None, "data_complete": True}
+              for pid in his_pids}
     status = {pid: "success" for pid in his_pids}
     failed_pids = []
 
     if not his_pids or dc is None:
         if dc is None:
-            status = {pid: "query_error" for pid in his_pids}
+            for pid in his_pids:
+                result[pid] = {"observations": [], "status": "query_error",
+                               "error": "DataCenter unavailable", "data_complete": False}
+                status[pid] = "query_error"
             failed_pids = list(his_pids)
         return result, status, failed_pids
 
@@ -368,6 +464,8 @@ def batch_fetch_lab_observations_with_status(
 
             for pid in chunk:
                 status[pid] = chunk_status
+                result[pid] = {"observations": [], "status": chunk_status,
+                               "error": error_msg, "data_complete": False}
                 failed_pids.append(pid)
 
             logger.warning("VI_ICU_EXAM batch query failed for chunk %d-%d: %s",
@@ -376,8 +474,10 @@ def batch_fetch_lab_observations_with_status(
 
     # 标记无检验数据的患者
     for pid in his_pids:
-        if pid not in exam_by_pid and status[pid] == "success":
+        if pid not in exam_by_pid and pid not in [p for p in failed_pids] and status[pid] == "success":
             status[pid] = "no_data"
+            result[pid] = {"observations": [], "status": "no_data",
+                           "error": None, "data_complete": True}
 
     if not exam_by_pid:
         return result, status, failed_pids
@@ -427,7 +527,7 @@ def batch_fetch_lab_observations_with_status(
             ).max_time_ms(15000).limit(10000))
 
             _process_exam_items(items, exam_time_map, exam_pid_map,
-                              LAB_MAP, result, window_start, eval_time)
+                              LAB_MAP, result, window_start, eval_time, seen)
 
         except Exception as e:
             error_msg = str(e)
@@ -446,6 +546,9 @@ def batch_fetch_lab_observations_with_status(
             for pid in affected_pids:
                 if status[pid] == "success":  # 只覆盖成功状态
                     status[pid] = chunk_status
+                    result[pid] = {"observations": result[pid]["observations"],
+                                   "status": chunk_status, "error": error_msg,
+                                   "data_complete": False}
                     failed_pids.append(pid)
 
             logger.warning("VI_ICU_EXAM_ITEM batch query failed for exam chunk %d-%d: %s",
@@ -467,7 +570,7 @@ def batch_fetch_lab_observations_with_status(
             ).max_time_ms(15000).limit(10000))
 
             _process_exam_items(items, exam_time_map, exam_pid_map,
-                              LAB_MAP, result, window_start, eval_time)
+                              LAB_MAP, result, window_start, eval_time, seen)
 
         except Exception as e:
             error_msg = str(e)
@@ -485,6 +588,9 @@ def batch_fetch_lab_observations_with_status(
             for pid in affected_pids:
                 if status[pid] == "success":
                     status[pid] = chunk_status
+                    result[pid] = {"observations": result[pid]["observations"],
+                                   "status": chunk_status, "error": error_msg,
+                                   "data_complete": False}
                     failed_pids.append(pid)
 
             logger.warning("VI_ICU_EXAM_ITEM batch query failed for report chunk %d-%d: %s",
@@ -492,8 +598,8 @@ def batch_fetch_lab_observations_with_status(
             continue
 
     # 统计
-    total_obs = sum(len(obs) for obs in result.values())
-    patients_with_data = sum(1 for obs in result.values() if obs)
+    total_obs = sum(len(r["observations"]) for r in result.values())
+    patients_with_data = sum(1 for r in result.values() if r["observations"])
     logger.info("batch_fetch_lab_with_status complete: %d/%d patients with data, %d observations",
                 patients_with_data, len(his_pids), total_obs)
 

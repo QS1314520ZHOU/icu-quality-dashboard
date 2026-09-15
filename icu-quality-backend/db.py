@@ -1086,7 +1086,57 @@ def get_bundle_data_v2(dept_codes: list, start_date: str, end_date: str) -> dict
             # SmartCare 来源的患者，_id 本身就是 sc_pid
             pat["sc_pid"] = str(pat.get("_id", ""))
 
-    # ---- 阶段 4: V3 判定 → h1/h3/h6 计数 ----
+    # ---- 阶段 4: 批量预加载检验数据 ----
+    # 收集所有患者的 his_pid 和时间窗口，批量查询 VI_ICU_EXAM 和 VI_ICU_EXAM_ITEM
+    batch_lab_cache = {}
+    his_pids_with_time = []  # [(his_pid, window_start, eval_time), ...]
+    global_seen = set()  # 全局去重集合，用于跨批次去重
+
+    for pat in result["den_patients"]:
+        his_pid = pat.get("hisPid") or pat.get("mrn")
+        t0 = pat.get("t0")
+        if his_pid and t0:
+            # 计算时间窗口: T0-2h 到 T0+24h（覆盖 SOFA 评分所需的检验数据）
+            from datetime import timedelta
+            window_start = t0 - timedelta(hours=2) if isinstance(t0, datetime) else None
+            eval_time = t0 + timedelta(hours=24) if isinstance(t0, datetime) else None
+            if window_start and eval_time:
+                his_pids_with_time.append((his_pid, window_start, eval_time))
+
+    # 批量查询检验数据
+    if his_pids_with_time:
+        try:
+            from scoring.lab_batch import batch_fetch_lab_observations
+
+            # 计算全局窗口
+            all_window_starts = [w[1] for w in his_pids_with_time]
+            all_eval_times = [w[2] for w in his_pids_with_time]
+            global_window_start = min(all_window_starts)
+            global_eval_time = max(all_eval_times)
+
+            # 收集所有 his_pid
+            unique_his_pids = list(set(w[0] for w in his_pids_with_time))
+
+            # 连接 DataCenter
+            try:
+                dc = get_client("DataCenter")["DataCenter"]
+                batch_lab_cache = batch_fetch_lab_observations(
+                    dc=dc,
+                    his_pids=unique_his_pids,
+                    eval_time=global_eval_time,
+                    lookback_hours=int((global_eval_time - global_window_start).total_seconds() / 3600) + 1,
+                    seen=global_seen,
+                )
+                logger.info("Batch lab query completed: %d patients, %d total observations",
+                           len(batch_lab_cache), sum(len(obs) for obs in batch_lab_cache.values()))
+            except Exception as e:
+                logger.warning("Batch lab query failed: %s", e)
+                batch_lab_cache = {}
+        except ImportError:
+            logger.warning("lab_batch module not available, falling back to single queries")
+            batch_lab_cache = {}
+
+    # ---- 阶段 5: V3 判定 → h1/h3/h6 计数 ----
     # Resolve T0 per candidate; a SmartCare-only period must not rely on a
     # separate DataCenter candidate to receive its fallback T0.
     for pat in result["den_patients"]:
@@ -1100,6 +1150,7 @@ def get_bundle_data_v2(dept_codes: list, start_date: str, end_date: str) -> dict
         sc_pid = pat.get("sc_pid")
         t0 = pat.get("t0")
         diag = pat.get("diagnose", "")
+        his_pid = pat.get("hisPid") or pat.get("mrn")
         if not t0 or not sc_pid:
             pat["event_mapping_status"] = pat.get("event_mapping_status", "MISSING_EVENT_ID")
             continue
@@ -1107,7 +1158,8 @@ def get_bundle_data_v2(dept_codes: list, start_date: str, end_date: str) -> dict
             event_id = str(pat.get("dc_pid") or pat.get("_id") or sc_pid)
             pat["detail_id"] = build_exclusion_key(event_id, t0)
             pat["exclusion_key"] = pat["detail_id"]
-            v3 = judge_bundle_v3_for_patient(sc_pid, pat.get("_id", ""), pat.get("mrn", ""), t0, diag)
+            v3 = judge_bundle_v3_for_patient(sc_pid, pat.get("_id", ""), pat.get("mrn", ""), t0, diag,
+                                            batch_lab_cache=batch_lab_cache)
             pat["v3"] = v3
             # 分母判定: 使用候选引擎 (高召回四通道)
             # 旧口径: K1 AND K2 → 仅用于影子比对
@@ -2317,7 +2369,8 @@ def judge_bundle_for_dc_patient(dc_pid, t0, component, sc_pid, eval_time=None):
 
 
 def judge_bundle_v3_for_patient(sc_pid: str, dc_pid: str, mrn: str, t0: datetime,
-                                 diagnosis_text: str, eval_time=None) -> dict:
+                                 diagnosis_text: str, eval_time=None,
+                                 batch_lab_cache: dict = None) -> dict:
     """
     V3 版本的单患者 Bundle 全量判定。
 
@@ -2343,6 +2396,7 @@ def judge_bundle_v3_for_patient(sc_pid: str, dc_pid: str, mrn: str, t0: datetime
         t0: T0 时间 (datetime)
         diagnosis_text: 诊断文本 (管道符分隔)
         eval_time: 评估时间，默认 T0+24h
+        batch_lab_cache: 批量预加载的检验数据缓存 {his_pid: {observations, status, ...}}
 
     Returns:
         dict: 完整 v3 判定结果
@@ -2832,6 +2886,7 @@ def judge_bundle_v3_for_patient(sc_pid: str, dc_pid: str, mrn: str, t0: datetime
         sofa_result = compute_sofa_scores(
             sc_pid=sc_pid, mrn=mrn, dc_pid=dc_pid,
             t0=t0, eval_time=eval_time, weight_kg=None,
+            batch_lab_cache=batch_lab_cache,
         )
         result['sofa'] = {
             'classic': sofa_result['classic'],
@@ -2839,6 +2894,7 @@ def judge_bundle_v3_for_patient(sc_pid: str, dc_pid: str, mrn: str, t0: datetime
             'eval_time': str(eval_time),
             't0': str(t0),
             'version_meta': sofa_result.get('version_meta', {}),
+            'data_complete': sofa_result.get('data_complete', True),
         }
 
         # ---- 临床识别层 ----
