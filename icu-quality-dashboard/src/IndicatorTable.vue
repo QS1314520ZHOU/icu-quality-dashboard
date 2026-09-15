@@ -111,8 +111,19 @@
     <Modal v-if="detailData" :title="detailTitle" @close="detailData=null">
       <DetailModal :data="detailData" :period="period" :end-period="isMultiMonth ? periodEnd : ''" :unit="unit" :unit-name="deptName" />
     </Modal>
-    <!-- 月份单元格下钻弹窗：独立查询上下文 -->
+    <!-- 月份单元格下钻弹窗：独立查询上下文，支持分子/分母切换 -->
     <Modal v-if="monthDetailData" :title="monthDetailTitle" @close="closeMonthDetail">
+      <!-- 分子/分母切换标签 -->
+      <div v-if="monthDetailNumerator && monthDetailDenominator" class="part-tabs">
+        <button :class="['part-tab', { active: monthDetailPart === 'numerator' }]"
+                @click="switchMonthDetailPart('numerator')">
+          分子 ({{ monthDetailNumerator.count }})
+        </button>
+        <button :class="['part-tab', { active: monthDetailPart === 'denominator' }]"
+                @click="switchMonthDetailPart('denominator')">
+          分母 ({{ monthDetailDenominator.count }})
+        </button>
+      </div>
       <DetailModal :data="monthDetailData" :period="monthDetailPeriod" :end-period="''" :unit="unit" :unit-name="deptName"
                    @exclusion-changed="onMonthExclusionChanged" />
     </Modal>
@@ -155,6 +166,9 @@ const census = ref(null); const selectedRow = ref(null);
 // 月份单元格下钻
 const monthDetailData = ref(null);
 const monthDetailPeriod = ref('');
+const monthDetailPart = ref('numerator'); // 当前显示的分子/分母
+const monthDetailNumerator = ref(null);   // 分子数据缓存
+const monthDetailDenominator = ref(null); // 分母数据缓存
 const monthDetailAbort = ref(null); // 用于取消过期请求
 const guideVisible = ref(false);
 const deptName = computed(() => { if (!hostDeptCode.value || hostDeptCode.value === 'all') return '全部ICU'; return hostDeptCode.value; });
@@ -270,7 +284,7 @@ async function drillDetail(row, part) {
   }
 }
 
-// 月份单元格下钻：只查被点击月份
+// 月份单元格下钻：查询被点击月份的分子和分母
 async function drillMonthDetail(row, m) {
   const monthPeriod = `${year.value}-${String(m).padStart(2, '0')}`;
   // 0 和 null 严格区分：0 可以下钻，null 显示空态
@@ -285,12 +299,24 @@ async function drillMonthDetail(row, m) {
   monthDetailAbort.value = controller;
 
   monthDetailPeriod.value = monthPeriod;
+  monthDetailPart.value = 'numerator';
+  monthDetailNumerator.value = null;
+  monthDetailDenominator.value = null;
+
+  // 先显示加载状态
   const base = { code: row.code, name: row.name, part: 'numerator', count: 0, source_desc: '明细加载中...', patients: [], loading: true };
   monthDetailData.value = base;
+
+  // 并行获取分子和分母
   try {
-    const result = await apiFetchDetail(row.code, monthPeriod, 'numerator', unit.value, '', { limit: 200, offset: 0 });
+    const [numResult, denResult] = await Promise.all([
+      apiFetchDetail(row.code, monthPeriod, 'numerator', unit.value, '', { limit: 200, offset: 0 }),
+      apiFetchDetail(row.code, monthPeriod, 'denominator', unit.value, '', { limit: 200, offset: 0 })
+    ]);
     if (!controller.signal.aborted) {
-      monthDetailData.value = result;
+      monthDetailNumerator.value = numResult;
+      monthDetailDenominator.value = denResult;
+      monthDetailData.value = numResult; // 默认显示分子
     }
   } catch (e) {
     if (!controller.signal.aborted) {
@@ -299,12 +325,23 @@ async function drillMonthDetail(row, m) {
   }
 }
 
+// 切换分子/分母显示
+function switchMonthDetailPart(part) {
+  if (part === 'numerator' && monthDetailNumerator.value) {
+    monthDetailPart.value = 'numerator';
+    monthDetailData.value = monthDetailNumerator.value;
+  } else if (part === 'denominator' && monthDetailDenominator.value) {
+    monthDetailPart.value = 'denominator';
+    monthDetailData.value = monthDetailDenominator.value;
+  }
+}
+
 const detailTitle = computed(()=> detailData.value
   ? `${detailData.value.name} · ${detailData.value.part==='numerator'?'分子':'分母'}明细` : '');
 
 const monthDetailTitle = computed(() => {
   if (!monthDetailData.value) return '';
-  const part = monthDetailData.value.part === 'numerator' ? '分子' : '分母';
+  const part = monthDetailPart.value === 'numerator' ? '分子' : '分母';
   return `${monthDetailData.value.name} · ${monthDetailPeriod.value} · ${part}明细`;
 });
 
@@ -315,17 +352,28 @@ function closeMonthDetail() {
   }
   monthDetailData.value = null;
   monthDetailPeriod.value = '';
+  monthDetailPart.value = 'numerator';
+  monthDetailNumerator.value = null;
+  monthDetailDenominator.value = null;
 }
 
 function onMonthExclusionChanged() {
-  // 排除变更后重新加载该月详情
+  // 排除变更后重新加载当前part的详情
   if (monthDetailData.value && monthDetailPeriod.value) {
     const code = monthDetailData.value.code;
-    const part = monthDetailData.value.part;
+    const currentPart = monthDetailPart.value;
     const base = { ...monthDetailData.value, loading: true, patients: [], source_desc: '重新加载中...' };
     monthDetailData.value = base;
-    apiFetchDetail(code, monthDetailPeriod.value, part, unit.value, '', { limit: 200, offset: 0 })
-      .then(result => { monthDetailData.value = result; })
+    apiFetchDetail(code, monthDetailPeriod.value, currentPart, unit.value, '', { limit: 200, offset: 0 })
+      .then(result => {
+        monthDetailData.value = result;
+        // 更新对应的缓存
+        if (currentPart === 'numerator') {
+          monthDetailNumerator.value = result;
+        } else {
+          monthDetailDenominator.value = result;
+        }
+      })
       .catch(e => { monthDetailData.value = { ...base, loading: false, error: e.message }; });
   }
 }
@@ -676,4 +724,38 @@ window.addEventListener('status-config-updated', () => {
 .copyright-bar { text-align:center; padding:14px 0 6px; font-size:12px; color:var(--text-faint); }
 .copyright-bar { text-align:center; padding:14px 0 6px; font-size:12px; color:var(--text-faint); }
 .excl-badge { display: inline-block; margin-left: 6px; font-size: 10px; color: #E8A53D; background: rgba(232,165,61,0.1); border: 1px solid rgba(232,165,61,0.3); border-radius: 4px; padding: 1px 6px; font-weight: 600; vertical-align: middle; }
+
+/* 分子/分母切换标签 */
+.part-tabs {
+  display: flex;
+  gap: 0;
+  margin-bottom: 12px;
+  border: 1px solid var(--border);
+  border-radius: 8px;
+  overflow: hidden;
+  background: var(--bg-subtle);
+}
+.part-tab {
+  flex: 1;
+  padding: 10px 16px;
+  border: none;
+  background: transparent;
+  color: var(--text-sub);
+  font-size: 13px;
+  font-weight: 500;
+  cursor: pointer;
+  transition: all 0.2s;
+  border-right: 1px solid var(--border);
+}
+.part-tab:last-child {
+  border-right: none;
+}
+.part-tab:hover {
+  background: var(--bg-hover);
+  color: var(--brand);
+}
+.part-tab.active {
+  background: var(--brand);
+  color: #fff;
+}
 </style>

@@ -19,6 +19,8 @@ import config.indicator_windows as _cfg
 # ---- 升压药规范化 ----
 # 顺序即优先级，长名在前。肾上腺素必须排在去甲/异丙/苯/去氧之后。
 _DRUG_CANON_ORDERED = [
+    # --- 核心升压药 (vasopressors / inotropes) ---
+    # 顺序即优先级: 长名在前, 肾上腺素排在去甲/异丙/苯/去氧之后
     ("去甲肾上腺素", "norepinephrine"),
     ("noradrenaline", "norepinephrine"),
     ("norepinephrine", "norepinephrine"),
@@ -32,10 +34,18 @@ _DRUG_CANON_ORDERED = [
     ("多巴胺", "dopamine"),
     ("dopamine", "dopamine"),
     ("血管加压素", "vasopressin"),
+    ("垂体后叶", "vasopressin"),          # 垂体后叶素 = 血管加压素
+    ("垂体后叶素", "vasopressin"),
     ("vasopressin", "vasopressin"),
     ("特利加压素", "terlipressin"),
+    ("terlipressin", "terlipressin"),
+    ("间羟胺", "metaraminol"),
+    ("阿拉明", "metaraminol"),            # 间羟胺商品名
+    ("metaraminol", "metaraminol"),
     ("米力农", "milrinone"),
     ("milrinone", "milrinone"),
+    ("左西孟旦", "levosimendan"),
+    ("levosimendan", "levosimendan"),
     ("肾上腺素", "epinephrine"),
     ("adrenaline", "epinephrine"),
     ("epinephrine", "epinephrine"),

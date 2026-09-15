@@ -64,23 +64,83 @@ def _start_scheduler():
             wait_sec = (next_run - now).total_seconds()
             time_module.sleep(wait_sec)
             try:
-                print(f"[scheduler] Starting daily rebuild at {datetime.now()}")
-                summary_module.rebuild_recent(months=13)
+                logger.info("[scheduler] Starting daily rebuild at %s", datetime.now())
+                from scheduler import scheduler as sched_mgr
+                task_id = sched_mgr.record_start("daily_rebuild", periods=[], extra_info={"trigger": "cron"})
+                try:
+                    stats = summary_module.rebuild_recent(months=13)
+                    sched_mgr.record_finish(task_id, status="completed", stats=stats)
+                except Exception as e:
+                    logger.error("[scheduler] Daily rebuild failed: %s\n%s", e, traceback.format_exc())
+                    sched_mgr.record_finish(task_id, status="failed", error=str(e))
             except Exception as e:
-                print(f"[scheduler] Error: {e}")
+                logger.error("[scheduler] Scheduler error: %s", e)
 
     t = threading.Thread(target=_run_daily, daemon=True)
     t.start()
-    print("[scheduler] Daily rebuild scheduler started")
+    logger.info("[scheduler] Daily rebuild scheduler started")
+
+
+def _startup_completeness_check():
+    """启动后异步检查预聚合完整性并补算缺失月份。不阻塞 FastAPI。"""
+    try:
+        from scheduler import scheduler as sched_mgr, ensure_scheduler_collections
+        ensure_scheduler_collections()
+
+        # 检查是否有未完成的任务
+        incomplete = sched_mgr.check_incomplete_tasks(max_age_hours=24)
+        if incomplete:
+            logger.info("[startup] Found %d incomplete tasks, will retry", len(incomplete))
+
+        # 获取全部科室
+        dept_codes = summary_module._get_all_dept_codes()
+        if not dept_codes:
+            logger.warning("[startup] No dept codes found, skipping completeness check")
+            return
+
+        # 检查最近13个月完整性
+        periods = summary_module._natural_months_back(13)
+        missing = summary_module.find_missing_periods(dept_codes, periods)
+
+        if not missing:
+            logger.info("[startup] All %d periods complete, no rebuild needed", len(periods))
+            sched_mgr.record_finish(
+                sched_mgr.record_start("startup_check", periods, extra_info={"trigger": "startup"}),
+                status="completed",
+                stats={"skipped": len(periods), "missing": 0},
+            )
+            return
+
+        logger.info("[startup] %d/%d periods missing: %s, starting rebuild",
+                     len(missing), len(periods), missing)
+        task_id = sched_mgr.record_start("startup_rebuild", missing, extra_info={"trigger": "startup"})
+        try:
+            stats = summary_module.rebuild_summary(dept_codes, missing)
+            sched_mgr.record_finish(task_id, status="completed", stats=stats)
+            logger.info("[startup] Rebuild completed: %d/%d success", stats["success"], stats["total"])
+        except Exception as e:
+            logger.error("[startup] Rebuild failed: %s\n%s", e, traceback.format_exc())
+            sched_mgr.record_finish(task_id, status="failed", error=str(e))
+
+        # 同时补算明细缓存
+        try:
+            detail_stats = rebuild_detail_cache(dept_codes, missing)
+            logger.info("[startup] Detail cache rebuild: %d/%d success",
+                         detail_stats["success"], detail_stats["total"])
+        except Exception as e:
+            logger.warning("[startup] Detail cache rebuild failed: %s", e)
+
+    except Exception as e:
+        logger.error("[startup] Completeness check failed: %s\n%s", e, traceback.format_exc())
 
 
 @app.on_event("startup")
 def on_startup():
     try:
         available_dbs = assert_db_ready()
-        print(f"[startup] Available bed DBs: {available_dbs}")
+        logger.info("[startup] Available bed DBs: %s", available_dbs)
     except RuntimeError as e:
-        print(f"[startup] WARNING: {e}")
+        logger.warning("[startup] %s", e)
     summary_module.ensure_summary_collection()
     ensure_detail_cache_collection()
     ensure_exclusion_collection()
@@ -91,6 +151,8 @@ def on_startup():
     # 注入升压药标签 (VASO_WIDE)
     _inject_vaso_wide_labels()
     _start_scheduler()
+    # 启动后异步检查完整性
+    threading.Thread(target=_startup_completeness_check, daemon=True).start()
 
 
 def _inject_vaso_wide_labels():
@@ -197,15 +259,15 @@ def _invalidate_detail_cache(dept_codes, period, code):
         return
     try:
         coll.delete_many({"dept_code": _dept_cache_key(dept_codes), "period": period, "code": code})
-    except Exception:
-        pass
+    except Exception as e:
+        logger.warning("Failed to invalidate detail cache for %s/%s/%s: %s", dept_codes, period, code, e)
 
 
 def _trigger_summary_rebuild(dept_codes, periods, indicators=None):
     try:
         summary_module.rebuild_summary(dept_codes, periods, indicators=indicators)
-    except Exception:
-        pass
+    except Exception as e:
+        logger.error("Summary rebuild failed for %s/%s: %s\n%s", dept_codes, periods, e, traceback.format_exc())
 
 
 def _get_exclusion_map(dept_codes, period, code):
@@ -2339,6 +2401,49 @@ def dashboard_command_center(period: str, end_period: str = "", icu_unit: str = 
     except Exception:
         census = {"carry_in": 0, "new_admit": 0, "discharge": 0, "carry_out": 0, "total": 0}
 
+    # 检测数据完整性
+    data_complete = True
+    missing_periods = []
+    for row in rows:
+        if row.get("status") == "unknown":
+            # unknown 表示该指标在该月份无预聚合数据
+            monthly = row.get("monthly", [])
+            for i, val in enumerate(monthly):
+                if val is None and i < len(periods):
+                    mp = periods[i]
+                    if mp not in missing_periods:
+                        missing_periods.append(mp)
+    if missing_periods:
+        data_complete = False
+
+    # 调度器状态
+    try:
+        from scheduler import scheduler as sched_mgr
+        sched_status = sched_mgr.get_latest_status()
+        rebuilding = sched_status.get("rebuilding", False)
+        last_rebuilt_at = sched_mgr.get_last_success_at()
+    except Exception:
+        rebuilding = False
+        last_rebuilt_at = None
+
+    # 如果发现缺失月份且未在重建中，触发补算
+    if missing_periods and not rebuilding:
+        try:
+            import threading as _threading
+            def _bg_rebuild():
+                try:
+                    from scheduler import scheduler as _sched
+                    _task_id = _sched.record_start("auto_fix_missing", missing_periods,
+                                                    extra_info={"trigger": "command_center"})
+                    stats = summary_module.rebuild_summary(dept_codes, missing_periods)
+                    _sched.record_finish(_task_id, status="completed", stats=stats)
+                except Exception as e:
+                    logger.error("Auto-fix missing periods failed: %s", e)
+            _threading.Thread(target=_bg_rebuild, daemon=True).start()
+            rebuilding = True
+        except Exception:
+            pass
+
     return {
         "period": period,
         "end_period": end_period or period,
@@ -2372,6 +2477,11 @@ def dashboard_command_center(period: str, end_period: str = "", icu_unit: str = 
         "census": census if "census" in dir() else {},
         "census_trend": census_trend if "census_trend" in dir() else [],
         "updated_at": datetime.now().isoformat(timespec="seconds"),
+        # 数据完整性
+        "data_complete": data_complete,
+        "missing_periods": missing_periods,
+        "rebuilding": rebuilding,
+        "last_rebuilt_at": last_rebuilt_at,
     }
 
 @app.get("/api/indicators/list")
@@ -3316,7 +3426,11 @@ def admin_rebuild(dept: str = "all", start_period: str = "", end_period: str = "
 
 @app.get("/api/admin/rebuild-status")
 def admin_rebuild_status():
-    """查看最近一次预聚合状态"""
+    """查看最近一次预聚合状态（含调度器状态）。"""
+    from scheduler import scheduler as sched_mgr
+    sched_status = sched_mgr.get_latest_status()
+    last_success = sched_mgr.get_last_success_at()
+
     for db_name in BED_DB_NAMES:
         try:
             db = get_client()[db_name]
@@ -3332,9 +3446,63 @@ def admin_rebuild_status():
                 "depts": depts,
                 "indicators": sorted(indicators),
                 "latest_update": latest[0] if latest else None,
+                # 调度器状态
+                "scheduler": sched_status,
+                "last_success_at": last_success,
+                "rebuilding": sched_status.get("rebuilding", False),
             }
-        except Exception: continue
-    return {"error": "Database not available"}
+        except Exception:
+            continue
+    return {"error": "Database not available", "scheduler": sched_status, "rebuilding": sched_status.get("rebuilding", False)}
+
+
+@app.post("/api/admin/trigger-rebuild")
+def admin_trigger_rebuild(
+    periods: str = "",
+    force: bool = False,
+    dept: str = "all",
+):
+    """
+    手动触发预聚合重建。
+
+    POST /api/admin/trigger-rebuild?periods=2026-06,2026-07&force=true
+    POST /api/admin/trigger-rebuild  (自动补缺失月份)
+    """
+    from scheduler import scheduler as sched_mgr
+    import threading as _threading
+
+    dept_codes = _resolve_dept_codes(dept)
+
+    if periods:
+        period_list = [p.strip() for p in periods.split(",") if p.strip()]
+    else:
+        period_list = summary_module._natural_months_back(13)
+        if not force:
+            missing = summary_module.find_missing_periods(dept_codes, period_list)
+            if not missing:
+                return {"status": "no_missing", "message": "所有月份数据已完整"}
+            period_list = missing
+
+    task_id = sched_mgr.record_start("manual_rebuild", period_list,
+                                      extra_info={"trigger": "manual", "force": force, "dept": dept})
+
+    def _run():
+        try:
+            stats = summary_module.rebuild_summary(dept_codes, period_list)
+            sched_mgr.record_finish(task_id, status="completed", stats=stats)
+            # 补算明细缓存
+            historical = [p for p in period_list if _is_historical_period(p)]
+            if historical:
+                try:
+                    rebuild_detail_cache(dept_codes, historical)
+                except Exception as e:
+                    logger.warning("Detail cache rebuild failed during manual rebuild: %s", e)
+        except Exception as e:
+            logger.error("Manual rebuild failed: %s\n%s", e, traceback.format_exc())
+            sched_mgr.record_finish(task_id, status="failed", error=str(e))
+
+    _threading.Thread(target=_run, daemon=True).start()
+    return {"task_id": task_id, "status": "started", "periods": period_list, "force": force}
 
 
 # ---- 手动刷新端点（异步） ----

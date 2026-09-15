@@ -33,16 +33,24 @@ logger = logging.getLogger(__name__)
 VASO_WIDE_LABELS: set[str] = set()
 _wide_injected: bool = False
 
-# VASO_STRICT: SOFA-2 白名单 8 种 (硬编码)
+# VASO_STRICT: 核心升压药白名单 (硬编码)
+# 与 canon_drug() 互补: canon_drug 做模糊匹配, 这里做精确集合校验
 VASO_STRICT_LABELS = {
     "去甲肾上腺素", "norepinephrine",
     "肾上腺素", "epinephrine",
     "多巴胺", "dopamine",
     "多巴酚丁胺", "dobutamine",
     "血管加压素", "vasopressin",
+    "垂体后叶", "vasopressin",            # 垂体后叶素 = 血管加压素
+    "垂体后叶素", "vasopressin",
     "苯肾上腺素", "phenylephrine",
+    "去氧肾上腺素", "phenylephrine",
     "米力农", "milrinone",
     "异丙肾上腺素", "isoproterenol",
+    "间羟胺", "metaraminol",
+    "阿拉明", "metaraminol",              # 间羟胺商品名
+    "特利加压素", "terlipressin",
+    "左西孟旦", "levosimendan",
 }
 
 

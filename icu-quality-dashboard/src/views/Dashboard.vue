@@ -44,6 +44,14 @@
       <svg class="spin-icon" viewBox="0 0 16 16" fill="none" stroke="currentColor" stroke-width="1.5"><path d="M8 1v4M8 11v4M1 8h4M11 8h4M3.05 3.05l2.83 2.83M10.12 10.12l2.83 2.83M3.05 12.95l2.83-2.83M10.12 5.88l2.83-2.83"/></svg>
       正在读取预聚合质控数据...
     </div>
+    <div v-else-if="rebuilding" class="state rebuilding">
+      <svg class="spin-icon" viewBox="0 0 16 16" fill="none" stroke="currentColor" stroke-width="1.5"><path d="M8 1v4M8 11v4M1 8h4M11 8h4M3.05 3.05l2.83 2.83M10.12 10.12l2.83 2.83M3.05 12.95l2.83-2.83M10.12 5.88l2.83-2.83"/></svg>
+      后台补算中，正在处理缺失月份: {{ missingPeriods.join(', ') }}。页面将在完成后自动刷新。
+    </div>
+    <div v-else-if="!dataComplete && missingPeriods.length" class="state warning">
+      <svg viewBox="0 0 16 16" fill="none" stroke="currentColor" stroke-width="1.5"><path d="M8 1L15 14H1L8 1zM8 6v4M8 12h.01"/></svg>
+      部分月份数据缺失 ({{ missingPeriods.join(', ') }})，显示为「/」。点击刷新可触发补算。
+    </div>
 
     <!-- KPI 条 6 张：数值 + DeltaBadge(环比、同比) + Sparkline -->
     <section class="kpi-stats">
@@ -404,6 +412,12 @@ const guideVisible = ref(false);
 const censusData = ref(null);
 const censusTrend = ref([]);
 
+// 补算状态
+const rebuilding = ref(false);
+const missingPeriods = ref([]);
+const dataComplete = ref(true);
+let rebuildPollTimer = null;
+
 // 同比数据
 const yoyTrend = ref(null);
 const yoyMonths = ref(null);
@@ -664,6 +678,17 @@ async function loadData(nocache = false) {
     censusData.value = res.census || null;
     censusTrend.value = res.census_trend || [];
 
+    // 检测数据完整性
+    dataComplete.value = res.data_complete !== false;
+    missingPeriods.value = res.missing_periods || [];
+    if (res.rebuilding) {
+      rebuilding.value = true;
+      startRebuildPolling();
+    } else {
+      rebuilding.value = false;
+      stopRebuildPolling();
+    }
+
     // 尝试获取去年同期数据
     loadYoYData();
   } catch (e) {
@@ -707,6 +732,31 @@ async function loadYoYData() {
   }
 }
 
+// ---- 补算轮询 ----
+function startRebuildPolling() {
+  if (rebuildPollTimer) return;
+  rebuildPollTimer = setInterval(async () => {
+    try {
+      const status = await fetchRebuildStatus();
+      if (!status.rebuilding) {
+        rebuilding.value = false;
+        stopRebuildPolling();
+        // 刷新数据
+        loadData(true);
+      }
+    } catch {
+      // 轮询失败，保持当前状态
+    }
+  }, 5000);
+}
+
+function stopRebuildPolling() {
+  if (rebuildPollTimer) {
+    clearInterval(rebuildPollTimer);
+    rebuildPollTimer = null;
+  }
+}
+
 // ---- URL 同步 ----
 function syncFromURL() {
   const p = new URLSearchParams(window.location.search);
@@ -730,6 +780,11 @@ onMounted(() => {
   });
   syncFromURL();
   loadData();
+});
+
+// 组件卸载时清理轮询
+onUnmounted(() => {
+  stopRebuildPolling();
 });
 </script>
 
@@ -814,6 +869,8 @@ onMounted(() => {
   border: 1px solid rgba(30,94,184,0.15); display: flex; align-items: center; gap: 8px;
 }
 .state.error { background: var(--danger-weak); color: var(--danger); border-color: rgba(198,40,40,0.15); }
+.state.rebuilding { background: var(--warn-weak); color: var(--warn); border-color: rgba(178,106,0,0.15); }
+.state.warning { background: var(--warn-weak); color: var(--warn); border-color: rgba(178,106,0,0.15); }
 .spin-icon { width: 16px; height: 16px; animation: spin 1s linear infinite; flex-shrink: 0; }
 @keyframes spin { to { transform: rotate(360deg); } }
 

@@ -780,32 +780,81 @@ def rebuild_summary(dept_codes: list, periods: list, indicators: list = None,
     return stats
 
 
-def rebuild_recent(months: int = 13):
-    """重算最近 N 个月（默认 13 个月覆盖跨年）"""
+def _natural_months_back(n: int) -> list:
+    """自然月递减：从当前月往前推 n 个月，无重复无遗漏。"""
     now = datetime.utcnow()
-    periods = []
-    for i in range(months):
-        d = now - timedelta(days=30 * i)
-        periods.append(f"{d.year}-{d.month:02d}")
-    periods.reverse()
+    result = []
+    year, month = now.year, now.month
+    for _ in range(n):
+        result.append(f"{year}-{month:02d}")
+        month -= 1
+        if month < 1:
+            month = 12
+            year -= 1
+    result.reverse()
+    return result
 
-    # 获取全部科室
-    dept_codes = []
+
+def find_missing_periods(dept_codes: list, periods: list) -> list:
+    """检查预聚合表中缺失的月份列表。"""
+    for db_name in BED_DB_NAMES:
+        try:
+            db = get_client(db_name)[db_name]
+            coll = db[SUMMARY_COLLECTION]
+            dept_key = ",".join(dept_codes) if len(dept_codes) > 1 else (dept_codes[0] if dept_codes else "all")
+            existing = {
+                doc["period"]
+                for doc in coll.find(
+                    {"dept_code": dept_key, "period": {"$in": periods}},
+                    {"period": 1, "_id": 0},
+                )
+            }
+            return [p for p in periods if p not in existing]
+        except Exception:
+            continue
+    return list(periods)
+
+
+def _get_all_dept_codes() -> list:
+    """从数据库获取全部科室编码。"""
     for db_name in BED_DB_NAMES:
         try:
             db = get_client(db_name)[db_name]
             docs = list(db.department.find({}, {"code": 1}))
             if docs:
-                dept_codes = [d["code"] for d in docs]
-                break
-        except Exception: continue
+                return [d["code"] for d in docs]
+        except Exception:
+            continue
+    return []
 
-    print(f"[rebuild] Starting rebuild: {len(dept_codes)} depts × {len(periods)} periods = ~{len(dept_codes)*len(periods)} calcs")
+
+def rebuild_recent(months: int = 13, force: bool = False):
+    """
+    重算最近 N 个月（默认 13 个月覆盖跨年）。
+
+    使用自然月递减算法，确保无重复无遗漏。
+    force=True 时重算所有月份；否则只补缺失月份。
+    """
+    periods = _natural_months_back(months)
+    dept_codes = _get_all_dept_codes()
+    if not dept_codes:
+        logger.warning("[rebuild] No department codes found, using fallback")
+        dept_codes = ["JJL000282", "JJL000283", "0801"]
+
+    if not force:
+        missing = find_missing_periods(dept_codes, periods)
+        if not missing:
+            logger.info("[rebuild] All %d periods already present, skipping", len(periods))
+            return {"total": 0, "success": 0, "failed": 0, "skipped": len(periods), "errors": []}
+        logger.info("[rebuild] %d/%d periods missing, rebuilding only missing", len(missing), len(periods))
+        periods = missing
+
+    logger.info("[rebuild] Starting rebuild: %d depts × %d periods", len(dept_codes), len(periods))
     stats = rebuild_summary(dept_codes, periods)
-    print(f"[rebuild] Done: {stats['success']}/{stats['total']} success, {stats['failed']} failed")
+    logger.info("[rebuild] Done: %d/%d success, %d failed", stats["success"], stats["total"], stats["failed"])
     if stats["errors"]:
         for e in stats["errors"][:5]:
-            print(f"  FAIL: {e['period']} {e['indicator']}: {e['error']}")
+            logger.error("[rebuild] FAIL: %s %s: %s", e["period"], e["indicator"], e["error"])
     return stats
 
 

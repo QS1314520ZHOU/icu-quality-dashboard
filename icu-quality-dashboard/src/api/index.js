@@ -142,6 +142,21 @@ export async function getRefreshStatus(taskId) {
   return res.json();
 }
 
+// ---- 调度器状态 ----
+export async function fetchRebuildStatus() {
+  const res = await fetch(`${BASE}/admin/rebuild-status`);
+  return res.json();
+}
+
+export async function triggerRebuild(periods = '', force = false, dept = 'all') {
+  const params = new URLSearchParams();
+  if (periods) params.set('periods', periods);
+  if (force) params.set('force', 'true');
+  if (dept) params.set('dept', dept);
+  const res = await fetch(`${BASE}/admin/trigger-rebuild?${params.toString()}`, { method: 'POST' });
+  return res.json();
+}
+
 // ---- 人工排除 ----
 export async function fetchExclusions(code, period, icuUnit = 'all') {
   const resp = await fetch(`${BASE}/indicators/${code}/exclusions?period=${period}&icu_unit=` + encodeURIComponent(icuUnit));

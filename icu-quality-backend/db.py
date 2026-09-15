@@ -981,7 +981,8 @@ def get_bundle_data_v2(dept_codes: list, start_date: str, end_date: str) -> dict
                 },
             }
         if dept_codes:
-            dc_query["deptCode"] = {"$in": dept_codes}
+            # #修复: VI_ICU_ZYBR.deptCode 是字符串类型，需转为 str 匹配
+            dc_query["deptCode"] = {"$in": [str(c) for c in dept_codes]}
         dc_diagnoses = list(dc.VI_ICU_ZYBR.find(
             dc_query,
             {
@@ -1005,8 +1006,10 @@ def get_bundle_data_v2(dept_codes: list, start_date: str, end_date: str) -> dict
             # 收集 DC pid 用于批量查 T0
             dc_pids_for_t0 = []
 
+            # #修复: deptCode 是字符串，需与 str 类型比较
+            dept_codes_str = {str(c) for c in dept_codes} if dept_codes else set()
             for dx in dc_diagnoses:
-                if dept_codes and dx.get("deptCode") not in dept_codes:
+                if dept_codes_str and str(dx.get("deptCode", "")) not in dept_codes_str:
                     continue
                 mrn = str(dx.get("mrn") or "").strip()
                 patient_id = str(dx.get("pid") or "").strip()
@@ -2472,8 +2475,8 @@ def judge_bundle_v3_for_patient(sc_pid: str, dc_pid: str, mrn: str, t0: datetime
                 continue
             for dl in vd.get('drugList', []):
                 name = str(dl.get('name', ''))
-                in_wide, _ = _classify_vasopressor(name)
-                if in_wide:
+                in_wide, in_strict = _classify_vasopressor(name)
+                if in_wide or in_strict:
                     actions = vd.get('drugActionList') or []
                     # 检查是否在T0时仍在使用
                     is_prestarter = st <= t0
