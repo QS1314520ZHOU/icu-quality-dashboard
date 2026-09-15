@@ -298,7 +298,7 @@ def _fetch_score_observations(
 
 def _fetch_lab_observations(
     dc, his_pid: str, eval_time: datetime, lookback_hours: int = 24
-) -> List[dict]:
+) -> dict:
     """
     从 VI_ICU_EXAM (主表) + VI_ICU_EXAM_ITEM (子表) 提取检验观测。
     包括: PLT(血小板), TBIL(胆红素), CREA(肌酐)。
@@ -310,12 +310,25 @@ def _fetch_lab_observations(
     4. 数值优先取 itemValue (而非 result)
     5. 时间优先取 collectTime (采样时间)
     6. 处理同一标本重复项目和更正报告
+
+    返回:
+        {
+            "observations": List[dict],  # 观测列表
+            "status": str,  # "success" | "no_data" | "timeout" | "query_error"
+            "error": Optional[str],  # 错误信息
+            "data_complete": bool  # 数据是否完整
+        }
     """
     observations = []
     window_start = eval_time - timedelta(hours=lookback_hours)
 
     if dc is None:
-        return observations
+        return {
+            "observations": [],
+            "status": "query_error",
+            "error": "DataCenter unavailable",
+            "data_complete": False
+        }
 
     # itemCode → 标准码映射 (多编码兼容)
     LAB_MAP = {
@@ -338,7 +351,12 @@ def _fetch_lab_observations(
         ).max_time_ms(10000).limit(200))
 
         if not exam_docs:
-            return observations
+            return {
+                "observations": [],
+                "status": "no_data",
+                "error": None,
+                "data_complete": True
+            }
 
         # 构建 examID 和 reportID 集合及时间映射
         exam_ids = []
@@ -356,7 +374,12 @@ def _fetch_lab_observations(
                 exam_time_by_id[str(rid)] = ct
 
         if not exam_ids and not report_ids:
-            return observations
+            return {
+                "observations": [],
+                "status": "no_data",
+                "error": None,
+                "data_complete": True
+            }
 
         # Step 2: 查子表，同时用 examID 和 reportID 关联
         # 优先用 examID，如果子表有 reportID 字段也支持
@@ -423,10 +446,31 @@ def _fetch_lab_observations(
                     "item_name": doc.get("itemName", ""),
                     "source": "VI_ICU_EXAM_ITEM",
                 })
+
+        return {
+            "observations": observations,
+            "status": "success",
+            "error": None,
+            "data_complete": True
+        }
+
     except Exception as e:
+        error_msg = str(e)
+        if "MaxTimeMSExpired" in error_msg:
+            status = "timeout"
+        elif "MongoNetworkError" in error_msg:
+            status = "query_error"
+        else:
+            status = "query_error"
+
         logger.warning("lab fetch failed for his_pid=%s: %s", his_pid, e)
 
-    return observations
+        return {
+            "observations": [],
+            "status": status,
+            "error": error_msg,
+            "data_complete": False
+        }
 
 
 def _fetch_ventilator_status(sc, sc_pid: str, eval_time: datetime) -> bool:
@@ -868,6 +912,7 @@ def fetch_patient_obs_meds(
     t0: datetime,
     eval_time: Optional[datetime] = None,
     weight_kg: Optional[float] = None,
+    batch_lab_cache: Optional[Dict[str, Any]] = None,
 ) -> dict:
     """
     从 MongoDB 提取患者观测和用药数据，转换为 SOFA 评分器格式。
@@ -879,6 +924,8 @@ def fetch_patient_obs_meds(
         t0: T0 时间
         eval_time: 评估时间，默认 T0+24h
         weight_kg: 体重 (可选，自动从数据库获取)
+        batch_lab_cache: 批量查询缓存，格式 {his_pid: {"observations": [...], "status": "..."}}
+                        如果提供，直接使用缓存数据，不执行单独查询
 
     Returns:
         {
@@ -946,10 +993,41 @@ def fetch_patient_obs_meds(
     observations.extend(score_obs)
     fetch_meta["score_count"] = len(score_obs)
 
-    # VI_ICU_EXAM_ITEM (PLT, TBIL, CREA)
-    lab_obs = _fetch_lab_observations(dc, dc_pid, eval_time)
+    # VI_ICU_EXAM_ITEM (PLT, TBIL, CREA) - 支持批量缓存
+    if batch_lab_cache and dc_pid in batch_lab_cache:
+        # 使用批量缓存
+        lab_result = batch_lab_cache[dc_pid]
+        lab_obs = lab_result.get("observations", [])
+        lab_status = lab_result.get("status", "success")
+        lab_error = lab_result.get("error")
+        lab_data_complete = lab_result.get("data_complete", True)
+        logger.debug("Using batch lab cache for his_pid=%s, count=%d, status=%s",
+                    dc_pid, len(lab_obs), lab_status)
+    else:
+        # 降级为单患者查询（向后兼容）
+        lab_result = _fetch_lab_observations(dc, dc_pid, eval_time)
+        lab_obs = lab_result.get("observations", [])
+        lab_status = lab_result.get("status", "success")
+        lab_error = lab_result.get("error")
+        lab_data_complete = lab_result.get("data_complete", True)
+
     observations.extend(lab_obs)
     fetch_meta["lab_count"] = len(lab_obs)
+    fetch_meta["lab_status"] = lab_status
+    fetch_meta["lab_error"] = lab_error
+    fetch_meta["lab_data_complete"] = lab_data_complete
+    fetch_meta["lab_source"] = "batch_cache" if (batch_lab_cache and dc_pid in batch_lab_cache) else "single_query"
+
+    # 关键：超时不能转成 K1=False 或器官功能正常
+    if lab_status == "timeout":
+        flags.append("lab_query_timeout")
+        # 不得将超时误判为无检验数据
+        # 后续 SOFA 计算时，缺失的器官应返回 None 而非 0
+    elif lab_status == "query_error":
+        flags.append("lab_query_error")
+    elif lab_status == "no_data":
+        # 查询成功但无数据，这是正常情况
+        pass
 
     fetch_meta["total_obs_count"] = len(observations)
 
@@ -984,6 +1062,15 @@ def fetch_patient_obs_meds(
     if missing_critical:
         flags.append(f"missing_observations: {len(missing_critical)} critical codes absent: {','.join(sorted(missing_critical))}")
 
+    # 6. 计算数据完整性
+    # 如果任何关键数据源查询失败（timeout/query_error），则数据不完整
+    data_complete = (
+        fetch_meta.get("lab_data_complete", True) and
+        "lab_query_timeout" not in flags and
+        "lab_query_error" not in flags and
+        "DB_CONNECTION_FAILED" not in flags
+    )
+
     return {
         "observations": observations,
         "medications": medications,
@@ -993,4 +1080,5 @@ def fetch_patient_obs_meds(
         "has_vasopressor_wide": has_vaso_wide,
         "data_quality_flags": flags,
         "fetch_meta": fetch_meta,
+        "data_complete": data_complete,
     }
