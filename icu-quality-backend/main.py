@@ -66,13 +66,23 @@ def _start_scheduler():
             try:
                 logger.info("[scheduler] Starting daily rebuild at %s", datetime.now())
                 from scheduler import scheduler as sched_mgr
-                task_id = sched_mgr.record_start("daily_rebuild", periods=[], extra_info={"trigger": "cron"})
+
+                # 获取分布式锁
+                if not sched_mgr.acquire_lock("daily_rebuild"):
+                    logger.warning("[scheduler] Cannot acquire lock, skip daily rebuild")
+                    continue
+
+                task_id = None
                 try:
+                    task_id = sched_mgr.record_start("daily_rebuild", periods=[], extra_info={"trigger": "cron"})
                     stats = summary_module.rebuild_recent(months=13)
                     sched_mgr.record_finish(task_id, status="completed", stats=stats)
                 except Exception as e:
                     logger.error("[scheduler] Daily rebuild failed: %s\n%s", e, traceback.format_exc())
-                    sched_mgr.record_finish(task_id, status="failed", error=str(e))
+                    if task_id:
+                        sched_mgr.record_finish(task_id, status="failed", error=str(e))
+                finally:
+                    sched_mgr.release_lock("daily_rebuild")
             except Exception as e:
                 logger.error("[scheduler] Scheduler error: %s", e)
 
@@ -98,49 +108,54 @@ def _startup_completeness_check():
             logger.warning("[startup] No dept codes found, skipping completeness check")
             return
 
-        # 检查最近13个月完整性
-        periods = summary_module._natural_months_back(13)
-        historical_periods = periods[:-1]
-        current_period = periods[-1]
-
-        # 历史月份只补缺失，当前月每天强制重算
-        missing_historical = summary_module.find_missing_periods(dept_codes, historical_periods)
-
-        # 当前月始终加入重算列表
-        periods_to_rebuild = missing_historical + [current_period]
-        # 去重
-        periods_to_rebuild = list(dict.fromkeys(periods_to_rebuild))
-
-        if not periods_to_rebuild:
-            logger.info("[startup] All %d periods complete, no rebuild needed", len(periods))
-            sched_mgr.record_finish(
-                sched_mgr.record_start("startup_check", periods, extra_info={"trigger": "startup"}),
-                status="completed",
-                stats={"skipped": len(periods), "missing": 0},
-            )
+        # 获取分布式锁
+        if not sched_mgr.acquire_lock("startup_rebuild"):
+            logger.warning("[startup] Cannot acquire lock, skip rebuild")
             return
 
-        logger.info("[startup] %d periods to rebuild: %s (historical missing: %d, current month: %s)",
-                     len(periods_to_rebuild), periods_to_rebuild, len(missing_historical), current_period)
-        task_id = sched_mgr.record_start("startup_rebuild", periods_to_rebuild, extra_info={"trigger": "startup"})
+        task_id = None
         try:
+            # 检查最近13个月完整性
+            periods = summary_module._natural_months_back(13)
+            historical_periods = periods[:-1]
+            current_period = periods[-1]
+
+            # 历史月份只补缺失，当前月每天强制重算
+            missing_historical = summary_module.find_missing_periods(dept_codes, historical_periods)
+
+            # 当前月始终加入重算列表
+            periods_to_rebuild = list(dict.fromkeys(missing_historical + [current_period]))
+
+            if not periods_to_rebuild:
+                logger.info("[startup] All %d periods complete, no rebuild needed", len(periods))
+                task_id = sched_mgr.record_start("startup_check", periods, extra_info={"trigger": "startup"})
+                sched_mgr.record_finish(task_id, status="completed", stats={"skipped": len(periods), "missing": 0})
+                return
+
+            logger.info("[startup] %d periods to rebuild: %s (historical missing: %d, current month: %s)",
+                         len(periods_to_rebuild), periods_to_rebuild, len(missing_historical), current_period)
+            task_id = sched_mgr.record_start("startup_rebuild", periods_to_rebuild, extra_info={"trigger": "startup"})
             stats = summary_module.rebuild_summary(dept_codes, periods_to_rebuild)
             sched_mgr.record_finish(task_id, status="completed", stats=stats)
             logger.info("[startup] Rebuild completed: %d/%d success", stats["success"], stats["total"])
+
+            # 同时补算明细缓存
+            try:
+                detail_stats = rebuild_detail_cache(dept_codes, periods_to_rebuild)
+                logger.info("[startup] Detail cache rebuild: %d/%d success",
+                             detail_stats["success"], detail_stats["total"])
+            except Exception as e:
+                logger.warning("[startup] Detail cache rebuild failed: %s", e)
+
+            # 清理进程内缓存
+            _cache_clear()
+
         except Exception as e:
             logger.error("[startup] Rebuild failed: %s\n%s", e, traceback.format_exc())
-            sched_mgr.record_finish(task_id, status="failed", error=str(e))
-
-        # 同时补算明细缓存
-        try:
-            detail_stats = rebuild_detail_cache(dept_codes, periods_to_rebuild)
-            logger.info("[startup] Detail cache rebuild: %d/%d success",
-                         detail_stats["success"], detail_stats["total"])
-        except Exception as e:
-            logger.warning("[startup] Detail cache rebuild failed: %s", e)
-
-        # 清理进程内缓存
-        _cache_clear()
+            if task_id:
+                sched_mgr.record_finish(task_id, status="failed", error=str(e))
+        finally:
+            sched_mgr.release_lock("startup_rebuild")
 
     except Exception as e:
         logger.error("[startup] Completeness check failed: %s\n%s", e, traceback.format_exc())
@@ -2442,16 +2457,26 @@ def dashboard_command_center(period: str, end_period: str = "", icu_unit: str = 
     if missing_periods and not rebuilding:
         try:
             import threading as _threading
-            current_period = periods[0] if periods else None
-            # 当前月始终加入重算列表
-            all_to_rebuild = list(dict.fromkeys(missing_periods + ([current_period] if current_period else [])))
+            # 使用实际自然月作为当前月（不是查询范围的第一天）
+            from datetime import datetime as _dt
+            actual_current_period = _dt.now().strftime("%Y-%m")
+            # 仅当实际当前月在查询范围时才加入重算列表
+            all_to_rebuild = list(missing_periods)
+            if actual_current_period in periods and actual_current_period not in all_to_rebuild:
+                all_to_rebuild.append(actual_current_period)
             def _bg_rebuild():
                 try:
                     from scheduler import scheduler as _sched
-                    _task_id = _sched.record_start("auto_fix_missing", all_to_rebuild,
-                                                    extra_info={"trigger": "command_center"})
-                    stats = summary_module.rebuild_summary(dept_codes, all_to_rebuild)
-                    _sched.record_finish(_task_id, status="completed", stats=stats)
+                    if not _sched.acquire_lock("auto_fix_missing"):
+                        logger.warning("[command_center] Cannot acquire lock, skip rebuild")
+                        return
+                    try:
+                        _task_id = _sched.record_start("auto_fix_missing", all_to_rebuild,
+                                                        extra_info={"trigger": "command_center"})
+                        stats = summary_module.rebuild_summary(dept_codes, all_to_rebuild)
+                        _sched.record_finish(_task_id, status="completed", stats=stats)
+                    finally:
+                        _sched.release_lock("auto_fix_missing")
                 except Exception as e:
                     logger.error("Auto-fix missing periods failed: %s", e)
             _threading.Thread(target=_bg_rebuild, daemon=True).start()

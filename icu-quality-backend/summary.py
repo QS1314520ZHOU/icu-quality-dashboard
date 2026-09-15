@@ -808,8 +808,8 @@ def _natural_months_back(n: int) -> list:
 
 def find_missing_periods(dept_codes: list, periods: list) -> list:
     """检查预聚合表中缺失的月份列表（按指标维度检查）。
-    只要该月份有任何指标缺失，就返回该月份。
-    兼容旧格式（无indicator字段的记录视为完整）。
+    只要该月份有任何指标缺失或使用旧格式（无indicator字段），就返回该月份。
+    旧格式记录不视为完整，需要强制重算以迁移为新格式。
     """
     for db_name in BED_DB_NAMES:
         try:
@@ -839,15 +839,16 @@ def find_missing_periods(dept_codes: list, periods: list) -> list:
 
             # 对于每个 period，检查是否有任何指标缺失
             # 如果一个 period 没有任何记录，肯定缺失
-            # 如果一个 period 有旧格式记录（无indicator），视为完整（向后兼容）
+            # 如果一个 period 有旧格式记录（无indicator），也需要重算（迁移为新格式）
             missing = []
             for p in periods:
                 if p not in existing_indicators:
                     # 完全无记录
                     missing.append(p)
                 elif p in has_old_format:
-                    # 有旧格式记录，视为完整（向后兼容）
-                    pass
+                    # 有旧格式记录，需要重算以迁移到新格式
+                    logger.info("[find_missing] %s has old format (no indicator), needs rebuild", p)
+                    missing.append(p)
                 else:
                     # 有新格式记录，检查是否所有必需指标都有
                     indicators = existing_indicators[p]
@@ -885,6 +886,7 @@ def rebuild_recent(months: int = 13, force: bool = False):
 
     使用自然月递减算法，确保无重复无遗漏。
     force=True 时重算所有月份；否则只补缺失月份。
+    当前自然月始终强制重算（不跳过）。
     """
     periods = _natural_months_back(months)
     dept_codes = _get_all_dept_codes()
@@ -893,12 +895,23 @@ def rebuild_recent(months: int = 13, force: bool = False):
         dept_codes = ["JJL000282", "JJL000283", "0801"]
 
     if not force:
-        missing = find_missing_periods(dept_codes, periods)
-        if not missing:
-            logger.info("[rebuild] All %d periods already present, skipping", len(periods))
+        # 分离历史月份和当前月
+        historical_periods = periods[:-1]
+        current_period = periods[-1]
+
+        # 历史月份只补缺失
+        missing_historical = find_missing_periods(dept_codes, historical_periods)
+
+        # 当前月始终加入重算列表（不检查是否已有数据）
+        periods_to_rebuild = list(dict.fromkeys(missing_historical + [current_period]))
+
+        if not periods_to_rebuild:
+            logger.info("[rebuild] All %d periods complete, no rebuild needed", len(periods))
             return {"total": 0, "success": 0, "failed": 0, "skipped": len(periods), "errors": []}
-        logger.info("[rebuild] %d/%d periods missing, rebuilding only missing", len(missing), len(periods))
-        periods = missing
+
+        logger.info("[rebuild] %d periods to rebuild: %s (historical missing: %d, current month: %s)",
+                     len(periods_to_rebuild), periods_to_rebuild, len(missing_historical), current_period)
+        periods = periods_to_rebuild
 
     logger.info("[rebuild] Starting rebuild: %d depts × %d periods", len(dept_codes), len(periods))
     stats = rebuild_summary(dept_codes, periods)

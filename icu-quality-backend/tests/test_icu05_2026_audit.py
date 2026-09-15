@@ -282,8 +282,9 @@ class TestMissingPeriodsDetection:
                 assert missing == ["2026-06", "2026-07", "2026-08", "2026-09"]
 
     def test_partial_2026_06_to_09(self):
-        """部分月份存在"""
+        """部分月份存在（旧格式视为缺失）"""
         periods = ["2026-06", "2026-07", "2026-08", "2026-09"]
+        # 旧格式文档（无indicator字段）现在被视为缺失
         mock_client = self._make_mock_client(
             [{"period": "2026-06"}, {"period": "2026-08"}]
         )
@@ -291,4 +292,5 @@ class TestMissingPeriodsDetection:
         with patch("summary.get_client", return_value=mock_client):
             with patch("summary.BED_DB_NAMES", ["test_db"]):
                 missing = find_missing_periods(["JJL000282"], periods)
-                assert missing == ["2026-07", "2026-09"]
+                # 旧格式（无indicator）需要重算
+                assert missing == ["2026-06", "2026-07", "2026-08", "2026-09"]
