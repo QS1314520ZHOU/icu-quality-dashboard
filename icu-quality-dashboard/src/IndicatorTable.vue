@@ -133,7 +133,6 @@
     <Transition name="toast-fade">
       <div v-if="toast.show" class="toast" :class="toast.type">{{ toast.message }}</div>
     </Transition>
-    <div class="copyright-bar">© 2026 ICU医疗质量控制中心 版权所有</div>
   </div>
 </template>
 
@@ -721,8 +720,6 @@ window.addEventListener('status-config-updated', () => {
 .census-item small { font-size:var(--fs-caption); color:var(--text-sub); }
 .census-item b { font-size:15px; color:#0f172a; font-family:'Cascadia Code','Consolas',monospace; }
 .census-item.total b { color:var(--brand); }
-.copyright-bar { text-align:center; padding:14px 0 6px; font-size:12px; color:var(--text-faint); }
-.copyright-bar { text-align:center; padding:14px 0 6px; font-size:12px; color:var(--text-faint); }
 .excl-badge { display: inline-block; margin-left: 6px; font-size: 10px; color: #E8A53D; background: rgba(232,165,61,0.1); border: 1px solid rgba(232,165,61,0.3); border-radius: 4px; padding: 1px 6px; font-weight: 600; vertical-align: middle; }
 
 /* 分子/分母切换标签 */
