@@ -46,6 +46,9 @@
     <div class="components" v-if="currentScore && currentScoreTotal != null">
       <div v-for="(value, organ) in currentScore.components" :key="organ" class="component">
         <span class="organ-name">{{ organLabels[organ] || organ }}</span>
+        <span class="organ-detail" v-if="componentDetails[organ]">
+          {{ formatDetail(componentDetails[organ]) }}
+        </span>
         <div class="score-bar">
           <div
             class="bar-fill"
@@ -82,7 +85,7 @@
     <div class="flags" v-if="currentQualityFlags.length > 0">
       <h4>数据质量标志</h4>
       <div v-for="flag in currentQualityFlags" :key="flag" class="flag">
-        ⚠️ {{ flag }}
+        ⚠️ {{ flagLabels[flag] || flag }}
       </div>
     </div>
 
@@ -186,6 +189,11 @@ const currentQualityFlags = computed(() => {
   return currentScore.value.data_quality_flags || [];
 });
 
+const componentDetails = computed(() => {
+  if (!props.sofa2Score) return {};
+  return props.sofa2Score.sofa2_component_details || {};
+});
+
 const versionMeta = computed(() => {
   if (!props.sofaData?.version_meta) return null;
   return version.value === 'classic'
@@ -273,6 +281,45 @@ const organLabels = {
   brain: '脑',
   kidney: '肾脏',
 };
+
+const flagLabels = {
+  respiratory_missing: '呼吸数据缺失',
+  hemostasis_missing: '止血数据缺失',
+  liver_missing: '肝脏数据缺失',
+  brain_missing: '脑功能数据缺失',
+  kidney_missing: '肾脏数据缺失',
+  cardiovascular_missing: '心血管数据缺失',
+  respiratory_stale: '呼吸数据过期',
+  hemostasis_stale: '止血数据过期',
+  liver_stale: '肝脏数据过期',
+  kidney_creatinine_stale: '肌酐数据过期',
+  kidney_urine_stale: '尿量数据过期',
+  hemostasis_out_of_range: '止血数值超范围',
+  kidney_creatinine_out_of_range: '肌酐数值超范围',
+  urine_unit_unknown: '尿量单位未知',
+  route_unknown: '氧疗途径未知',
+};
+
+function formatDetail(detail) {
+  if (!detail) return '';
+  // 肾脏有多个子项
+  if (detail.creatinine || detail.urine) {
+    const parts = [];
+    if (detail.creatinine) parts.push(`Cr ${detail.creatinine.value}${detail.creatinine.unit}`);
+    if (detail.urine) parts.push(`尿 ${detail.urine.value}${detail.urine.unit}`);
+    return parts.join(' / ');
+  }
+  // 心血管有多个子项
+  if (detail.ne_epi_sum || detail.map) {
+    const parts = [];
+    if (detail.ne_epi_sum) parts.push(`NE ${detail.ne_epi_sum.value}${detail.ne_epi_sum.unit}`);
+    if (detail.map) parts.push(`MAP ${detail.map.value}${detail.map.unit}`);
+    return parts.join(' / ');
+  }
+  // 其他器官单值
+  if (detail.value != null) return `${detail.value}${detail.unit || ''}`;
+  return '';
+}
 
 function barClass(value) {
   if (value == null) return 'bar-missing';
@@ -403,6 +450,13 @@ h4 {
   width: 80px;
   font-size: 13px;
   color: #4b5563;
+}
+
+.organ-detail {
+  font-size: 11px;
+  color: #9ca3af;
+  min-width: 80px;
+  text-align: right;
 }
 
 .score-bar {

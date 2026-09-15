@@ -349,7 +349,7 @@
       <div class="card-title">⚠️ 数据质量标记</div>
       <div class="quality-list">
         <div class="quality-item" v-for="flag in data.data_quality_flags" :key="flag">
-          {{ flag }}
+          {{ FLAG_LABELS[flag] || flag }}
         </div>
       </div>
     </div>
@@ -384,6 +384,23 @@ const CONFIRMATION_STATUS_MAP = {
   'confirmed': '符合电子确认规则',
   'pending_review': '待人工复核',
   'insufficient': '证据不足',
+}
+const FLAG_LABELS = {
+  'respiratory_missing': '呼吸数据缺失',
+  'hemostasis_missing': '止血数据缺失',
+  'liver_missing': '肝脏数据缺失',
+  'brain_missing': '脑功能数据缺失',
+  'kidney_missing': '肾脏数据缺失',
+  'cardiovascular_missing': '心血管数据缺失',
+  'respiratory_stale': '呼吸数据过期',
+  'hemostasis_stale': '止血数据过期',
+  'liver_stale': '肝脏数据过期',
+  'kidney_creatinine_stale': '肌酐数据过期',
+  'kidney_urine_stale': '尿量数据过期',
+  'hemostasis_out_of_range': '止血数值超范围',
+  'kidney_creatinine_out_of_range': '肌酐数值超范围',
+  'urine_unit_unknown': '尿量单位未知',
+  'route_unknown': '氧疗途径未知',
 }
 const PATHWAY_MAP = {
   'diagnosis': '通道A - 明确诊断',

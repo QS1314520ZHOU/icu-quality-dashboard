@@ -371,7 +371,7 @@ def _calc_hemostasis(
     eval_time: datetime,
 ) -> Tuple[Optional[int], Dict[str, Any]]:
     info: Dict[str, Any] = {}
-    val, _, _, is_stale = _worst_in_window(
+    val, unit, _, is_stale = _worst_in_window(
         obs, _TH["hemostasis"]["codes"], eval_time,
         _TH["hemostasis"]["lookback_hours"],
         _TH["hemostasis"]["max_staleness_hours"],
@@ -385,6 +385,8 @@ def _calc_hemostasis(
     if not _range_ok(val, _TH["hemostasis"].get("range_guard")):
         info["hemostasis_out_of_range"] = val
         return None, info
+    info["hemostasis_raw_value"] = val
+    info["hemostasis_raw_unit"] = unit or "×10³/μL"
     return _score_from_thresholds(val, _TH["hemostasis"]["thresholds"]), info
 
 
@@ -411,6 +413,8 @@ def _calc_liver(
     if err:
         info["liver_unit_error"] = err
         return None, info
+    info["liver_raw_value"] = converted
+    info["liver_raw_unit"] = "mg/dL"
     return _score_from_thresholds(converted, _TH["liver"]["thresholds"]), info
 
 
@@ -533,6 +537,8 @@ def _calc_brain(
         info["brain_missing"] = True
         return None, info
 
+    info["brain_raw_value"] = gcs_total
+    info["brain_raw_unit"] = "GCS"
     score = _score_from_thresholds(gcs_total, _TH["brain"]["thresholds"])
     return score, info
 
@@ -567,6 +573,8 @@ def _calc_kidney(
             if err:
                 info["kidney_creatinine_unit_error"] = err
             else:
+                info["kidney_creatinine_value"] = converted
+                info["kidney_creatinine_unit"] = "mg/dL"
                 score_creat = _score_from_thresholds(
                     converted, _TH["kidney"]["creatinine_thresholds"]
                 )
@@ -597,6 +605,8 @@ def _calc_kidney(
             rate_per_kg_h = None
 
         if rate_per_kg_h is not None:
+            info["kidney_urine_rate"] = round(rate_per_kg_h, 2)
+            info["kidney_urine_unit"] = "ml/kg/h"
             if rate_per_kg_h < 0.3:
                 score_urine = 3
             elif rate_per_kg_h < 0.5:
@@ -826,9 +836,38 @@ def compute_sofa2(
     score_lower_bound = measured_component_sum  # 最低可能分 = 已测分
     missing_components = [name for name, score in components.items() if score is None]
 
+    # 构建各器官原始值详情 (供前端展示)
+    component_details = {}
+    if "pao2_fio2_ratio" in info:
+        component_details["respiratory"] = {"value": round(info["pao2_fio2_ratio"], 1), "unit": "P/F"}
+    elif "spo2_fio2_ratio" in info:
+        component_details["respiratory"] = {"value": round(info["spo2_fio2_ratio"], 1), "unit": "S/F"}
+    if "hemostasis_raw_value" in info:
+        component_details["hemostasis"] = {"value": info["hemostasis_raw_value"], "unit": info.get("hemostasis_raw_unit", "×10³/μL")}
+    if "liver_raw_value" in info:
+        component_details["liver"] = {"value": round(info["liver_raw_value"], 2), "unit": info.get("liver_raw_unit", "mg/dL")}
+    if "brain_raw_value" in info:
+        component_details["brain"] = {"value": info["brain_raw_value"], "unit": info.get("brain_raw_unit", "GCS")}
+    kidney_detail = {}
+    if "kidney_creatinine_value" in info:
+        kidney_detail["creatinine"] = {"value": round(info["kidney_creatinine_value"], 2), "unit": "mg/dL"}
+    if "kidney_urine_rate" in info:
+        kidney_detail["urine"] = {"value": info["kidney_urine_rate"], "unit": "ml/kg/h"}
+    if kidney_detail:
+        component_details["kidney"] = kidney_detail
+    if "ne_epi_sum" in info or "map_value" in info:
+        cv_detail = {}
+        if info.get("ne_epi_sum") is not None:
+            cv_detail["ne_epi_sum"] = {"value": round(info["ne_epi_sum"], 4), "unit": "μg/kg/min"}
+        if info.get("map_value") is not None:
+            cv_detail["map"] = {"value": round(info["map_value"], 1), "unit": "mmHg"}
+        if cv_detail:
+            component_details["cardiovascular"] = cv_detail
+
     return {
         "sofa2_score": total,
         "components": components,
+        "component_details": component_details,
         "data_quality_flags": flags,
         "meta": info,
         "result_status": result_status,

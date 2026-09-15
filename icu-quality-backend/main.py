@@ -1223,6 +1223,7 @@ def query_detail(code: str, period: str, part: str, icu_unit: str = "all"):
                 "classic_meta": classic.get("meta", {}),
                 "sofa2_score": sofa2.get("sofa2_score"),
                 "sofa2_components": sofa2.get("components"),
+                "sofa2_component_details": sofa2.get("component_details", {}),
                 "sofa2_result_status": sofa2.get("result_status"),
                 "sofa2_completeness": sofa2.get("completeness"),
                 "sofa2_meta": sofa2.get("meta", {}),
