@@ -238,7 +238,7 @@ def _cache_clear():
 
 DETAIL_CACHE_COLLECTION = "icu_indicator_detail_cache"
 # 缓存版本号：修改口径时 +1，旧条目自然失效
-CACHE_VERSION = 9
+CACHE_VERSION = 10  # v10: detail 原因字段修复(reasons[]) + ICU-05 reason_summary
 
 
 def _dept_cache_key(dept_codes: list) -> str:
@@ -1275,9 +1275,21 @@ def query_detail(code: str, period: str, part: str, icu_unit: str = "all"):
                     item["sample_time"] = st.isoformat()[:19]
                 lactate_all_serialized.append(item)
 
+            # 原因（#修复: 引擎产出 bundle_xh.reasons 数组，此前读 reason/reason_codes 恒为空）
+            # gate 级原因（NOT_SEPTIC_SHOCK 等）在顶层 reason；bundle 级原因在合并后的 reasons[]
+            bundle_reasons = v3.get("reasons") or []
+            gate_reason = v3.get("reason") or ""
+            primary_reason = gate_reason or (bundle_reasons[0] if bundle_reasons else "")
+
             return {
                 "t0": str(v3.get("t0", ""))[:16] if v3.get("t0") else "",
                 "finish": v3.get("finish"),
+                # 三步判定（P3 时间线用）: None=数据缺失 / False=未达标 / True=达标
+                "step1": v3.get("step1"),
+                "step2": v3.get("step2"),
+                "step3": v3.get("step3"),
+                "finish_path": v3.get("finish_path", ""),
+                "has_lactate_recheck": v3.get("has_lactate_recheck"),
                 "is_septic_shock": v3.get("is_septic_shock"),
                 "a1": v3.get("a1"), "b3": v3.get("b3"),
                 "c1": v3.get("c1"), "c2": v3.get("c2"), "c3": v3.get("c3"),
@@ -1313,8 +1325,8 @@ def query_detail(code: str, period: str, part: str, icu_unit: str = "all"):
                 "vaso_name": v3.get("vaso_name", ""),
                 "vaso_start_time": str(v3.get("vaso_start_time", ""))[:16] if v3.get("vaso_start_time") else "",
                 # 原因
-                "reason": v3.get("reason", ""),
-                "reason_codes": v3.get("reason_codes", []),
+                "reason": primary_reason,
+                "reason_codes": bundle_reasons or ([gate_reason] if gate_reason else []),
                 # 数据质量
                 "data_quality_flags": v3.get("data_quality_flags", []),
                 # G-1: 感染部位
@@ -2105,7 +2117,8 @@ def get_all_indicators(start: date, end: date, dept: str = "all"):
         if r.get("code", "").startswith("ICU-05"):
             for df in ("candidate_mode", "raw_candidate_count", "high_probability_count",
                        "probable_count", "pending_review_count", "not_candidate_count",
-                       "diagnosis_based_count", "candidate_den"):
+                       "diagnosis_based_count", "candidate_den",
+                       "old_shock_count", "new_shock_count"):
                 if r.get(df) is not None:
                     icu05_diag[df] = r[df]
             break
@@ -2616,7 +2629,8 @@ def indicator_list(period: str, icu_unit: str = "all", end_period: str = "", noc
         dept_codes = _resolve_dept_codes(icu_unit)
         for hour in ("1h", "3h", "6h"):
             code = f"ICU-05-{hour}"
-            agg[code] = {"num": 0, "den": 0, "unit": "‰", "name": NAME_MAP.get(code, code),
+            # #修复: 单位原硬编码 "‰"，ICU-05 配置为 "%"（跨月值被误算成千分比）
+            agg[code] = {"num": 0, "den": 0, "unit": UNIT_MAP.get(code, ""), "name": NAME_MAP.get(code, code),
                          "monthly": {}, "diag_fields": {}}
             for mon in month_labels:
                 try:
@@ -2626,11 +2640,13 @@ def indicator_list(period: str, icu_unit: str = "all", end_period: str = "", noc
                     end_day = calendar.monthrange(y, m)[1]
                     icu05_data = _compute_icu05(dept_codes, f"{mon}-01", f"{mon}-{end_day:02d}", hour)
                     if icu05_data:
-                        agg[code]["num"] += icu05_data.get("numerator", 0)
-                        agg[code]["den"] += icu05_data.get("denominator", 0)
-                        agg[code]["monthly"][mon] = icu05_data.get("value", 0)
+                        # #修复: _compute_icu05 返回的键是 num/den/val（原读 numerator/denominator/value 恒为 None）
+                        agg[code]["num"] += icu05_data.get("num", 0)
+                        agg[code]["den"] += icu05_data.get("den", 0)
+                        agg[code]["monthly"][mon] = icu05_data.get("val", 0)
                         for df in ("candidate_den", "high_probability_count", "probable_count",
-                                   "pending_review_count", "not_candidate_count", "raw_candidate_count"):
+                                   "pending_review_count", "not_candidate_count", "raw_candidate_count",
+                                   "old_shock_count", "new_shock_count"):
                             if icu05_data.get(df) is not None:
                                 agg[code]["diag_fields"][df] = agg[code]["diag_fields"].get(df, 0) + icu05_data[df]
                         if icu05_data.get("candidate_mode"):
@@ -2723,9 +2739,12 @@ def indicator_list(period: str, icu_unit: str = "all", end_period: str = "", noc
                     if r.get("code") == code:
                         result[i] = _summary_row_to_api({
                             "indicator": code,
-                            "denominator": icu05_data.get("denominator"),
-                            "numerator": icu05_data.get("numerator"),
-                            "value": icu05_data.get("value"),
+                            # #修复: 键名对齐 _compute_icu05 的 num/den/val（原 numerator/denominator/value 恒 None）
+                            "denominator": icu05_data.get("den"),
+                            "numerator": icu05_data.get("num"),
+                            "value": icu05_data.get("val"),
+                            "old_shock_count": icu05_data.get("old_shock_count"),
+                            "new_shock_count": icu05_data.get("new_shock_count"),
                             "candidate_den": icu05_data.get("candidate_den"),
                             "candidate_mode": icu05_data.get("candidate_mode"),
                             "high_probability_count": icu05_data.get("high_probability_count"),
@@ -2853,6 +2872,36 @@ def indicator_detail(code: str, period: str, part: str, icu_unit: str = "all", e
         items = _detail_cache_payload(code, period, part, icu_unit, nocache=nocache)
 
     # 各指标明细描述
+    # ICU-05: 附加原因分布（#设计: 三色语义 — 红=明确未达标 / 橙=顺序问题 / 灰=数据缺失）
+    reason_summary = None
+    if code.startswith("ICU-05") and part == "denominator":
+        def _agg_reasons(patients):
+            done = failed = uncertain = 0
+            failed_ctr, uncertain_ctr = {}, {}
+            for p in patients:
+                v3 = p.get("v3") or {}
+                codes = v3.get("reason_codes") or []
+                fin = v3.get("finish")
+                if fin is True:
+                    done += 1
+                    continue
+                primary = (codes[0] if codes else None) or v3.get("reason") or ""
+                if fin is False:
+                    failed += 1
+                    if primary:
+                        failed_ctr[primary] = failed_ctr.get(primary, 0) + 1
+                else:
+                    uncertain += 1
+                    if primary:
+                        uncertain_ctr[primary] = uncertain_ctr.get(primary, 0) + 1
+            to_list = lambda ctr: sorted(
+                ({"code": c, "count": n} for c, n in ctr.items()),
+                key=lambda x: -x["count"])
+            return {"done": done, "failed": failed, "uncertain": uncertain,
+                    "failed_reasons": to_list(failed_ctr),
+                    "uncertain_reasons": to_list(uncertain_ctr)}
+        reason_summary = _agg_reasons(items)
+
     if code == "ICU-01":
         source_desc = "实际占用总床日数 — 每位患者在统计期内的在床天数" if part == "numerator" \
             else "实际开放总床日数 — 各科室床位配置（每床每日计1床日）"
@@ -2867,12 +2916,14 @@ def indicator_detail(code: str, period: str, part: str, icu_unit: str = "all", e
             else "分母：来自 patient 表，统计期内在科患者（排除 invalid）"
     elif code in ("ICU-05-1h", "ICU-05-3h", "ICU-05-6h"):
         h = code.split("-")[2]
-        source_desc = (
-            f"分子：V3双集合查询，{h} Bundle达标（K1+K2确认脓毒性休克 + A1乳酸测定 + B3血培养先于抗生素 + C3液体达标）的患者"
-            if part == "numerator"
-            else "分母：入院24h内进ICU且确诊脓毒性休克（S1-S4器官障碍 + I1-I3感染证据 + K1MAP<70 + K2升压药）"
-            + " | 判定流程：器官障碍→感染证据→脓毒性休克→Bundle完成 | T0=首条医嘱时间"
-        )
+        # 人话文案（#设计: 替换原 V3/K1/A1/B3 技术黑话）
+        if part == "numerator":
+            source_desc = (f"分子：{h} 内完成 Bundle 三步的患者 — "
+                           "①乳酸测定 ②先做血培养、再用抗生素 ③液体复苏达标（1h窗有液体即可，3h/6h窗≥1500ml）")
+        else:
+            source_desc = ("分母：入院 24h 内进 ICU、且确诊脓毒性休克的患者 — "
+                           "同时满足 ①器官障碍（氧合/GCS/MAP/升压药任一）②感染证据（诊断/抗感染/病原学送检任一）"
+                           "③乳酸≥2 且在用升压药；T0 = 入科首条医嘱时间")
     elif code == "ICU-06":
         source_desc = (f"分子：来自 VI_ICU_ZYYZ 培养类检验医嘱，首次抗生素前有病原学送检的患者（送检≤首剂时间）" if part == "numerator"
             else f"分母：来自 drugExe 抗菌药执行记录，经三层判定（A感染信号→B围术期→C短疗程→AI灰区）确认治疗目的，已剔除预防性用药")
@@ -2915,6 +2966,8 @@ def indicator_detail(code: str, period: str, part: str, icu_unit: str = "all", e
         "source_desc": source_desc,
         "all_patients": items,
     }
+    if reason_summary is not None:
+        result["reason_summary"] = reason_summary
     _cache_set(ck, result)
     paged = dict(result)
     paged["limit"] = limit
