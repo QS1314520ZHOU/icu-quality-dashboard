@@ -19,6 +19,21 @@
       </div>
     </div>
 
+    <!-- P3: 结论横幅 —— 一眼看到卡在哪 -->
+    <div class="verdict-banner" :class="verdict.cls">
+      <span class="vb-text">{{ verdict.text }}</span>
+      <span class="vb-window" v-if="windowLabel">窗口 {{ windowLabel }}</span>
+    </div>
+
+    <!-- P3: 门控徽章行（点击展开/收起 K/I/S 明细） -->
+    <div class="gate-row" @click="showGates = !showGates" title="点击展开门控判定明细">
+      <span class="gate-label">门控</span>
+      <span class="gate-badge" :class="gateCls(gateInfection)">{{ gateText(gateInfection, '感染') }}</span>
+      <span class="gate-badge" :class="gateCls(gateOrgan)">{{ gateText(gateOrgan, '器官') }}</span>
+      <span class="gate-badge" :class="gateCls(gateShock)">{{ gateText(gateShock, '休克') }}</span>
+      <span class="gate-toggle">{{ showGates ? '▼' : '▶' }}</span>
+    </div>
+
     <!-- 候选引擎状态 -->
     <div class="candidate-card" v-if="patient.candidate_status && patient.candidate_status !== 'not_candidate'">
       <div class="card-title" @click="showCandidate = !showCandidate">
@@ -102,8 +117,8 @@
       />
     </div>
 
-    <!-- ====== 分母详情：如何判定为脓毒性休克 ====== -->
-    <template v-if="part === 'denominator'">
+    <!-- ====== 门控判定明细（分子/分母通用，默认折叠，点徽章行展开） ====== -->
+    <template v-if="showGates">
       <!-- K组 - 脓毒性休克确认 -->
       <div class="group-card">
         <div class="card-title">🩺 脓毒性休克确认 (K1 AND K2)</div>
@@ -194,11 +209,14 @@
       </div>
     </template>
 
-    <!-- ====== 分子详情：Bundle 执行情况 ====== -->
-    <template v-if="part === 'numerator'">
+    <!-- ====== Bundle 执行情况（分子/分母通用） ====== -->
+    <template>
       <!-- Bundle 时间线 -->
       <div class="timeline-card">
-        <div class="card-title">⏱️ Bundle 时间线</div>
+        <div class="card-title">
+          ⏱️ Bundle 时间线
+          <span class="tl-window" v-if="windowLabel">判定窗口 {{ windowLabel }}</span>
+        </div>
         <div class="timeline">
           <div class="timeline-item active">
             <div class="timeline-dot"></div>
@@ -227,7 +245,7 @@
           </div>
           <div class="timeline-line"></div>
           <div class="timeline-item" :class="{ active: !!data.culture_time }">
-            <div class="timeline-dot" :class="statusClass(!!data.culture_time && !!data.antibiotic_time && data.culture_time < data.antibiotic_time)"></div>
+            <div class="timeline-dot" :class="statusClass(data.step2)"></div>
             <div class="timeline-content">
               <div class="timeline-label">血培养</div>
               <div class="timeline-value">{{ data.culture_name || '—' }}</div>
@@ -236,7 +254,7 @@
           </div>
           <div class="timeline-line"></div>
           <div class="timeline-item" :class="{ active: !!data.antibiotic_time }">
-            <div class="timeline-dot" :class="statusClass(!!data.antibiotic_time)"></div>
+            <div class="timeline-dot" :class="statusClass(data.antibiotic_time)"></div>
             <div class="timeline-content">
               <div class="timeline-label">抗生素</div>
               <div class="timeline-value">{{ data.antibiotic_name || '—' }}</div>
@@ -245,10 +263,22 @@
           </div>
           <div class="timeline-line"></div>
           <div class="timeline-item" :class="{ active: (data.fluid_ml || 0) > 0 }">
-            <div class="timeline-dot" :class="statusClass(data.c3)"></div>
+            <div class="timeline-dot" :class="statusClass(data.step3)"></div>
             <div class="timeline-content">
               <div class="timeline-label">液体</div>
               <div class="timeline-value">{{ data.fluid_ml ? `${data.fluid_ml} ml` : '—' }}</div>
+              <div class="timeline-hint" v-if="data.fluid_ml && data.fluid_ml < 1500 && data.step3 === false">不足1500ml</div>
+            </div>
+          </div>
+          <div class="timeline-line"></div>
+          <div class="timeline-item" :class="{ active: data.finish != null }">
+            <div class="timeline-dot" :class="statusClass(data.finish)"></div>
+            <div class="timeline-content">
+              <div class="timeline-label">完成判定</div>
+              <div class="timeline-value">{{ finishLabel }}</div>
+              <div class="timeline-hint" v-if="data.finish === true && data.finish_path">
+                {{ data.finish_path === 'triggered' ? '触发→液体达标' : '未触发→视为达标' }}
+              </div>
             </div>
           </div>
         </div>
@@ -333,13 +363,13 @@
       </div>
     </template>
 
-    <!-- 原因码展示 -->
-    <div class="reason-card" v-if="data.reason">
+    <!-- 原因码展示（全部原因码，不再只显示第一条） -->
+    <div class="reason-card" v-if="reasonCodes.length">
       <div class="card-title">ℹ️ 判定说明</div>
       <div class="reason-list">
-        <div class="reason-item">
-          <span class="reason-code">{{ data.reason }}</span>
-          <span class="reason-text">{{ reasonText }}</span>
+        <div class="reason-item" v-for="code in reasonCodes" :key="code">
+          <span class="reason-code">{{ code }}</span>
+          <span class="reason-text">{{ REASON_MAP[code] || code }}</span>
         </div>
       </div>
     </div>
@@ -361,17 +391,57 @@ import { computed, ref } from 'vue'
 import StatusBadge from './StatusBadge.vue'
 import InfectionSiteSelector from './InfectionSiteSelector.vue'
 import SofaScorePanel from './SofaScorePanel.vue'
+import { verdictOf, REASON_MAP } from '../utils/detailColumns.js'
 
 const props = defineProps({
   data: { type: Object, default: () => ({}) },
   patient: { type: Object, default: () => ({}) },
   part: { type: String, default: 'denominator' }, // 'denominator' | 'numerator'
+  hour: { type: String, default: '' }, // '1h' | '3h' | '6h'
 })
 
 const showInfectionSite = ref(false)
 const showLactateTable = ref(false)
 const showSofa = ref(false)
 const showCandidate = ref(false)
+const showGates = ref(false)
+
+// ── P3: 结论横幅 ──
+const verdict = computed(() => verdictOf({ v3: props.data, excluded: props.patient.excluded }))
+
+// ── P3: 判定窗口标签 ──
+const windowLabel = computed(() => (props.hour ? `T0 ~ T0+${props.hour}` : ''))
+
+const finishLabel = computed(() => {
+  if (props.data.finish === true) return '达标'
+  if (props.data.finish === false) return '未达标'
+  if (props.data.finish === null) return '无法判定'
+  return '—'
+})
+
+// ── P3: 门控三态徽章 ──
+function tri(vals) {
+  if (vals.some(v => v === true)) return true
+  if (vals.some(v => v === false)) return false
+  return null
+}
+const gateInfection = computed(() => tri([props.data.i1, props.data.i2, props.data.i3]))
+const gateOrgan = computed(() => tri([props.data.s1, props.data.s2, props.data.s3, props.data.s4]))
+const gateShock = computed(() => {
+  const d = props.data
+  if (d.k1 === true && d.k2 === true) return true
+  if (d.k1 === false || d.k2 === false) return false
+  return null
+})
+const gateCls = (v) => (v === true ? 'gb-ok' : v === false ? 'gb-fail' : 'gb-na')
+const gateText = (v, label) => (v === true ? `${label} ✓` : v === false ? `${label} ✗` : `${label} ?`)
+
+// ── 原因码列表（全部） ──
+const reasonCodes = computed(() => {
+  const d = props.data
+  if (d.reason_codes && d.reason_codes.length) return d.reason_codes
+  return d.reason ? [d.reason] : []
+})
 
 // 候选引擎状态映射
 const CANDIDATE_STATUS_MAP = {
@@ -461,30 +531,6 @@ const lactate1h3hCount = computed(() => {
 })
 const lactateAllCount = computed(() => (props.data.lactate_all || []).length)
 
-const REASON_MAP = {
-  'NO_T0': '找不到T0锚点',
-  'NOT_SEPTIC_SHOCK': '非脓毒性休克 (K1/K2未确认)',
-  'NO_INFECTION_EVIDENCE': '无感染证据 (I1/I2/I3均未确认)',
-  'A1_NOT_MET': 'A1未达标: 乳酸未测量',
-  'B3_NOT_MET': 'B3未达标: 抗生素未在血培养后使用',
-  'C3_FLUID_INSUFFICIENT': 'C3未达标: 液体量不足',
-  'MAP_NOT_TRIGGERED': 'MAP未触发 (<70mmHg)',
-  'LACTATE_NOT_TRIGGERED': '乳酸未触发 (<4mmol/L)',
-  'FINISH_FALSE': 'Bundle未完成',
-  'DATA_MISSING_LAC': '乳酸数据缺失',
-  'DATA_MISSING_MAP': 'MAP数据缺失',
-  'AB_MISSING': '找不到抗菌药物执行记录',
-  'BC_MISSING': '找不到血培养记录',
-  'FLUID_NONE': '窗口内无液体执行',
-  'FLUID_INSUFFICIENT': '液体量不足1500ml',
-  'SITE_UNCONFIRMED': '感染部位未人工确认',
-  'MANUAL_EXCLUDED': '人工排除',
-}
-
-const reasonText = computed(() => {
-  return REASON_MAP[props.data.reason] || props.data.reason || ''
-})
-
 function fmtNum(val) {
   if (val == null) return '—'
   return Number(val).toFixed(2)
@@ -547,6 +593,42 @@ function lacRowClass(lac) {
   border: 1px solid var(--border);
   border-radius: 8px;
   padding: 12px 16px;
+}
+
+/* ── P3: 结论横幅 ── */
+.verdict-banner {
+  display: flex; align-items: center; justify-content: space-between; gap: 10px;
+  padding: 10px 16px; border-radius: 8px; font-weight: 600; font-size: 14px;
+  border: 1px solid transparent;
+}
+.verdict-banner.v-ok { background: #e6f6ec; color: #0a7d33; border-color: #b7e4c8; }
+.verdict-banner.v-fail { background: #fdecea; color: #c62828; border-color: #f5c6c2; }
+.verdict-banner.v-order { background: #fff3e0; color: #e65100; border-color: #ffcc80; }
+.verdict-banner.v-missing { background: #eef1f6; color: #5f6b7f; border-color: #d8dee9; }
+.verdict-banner.v-gate { background: #e8eaf6; color: #3949ab; border-color: #c5cae9; }
+.verdict-banner.v-excluded { background: #f0f0f0; color: #7a8699; }
+.vb-window { font-size: 12px; font-weight: 500; opacity: 0.85; white-space: nowrap; }
+
+/* ── P3: 门控徽章行 ── */
+.gate-row {
+  display: flex; align-items: center; gap: 8px; cursor: pointer;
+  background: var(--bg-surface); border: 1px solid var(--border);
+  border-radius: 8px; padding: 8px 16px; user-select: none;
+}
+.gate-row:hover { background: var(--bg-hover); }
+.gate-label { font-size: 12px; color: var(--text-sub); font-weight: 600; margin-right: 2px; }
+.gate-badge {
+  font-size: 12px; padding: 2px 10px; border-radius: 12px; font-weight: 600;
+}
+.gate-badge.gb-ok { background: #e6f6ec; color: #0a7d33; }
+.gate-badge.gb-fail { background: #fdecea; color: #c62828; }
+.gate-badge.gb-na { background: #eef1f6; color: #7a8699; }
+.gate-toggle { margin-left: auto; color: var(--text-sub); font-size: 10px; }
+
+/* ── P3: 时间线窗口标签 ── */
+.tl-window {
+  font-size: 12px; font-weight: 500; color: var(--brand);
+  background: var(--brand-weak); border-radius: 10px; padding: 2px 10px; margin-left: 8px;
 }
 
 .info-header {

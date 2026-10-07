@@ -89,8 +89,8 @@ export async function exportDetailExcel(opts) {
     throw new Error('无可导出数据');
   }
 
-  // ── 3. 共享列定义（与界面完全一致）──
-  const cols = getDetailColumns(code, part);
+  // ── 3. 共享列定义（导出用全列；界面展示用精简列）──
+  const cols = getDetailColumns(code, part, { forExport: true });
 
   // ── 4. 构建 worksheet ──
   const partLabel = part === 'numerator' ? '分子' : '分母';

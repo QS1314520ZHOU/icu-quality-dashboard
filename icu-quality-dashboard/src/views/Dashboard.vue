@@ -357,7 +357,10 @@
       <IndicatorGuideModal />
     </Modal>
     <Modal v-if="detailVisible" :title="detailTitle" @close="detailVisible=false">
-      <DetailModal :data="detailData" :period="ps" :end-period="endPeriodParam" :unit="detailUnit" :unit-name="detailUnitName" />
+      <DetailModal :data="detailData" :summary="detailData.summary" :parts="detailData.parts"
+             :funnel="detailData.funnel"
+             :period="ps" :end-period="endPeriodParam" :unit="detailUnit" :unit-name="detailUnitName"
+             @exclusion-changed="onDetailExclusionChanged" />
     </Modal>
   </div>
 </template>
@@ -647,11 +650,50 @@ async function openDetail(row) {
   detailVisible.value = true;
 
   const base = { name: row.name, code: row.code, part: 'numerator', loading: true, patients: [], source_desc: '加载中...', count: 0 };
+  // 公式条 + ICU-05 漏斗（加载期间即显示）
+  const summary = { value: row.value, unit: row.unit || '' };
+  if (row.numerator != null) summary.numerator = row.numerator;
+  if (row.denominator != null) summary.denominator = row.denominator;
+  const funnel = String(row.code).startsWith('ICU-05') ? {
+    candidate: row.candidate_den ?? row.denominator ?? null,
+    shock: row.old_shock_count ?? null,
+    completed: row.numerator ?? null,
+  } : null;
+  detailData.value = { ...base, summary, funnel };
+  try {
+    const [numR, denR] = await Promise.all([
+      fetchDetail(row.code, ps.value, 'numerator', dept.value, endPeriodParam.value, { limit: 200, offset: 0 }),
+      fetchDetail(row.code, ps.value, 'denominator', dept.value, endPeriodParam.value, { limit: 200, offset: 0 }),
+    ]);
+    detailData.value = {
+      ...numR,
+      summary,
+      parts: { numerator: numR, denominator: denR },
+      funnel,
+    };
+  } catch (e) {
+    detailData.value = { ...base, loading: false, error: e.message || '明细加载失败', source_desc: '明细加载失败', summary, funnel };
+  }
+}
+
+// 排除变更后重载两份明细
+async function onDetailExclusionChanged() {
+  if (!detailData.value) return;
+  const cur = detailData.value;
+  const base = { ...cur, loading: true, patients: [], source_desc: '重新加载中...' };
   detailData.value = base;
   try {
-    detailData.value = await fetchDetail(row.code, ps.value, 'numerator', dept.value, endPeriodParam.value, { limit: 200, offset: 0 });
+    const [numR, denR] = await Promise.all([
+      fetchDetail(cur.code, ps.value, 'numerator', dept.value, endPeriodParam.value, { limit: 200, offset: 0 }),
+      fetchDetail(cur.code, ps.value, 'denominator', dept.value, endPeriodParam.value, { limit: 200, offset: 0 }),
+    ]);
+    const summary = { ...(cur.summary || {}) };
+    if (summary.numerator != null) summary.numerator = numR.count;
+    if (summary.denominator != null) summary.denominator = denR.count;
+    const funnel = cur.funnel ? { ...cur.funnel, candidate: denR.count, completed: numR.count } : null;
+    detailData.value = { ...numR, summary, parts: { numerator: numR, denominator: denR }, funnel };
   } catch (e) {
-    detailData.value = { ...base, loading: false, error: e.message || '明细加载失败', source_desc: '明细加载失败' };
+    detailData.value = { ...base, loading: false, error: e.message || '明细加载失败' };
   }
 }
 

@@ -1,19 +1,55 @@
 <template>
   <div>
+    <!-- P2: 公式条 + 人群漏斗（点击可切换列表/筛选） -->
+    <div v-if="summary || funnel" class="formula-row">
+      <div class="formula-bar" v-if="summary">
+        <span class="fb-label">指标公式</span>
+        <template v-if="summary.numerator != null && summary.denominator != null">
+          <button class="fb-part" :class="{ active: curPart === 'numerator' }"
+                  @click="setPart('numerator')" title="点击查看分子列表">
+            <b>{{ summary.numerator }}</b><small>分子</small>
+          </button>
+          <span class="fb-op">/</span>
+          <button class="fb-part" :class="{ active: curPart === 'denominator' }"
+                  @click="setPart('denominator')" title="点击查看分母列表">
+            <b>{{ summary.denominator }}</b><small>分母</small>
+          </button>
+          <span class="fb-op">=</span>
+        </template>
+        <span class="fb-val">{{ summary.value ?? '—' }}{{ summary.unit || '' }}</span>
+      </div>
+      <div class="funnel" v-if="funnel">
+        <div class="fn-node" :class="{ clickable: funnel.candidate != null }"
+             @click="setVerdictFilter(null)" title="候选池（全部分母）">
+          <b>{{ funnel.candidate ?? '—' }}</b><span>候选池</span>
+        </div>
+        <span class="fn-arrow">→</span>
+        <div class="fn-node fn-warn" :class="{ clickable: funnel.shock != null }"
+             @click="setVerdictFilter('shock')" title="K1乳酸≥2 且 K2在用升压药">
+          <b>{{ funnel.shock ?? '—' }}</b><span>休克确认</span>
+        </div>
+        <span class="fn-arrow">→</span>
+        <div class="fn-node fn-bad" :class="{ clickable: funnel.completed != null }"
+             @click="setVerdictFilter('done')" title="完成 Bundle（分子）">
+          <b>{{ funnel.completed ?? '—' }}</b><span>Bundle达标</span>
+        </div>
+      </div>
+    </div>
+
     <div class="source">
       <div class="source-left">
-        <span class="tag">数据源</span>
-        <span class="source-desc">{{ data.source_desc }}</span>
+        <span class="tag">口径</span>
+        <span class="source-desc">{{ activeData.source_desc }}</span>
         <span v-if="canExclude && excludedCount > 0" class="excl-count">
           ，已人工排除 {{ excludedCount }} 例
         </span>
       </div>
       <div class="source-right">
-        <span class="count" v-if="data.count > 0">
-          共 {{ data.count }} 例<span v-if="data.has_more">，先显示 {{ data.patients?.length || 0 }} 例</span>
+        <span class="count" v-if="activeData.count > 0">
+          共 {{ activeData.count }} 例<span v-if="activeData.has_more">，先显示 {{ activeData.patients?.length || 0 }} 例</span>
         </span>
-        <button class="export-btn" :disabled="exporting || !data.patients?.length || isSummary"
-                @click="handleExport" :title="isSummary ? '汇总数据无需导出' : !data.patients?.length ? '无可导出数据' : ''">
+        <button class="export-btn" :disabled="exporting || !activeData.patients?.length || isSummary"
+                @click="handleExport" :title="isSummary ? '汇总数据无需导出' : !activeData.patients?.length ? '无可导出数据' : ''">
           {{ exporting ? '导出中...' : '导出 Excel' }}
         </button>
       </div>
@@ -22,62 +58,68 @@
       <span v-if="exportProgress" class="export-progress">{{ exportProgress }}</span>
       <span v-if="exportError" class="export-error">{{ exportError }}</span>
     </div>
-    <!-- ICU-05 指标说明面板 -->
-    <div v-if="isIcu05 && data.patients?.length" class="bundle-guide">
-      <div class="guide-title" @click="showGuide = !showGuide">
-        <span>📋 ICU-05 感染性休克 Bundle 自动判定</span>
-        <span class="guide-toggle">{{ showGuide ? '▼' : '▶' }}</span>
+
+    <!-- P2: 三色原因分布（红=明确未达标 / 橙=顺序 / 灰=数据缺失·未确认），点击筛选 -->
+    <div v-if="isIcu05 && reasonSummary" class="reason-bar">
+      <div class="rb-head">
+        <span class="rb-title">未达标原因分布</span>
+        <span class="rb-legend">
+          <i class="dot d-fail"></i>明确未达标
+          <i class="dot d-order"></i>顺序问题
+          <i class="dot d-missing"></i>数据缺失/未确认
+        </span>
       </div>
-      <div v-if="showGuide" class="guide-content">
-        <div class="guide-section">
-          <div class="guide-label">分母:</div>
-          <div class="guide-text">感染诊断 + 休克标准（MAP&lt;70 或升压药）+ 乳酸检测，三者同时满足的 ICU 患者</div>
-        </div>
-        <div class="guide-section">
-          <div class="guide-label">T0:</div>
-          <div class="guide-text">max(感染诊断时间, 休克标准时间, 首次乳酸检测时间)</div>
-        </div>
-        <div class="guide-section">
-          <div class="guide-label">时间窗:</div>
-          <div class="guide-text">1h/3h/6h 为三个<strong>独立时间窗</strong>，各自独立判定，不存在依赖关系</div>
-        </div>
-        <div class="guide-section">
-          <div class="guide-label">Bundle 三步:</div>
-          <div class="guide-flow">
-            <span class="flow-step">A1 乳酸检测</span>
-            <span class="flow-arrow">+</span>
-            <span class="flow-step">B3 血培养先于抗生素</span>
-            <span class="flow-arrow">+</span>
-            <span class="flow-step">C3 液体复苏</span>
-          </div>
-        </div>
-        <div class="guide-section">
-          <div class="guide-label">1h vs 3h/6h:</div>
-          <div class="guide-text">1h 仅要求液体复苏<strong>存在</strong>（任意量）；3h/6h 要求液体累计<strong>≥1500ml</strong></div>
-        </div>
-        <div class="guide-section">
-          <div class="guide-label">6h 特殊要求:</div>
-          <div class="guide-text">6h 额外要求<strong>乳酸复测</strong>（T0+1h 后第二次检测）；未复测 → 数据缺失（None），不计入达标</div>
-        </div>
-        <div class="guide-section">
-          <div class="guide-label">判定结果:</div>
-          <div class="guide-text">True=达标 / False=未达标 / None=数据缺失（不计入达标率分子）</div>
-        </div>
-        <div class="guide-section">
-          <div class="guide-label">点击患者行:</div>
-          <div class="guide-text">展开查看详细判定信息（时间线、各项指标值、判定结果）</div>
-        </div>
+      <div class="rb-chips">
+        <button v-for="r in reasonSummary.failed_reasons" :key="'f'+r.code"
+                class="rb-chip" :class="[r.code === 'BC_AFTER_AB' ? 'order' : 'fail', { on: reasonFilter === r.code }]"
+                @click="toggleReason(r.code)">
+          {{ reasonLabel(r.code) }} ×{{ r.count }}
+        </button>
+        <button v-for="r in reasonSummary.uncertain_reasons" :key="'u'+r.code"
+                class="rb-chip" :class="[isGateReason(r.code) ? 'gate' : 'missing', { on: reasonFilter === r.code }]"
+                @click="toggleReason(r.code)">
+          {{ reasonLabel(r.code) }} ×{{ r.count }}
+        </button>
+        <span v-if="!(reasonSummary.failed_reasons || []).length && !(reasonSummary.uncertain_reasons || []).length"
+              class="rb-empty">✅ 全部达标</span>
+      </div>
+      <div class="rb-note" v-if="(reasonSummary.uncertain || 0) > 0">
+        灰/蓝灰色为数据缺失或未通过门控（无法判定），<b>不等同于医疗未达标</b>；共 {{ reasonSummary.uncertain }} 例
       </div>
     </div>
 
-    <div v-if="data.loading" class="loading">明细加载中...</div>
-    <div v-else-if="data.error" class="empty">{{ data.error }}</div>
-    <div v-else-if="!data.patients?.length" class="empty">暂无明细</div>
+    <!-- P2: 分子/分母 切换 tab（两份数据都已加载时） -->
+    <div v-if="hasBothParts" class="part-tabs2">
+      <button :class="['pt2-btn', { active: curPart === 'numerator' }]" @click="setPart('numerator')">
+        分子 ({{ parts.numerator.count }})
+      </button>
+      <button :class="['pt2-btn', { active: curPart === 'denominator' }]" @click="setPart('denominator')">
+        分母 ({{ parts.denominator.count }})
+      </button>
+      <span v-if="verdictFilter || reasonFilter" class="pt2-reset" @click="clearFilters">清除筛选 ✕</span>
+    </div>
+
+    <!-- P2: 结论筛选 chips（ICU-05） -->
+    <div v-if="isIcu05 && activeData.patients?.length" class="chip-bar">
+      <button :class="['chip', { on: !verdictFilter }]" @click="setVerdictFilter(null)">全部 {{ chipCounts.all }}</button>
+      <button v-if="chipCounts.failed" :class="['chip', 'chip-fail', { on: verdictFilter === 'failed' }]"
+              @click="setVerdictFilter('failed')">未达标 {{ chipCounts.failed }}</button>
+      <button v-if="chipCounts.uncertain" :class="['chip', 'chip-miss', { on: verdictFilter === 'uncertain' }]"
+              @click="setVerdictFilter('uncertain')">无法判定 {{ chipCounts.uncertain }}</button>
+      <button v-if="chipCounts.pending" :class="['chip', 'chip-pending', { on: verdictFilter === 'pending' }]"
+              @click="setVerdictFilter('pending')">待复核 {{ chipCounts.pending }}</button>
+      <button v-if="chipCounts.excluded" :class="['chip', 'chip-excl', { on: verdictFilter === 'excluded' }]"
+              @click="setVerdictFilter('excluded')">已排除 {{ chipCounts.excluded }}</button>
+    </div>
+
+    <div v-if="activeData.loading" class="loading">明细加载中...</div>
+    <div v-else-if="activeData.error" class="empty">{{ activeData.error }}</div>
+    <div v-else-if="!activeData.patients?.length" class="empty">暂无明细</div>
     <!-- 分母汇总 -->
-    <div v-else-if="isSummary" class="den-summary">{{ data.patients[0].name }}</div>
+    <div v-else-if="isSummary" class="den-summary">{{ activeData.patients[0].name }}</div>
     <!-- 三管卡片布局（ICU-16/17/CAUTI） -->
     <div v-else-if="isTriTube" class="tri-list">
-      <article v-for="p in data.patients" :key="p.detail_id || p.patient_id" class="tri-card">
+      <article v-for="p in activeData.patients" :key="p.detail_id || p.patient_id" class="tri-card">
         <div class="tri-head">
           <div class="tri-person">
             <span class="mono">{{ p.patient_id }}</span>
@@ -91,7 +133,7 @@
       </article>
     </div>
     <!-- ICU-00 患者类型筛选 -->
-    <div v-if="hasPatientType && data.patients?.length" class="census-filter">
+    <div v-if="hasPatientType && activeData.patients?.length" class="census-filter">
       <span class="filter-label">筛选：</span>
       <button :class="['filter-btn', { active: !patientTypeFilter }]" @click="patientTypeFilter = ''">全部</button>
       <button :class="['filter-btn', { active: patientTypeFilter === '原有' }]" @click="patientTypeFilter = '原有'">原有</button>
@@ -100,7 +142,7 @@
       <span class="filter-count">共 {{ filteredPatients.length }} 例</span>
     </div>
     <!-- 通用表格（共享列定义） -->
-    <div v-if="data.patients?.length && !isSummary && !isTriTube" class="detail-table-wrap">
+    <div v-if="activeData.patients?.length && !isSummary && !isTriTube" class="detail-table-wrap">
       <table class="detail-table">
         <thead>
           <tr>
@@ -122,7 +164,8 @@
               <td v-if="isIcu05" class="expand-cell">
                 <span :class="['expand-icon', { expanded: isExpanded(p.patient_id) }]">▶</span>
               </td>
-              <td v-for="c in columns" :key="c.header" :class="{ mono: c.header === '住院号' || c.header === '账号' }">
+              <td v-for="c in columns" :key="c.header"
+                  :class="[{ mono: c.header === '住院号' || c.header === '账号' }, c.cls ? c.cls(p) : '']">
                 {{ c.get(p) }}
               </td>
               <td v-if="canExclude" class="action-cell">
@@ -138,12 +181,15 @@
             <!-- ICU-05 Bundle详情展开行 -->
             <tr v-if="isIcu05 && isExpanded(p.patient_id)" class="bundle-detail-row">
               <td :colspan="columns.length + 1 + (canExclude ? 1 : 0)">
-                <BundleDetail :data="p.v3 || {}" :patient="p" :part="data.part" />
+                <BundleDetail :data="p.v3 || {}" :patient="p" :part="curPart" :hour="windowHour" />
               </td>
             </tr>
           </template>
         </tbody>
       </table>
+      <div v-if="!filteredPatients.length && activeData.patients?.length" class="filter-empty">
+        当前筛选下无匹配患者，<span class="linklike" @click="clearFilters">清除筛选</span>
+      </div>
     </div>
   </div>
     <!-- 排除原因弹窗 -->
@@ -179,13 +225,19 @@
 </template>
 <script setup>
 import { computed, ref } from 'vue';
-import { getDetailColumns } from '../utils/detailColumns.js';
+import { getDetailColumns, REASON_MAP, GATE_REASONS } from '../utils/detailColumns.js';
 import { exportDetailExcel } from '../utils/exportExcel.js';
 import { addExclusion, removeExclusion } from '../api/index.js';
 import BundleDetail from './BundleDetail.vue';
 
 const props = defineProps({
   data: Object,
+  // P2: 公式条（分子/分母/值）
+  summary: { type: Object, default: null },
+  // P2: 两份明细 { numerator, denominator }，提供时内部渲染切换 tab
+  parts: { type: Object, default: null },
+  // P2: ICU-05 漏斗 { candidate, shock, completed }
+  funnel: { type: Object, default: null },
   period: { type: String, default: '' },
   endPeriod: { type: String, default: '' },
   unit: { type: String, default: 'all' },
@@ -193,6 +245,75 @@ const props = defineProps({
 });
 
 const emit = defineEmits(['exclusion-changed']);
+
+// ── P2: 活动分部（分子/分母）──
+const activePart = ref(null); // null = 跟随 data.part（未提供 parts 时）
+const curPart = computed(() => activePart.value || props.data?.part || 'numerator');
+const activeData = computed(() => {
+  if (props.parts && props.parts[curPart.value]) return props.parts[curPart.value];
+  return props.data || {};
+});
+const hasBothParts = computed(() =>
+  !!(props.parts && props.parts.numerator && props.parts.denominator));
+function setPart(part) {
+  if (props.parts && props.parts[part]) activePart.value = part;
+}
+
+// ── P2: 原因分布（来自分母 payload）──
+const reasonSummary = computed(() => {
+  if (props.parts?.denominator?.reason_summary) return props.parts.denominator.reason_summary;
+  if (curPart.value === 'denominator') return props.data?.reason_summary || null;
+  return null;
+});
+const isGateReason = (code) => GATE_REASONS.has(code);
+const reasonLabel = (code) => REASON_MAP[code] || code || '';
+
+// ── P2: 结论筛选（chips + 漏斗点击 + 原因点击）──
+const verdictFilter = ref(null); // null | failed | uncertain | pending | excluded | shock | done
+const reasonFilter = ref(null);  // 原因码字符串
+
+function setVerdictFilter(f) {
+  verdictFilter.value = (verdictFilter.value === f && f) ? null : f;
+}
+function toggleReason(code) {
+  reasonFilter.value = reasonFilter.value === code ? null : code;
+}
+function clearFilters() {
+  verdictFilter.value = null;
+  reasonFilter.value = null;
+}
+
+const chipCounts = computed(() => {
+  const list = activeData.value?.patients || [];
+  const c = { all: list.length, failed: 0, uncertain: 0, pending: 0, excluded: 0 };
+  for (const p of list) {
+    if (p.excluded) { c.excluded++; continue; }
+    const v3 = p.v3 || {};
+    if (v3.finish === false) c.failed++;
+    else if (v3.finish == null && (v3.t0 || v3.reason)) c.uncertain++;
+    if (p.candidate_status === 'pending_review') c.pending++;
+  }
+  return c;
+});
+
+function matchVerdict(p) {
+  const f = verdictFilter.value;
+  if (!f) return true;
+  const v3 = p.v3 || {};
+  if (f === 'excluded') return !!p.excluded;
+  if (f === 'shock') return v3.k1 === true && v3.k2 === true;
+  if (f === 'done') return v3.finish === true;
+  if (f === 'failed') return v3.finish === false;
+  if (f === 'uncertain') return v3.finish == null && (v3.t0 || v3.reason);
+  if (f === 'pending') return p.candidate_status === 'pending_review';
+  return true;
+}
+function matchReason(p) {
+  if (!reasonFilter.value) return true;
+  const v3 = p.v3 || {};
+  const codes = v3.reason_codes || (v3.reason ? [v3.reason] : []);
+  return codes.includes(reasonFilter.value);
+}
 
 // ---- 人工排除 ----
 const showExclForm = ref(false);
@@ -222,13 +343,15 @@ const EXCL_REASONS = computed(() => {
 });
 const EXCLUSION_SUPPORTED_CODES = ['ICU-08', 'ICU-05-1h', 'ICU-05-3h', 'ICU-05-6h'];
 const canExclude = computed(() => EXCLUSION_SUPPORTED_CODES.includes(props.data?.code));
-const excludedCount = computed(() => (props.data?.patients || []).filter(p => p.excluded).length);
+const excludedCount = computed(() => (activeData.value?.patients || []).filter(p => p.excluded).length);
 const patientTypeFilter = ref('');
-const hasPatientType = computed(() => ['ICU-00','ICU-04','ICU-07','ICU-09','ICU-10'].includes(props.data?.code) && props.data?.part === 'denominator');
+const hasPatientType = computed(() => ['ICU-00','ICU-04','ICU-07','ICU-09','ICU-10'].includes(activeData.value?.code) && activeData.value?.part === 'denominator');
 const filteredPatients = computed(() => {
-  const list = props.data?.patients || [];
-  if (!hasPatientType.value || !patientTypeFilter.value) return list;
-  return list.filter(p => p.patient_type === patientTypeFilter.value);
+  const list = activeData.value?.patients || [];
+  return list.filter(p =>
+    (!hasPatientType.value || !patientTypeFilter.value || p.patient_type === patientTypeFilter.value)
+    && matchVerdict(p)
+    && matchReason(p));
 });
 
 const selectedPatientKey = ref(null);
@@ -266,7 +389,7 @@ async function submitExclusion() {
       ...exclForm.value,
     });
     showExclForm.value = false;
-    emit('exclusion-changed');
+    emit('exclusion-changed', curPart.value);
   } catch (e) {
     console.error('Exclude failed:', e);
   }
@@ -275,15 +398,14 @@ async function submitExclusion() {
 async function handleRestore(p) {
   try {
     await removeExclusion(props.data.code, p.exclusion_key, props.period, props.unit);
-    emit('exclusion-changed');
+    emit('exclusion-changed', curPart.value);
   } catch (e) {
     console.error('Restore failed:', e);
   }
 }
 
 // ── ICU-05 Bundle详情 ──
-const isIcu05 = computed(() => props.data?.code?.startsWith('ICU-05'));
-const showGuide = ref(false);
+const isIcu05 = computed(() => (activeData.value?.code || props.data?.code || '').startsWith('ICU-05'));
 const expandedRows = ref(new Set());
 
 function toggleExpand(patientId) {
@@ -299,7 +421,12 @@ function isExpanded(patientId) {
 }
 
 // ── 共享列定义 ──
-const columns = computed(() => getDetailColumns(props.data?.code, props.data?.part));
+const columns = computed(() => getDetailColumns(activeData.value?.code, curPart.value));
+// ICU-05 窗口小时数（'1h'|'3h'|'6h'），传给 BundleDetail 显示判定窗口
+const windowHour = computed(() => {
+  const code = activeData.value?.code || '';
+  return code.startsWith('ICU-05') ? (code.split('-')[2] || '') : '';
+});
 
 // ── 导出逻辑 ──
 const exporting = ref(false);
@@ -307,22 +434,23 @@ const exportError = ref('');
 const exportProgress = ref('');
 
 async function handleExport() {
-  if (exporting.value || !props.data?.patients?.length || isSummary.value) return;
+  const d = activeData.value;
+  if (exporting.value || !d?.patients?.length || isSummary.value) return;
   exporting.value = true;
   exportError.value = '';
   exportProgress.value = '';
   try {
     const { rows, filename, truncated } = await exportDetailExcel({
-      code: props.data.code,
-      name: props.data.name,
-      part: props.data.part,
+      code: d.code,
+      name: d.name,
+      part: d.part,
       period: props.period,
       endPeriod: props.endPeriod,
       unit: props.unit,
       unitName: props.unitName,
-      sourceDesc: props.data.source_desc,
-      patients: props.data.patients,
-      hasMore: props.data.has_more,
+      sourceDesc: d.source_desc,
+      patients: d.patients,
+      hasMore: d.has_more,
       onProgress: (loaded) => { exportProgress.value = `已加载 ${loaded} 条...`; },
     });
     exportProgress.value = '';
@@ -341,15 +469,15 @@ async function handleExport() {
 
 // ── 辅助判断 ──
 const isSummary = computed(() =>
-  props.data?.part === 'denominator' &&
-  props.data?.patients?.length === 1 &&
-  props.data?.patients[0]?.patient_id === '—'
+  activeData.value?.part === 'denominator' &&
+  activeData.value?.patients?.length === 1 &&
+  activeData.value?.patients[0]?.patient_id === '—'
 );
 const isTriTube = computed(() => ['ICU-16', 'ICU-17', 'CAUTI'].includes(props.data?.code));
 
 // ICU-06 分母：低置信度 AI 判定行 → 标黄提示人工复核
 const rowClass = (p) => {
-  if (props.data?.code === 'ICU-06' && props.data?.part === 'denominator'
+  if (activeData.value?.code === 'ICU-06' && curPart.value === 'denominator'
       && p.admission_source === 'low_confidence') {
     return 'low-confidence';
   }
@@ -364,7 +492,8 @@ const rowClass = (p) => {
   min-height:40px; flex-wrap:wrap;
 }
 .source-left { display:flex; align-items:center; gap:6px; flex:1; min-width:0; overflow:hidden; }
-.source-desc { overflow:hidden; text-overflow:ellipsis; white-space:nowrap; }
+/* 口径文案换行显示（最多2行），不再单行截断 */
+.source-desc { white-space:normal; display:-webkit-box; -webkit-line-clamp:2; -webkit-box-orient:vertical; overflow:hidden; }
 .source-right { display:flex; align-items:center; gap:10px; flex-shrink:0; white-space:nowrap; }
 .tag { background:var(--brand); color:#fff; padding:1px 8px; border-radius:4px; font-size:12px; flex-shrink:0; }
 .count { color:var(--brand); font-weight:600; font-size:13px; }
@@ -379,6 +508,103 @@ const rowClass = (p) => {
 .export-progress { color:var(--text-sub); }
 .export-error { color:var(--danger); }
 .excl-count { color:var(--warn); font-weight:600; font-size:13px; }
+
+/* ── P2: 公式条 ── */
+.formula-row { display:flex; gap:12px; margin-bottom:10px; flex-wrap:wrap; }
+.formula-bar {
+  flex: 1 1 300px; display:flex; align-items:center; gap:10px; flex-wrap:wrap;
+  padding:12px 14px; background:var(--brand-weak); border:1px solid rgba(30,94,184,0.15); border-radius:8px;
+}
+.fb-label { font-size:12px; color:var(--text-sub); font-weight:600; }
+.fb-part {
+  display:flex; flex-direction:column; align-items:center; gap:0;
+  background:#fff; border:1.5px solid var(--border); border-radius:8px;
+  padding:4px 16px; cursor:pointer; min-width:64px;
+}
+.fb-part b { font-size:22px; line-height:1.1; color:var(--brand); }
+.fb-part small { font-size:11px; color:var(--text-sub); }
+.fb-part.active { border-color:var(--brand); box-shadow:0 0 0 2px rgba(30,94,184,0.18); }
+.fb-part:hover { border-color:var(--brand); }
+.fb-op { font-size:18px; color:var(--text-sub); font-weight:600; }
+.fb-val { font-size:24px; font-weight:700; color:var(--danger); }
+
+/* ── P2: 漏斗 ── */
+.funnel {
+  flex: 1 1 300px; display:flex; align-items:center; gap:6px;
+  padding:12px 14px; background:#fff; border:1px solid var(--border); border-radius:8px;
+}
+.fn-node { flex:1; text-align:center; background:#e8f0fe; border-radius:6px; padding:6px 4px; }
+.fn-node b { display:block; font-size:18px; color:var(--brand); line-height:1.2; }
+.fn-node span { font-size:11px; color:var(--text-sub); }
+.fn-node.fn-warn { background:#fff4e5; } .fn-node.fn-warn b { color:#b26a00; }
+.fn-node.fn-bad { background:#fdecea; } .fn-node.fn-bad b { color:var(--danger); }
+.fn-node.clickable { cursor:pointer; }
+.fn-node.clickable:hover { outline:1.5px solid var(--brand); }
+.fn-arrow { color:var(--text-faint); font-size:14px; }
+
+/* ── P2: 三色原因分布 ── */
+.reason-bar {
+  background:var(--bg-surface); border:1px solid var(--border); border-radius:8px;
+  padding:10px 14px; margin-bottom:10px;
+}
+.rb-head { display:flex; justify-content:space-between; align-items:center; margin-bottom:8px; flex-wrap:wrap; gap:6px; }
+.rb-title { font-size:13px; font-weight:600; color:var(--text-title); }
+.rb-legend { display:flex; gap:12px; font-size:11px; color:var(--text-sub); align-items:center; }
+.rb-legend .dot { display:inline-block; width:9px; height:9px; border-radius:50%; margin-right:4px; vertical-align:-1px; }
+.d-fail { background:var(--danger); } .d-order { background:#e65100; } .d-missing { background:#9aa6b8; }
+.rb-chips { display:flex; flex-wrap:wrap; gap:8px; }
+.rb-chip {
+  border:1px solid transparent; border-radius:14px; padding:3px 12px;
+  font-size:12px; cursor:pointer; font-weight:500;
+}
+.rb-chip.fail { background:#fdecea; color:#c62828; border-color:#f5c6c2; }
+.rb-chip.order { background:#fff3e0; color:#e65100; border-color:#ffcc80; }
+.rb-chip.missing { background:#eef1f6; color:#5f6b7f; border-color:#d8dee9; }
+.rb-chip.gate { background:#e8eaf6; color:#3949ab; border-color:#c5cae9; }
+.rb-chip.on { outline:2px solid var(--brand); outline-offset:1px; }
+.rb-chip:hover { filter:brightness(0.96); }
+.rb-empty { font-size:12px; color:#0a7d33; }
+.rb-note { margin-top:8px; font-size:11px; color:var(--text-sub); }
+
+/* ── P2: 分子/分母 tab ── */
+.part-tabs2 { display:flex; align-items:center; gap:8px; margin-bottom:8px; }
+.pt2-btn {
+  padding:6px 18px; font-size:13px; border-radius:6px; cursor:pointer;
+  background:var(--bg-subtle); border:1px solid var(--border); color:var(--text-sub);
+}
+.pt2-btn.active { background:var(--brand); border-color:var(--brand); color:#fff; font-weight:600; }
+.pt2-reset { font-size:12px; color:var(--brand); cursor:pointer; margin-left:auto; }
+.pt2-reset:hover { text-decoration:underline; }
+
+/* ── P2: 结论筛选 chips ── */
+.chip-bar { display:flex; flex-wrap:wrap; gap:8px; margin-bottom:8px; }
+.chip {
+  padding:4px 14px; font-size:12px; border-radius:14px; cursor:pointer;
+  background:var(--bg-subtle); border:1px solid var(--border); color:var(--text-sub);
+}
+.chip.on { background:var(--brand); border-color:var(--brand); color:#fff; font-weight:600; }
+.chip-fail.on { background:var(--danger); border-color:var(--danger); }
+.chip-miss.on { background:#7a8699; border-color:#7a8699; }
+.chip-pending.on { background:#b26a00; border-color:#b26a00; }
+.chip-excl.on { background:#5f6b7f; border-color:#5f6b7f; }
+
+/* ── P2: 结论列三色 ── */
+.detail-table td.v-ok { color:#0a7d33; font-weight:600; }
+.detail-table td.v-fail { color:#c62828; font-weight:600; }
+.detail-table td.v-order { color:#e65100; font-weight:600; }
+.detail-table td.v-missing { color:#7a8699; }
+.detail-table td.v-gate { color:#3949ab; }
+.detail-table td.v-excluded { color:#9aa6b8; }
+.detail-table tbody tr.selected td.v-ok,
+.detail-table tbody tr.selected td.v-fail,
+.detail-table tbody tr.selected td.v-order,
+.detail-table tbody tr.selected td.v-missing,
+.detail-table tbody tr.selected td.v-gate,
+.detail-table tbody tr.selected td.v-excluded { color:#fff !important; }
+
+.filter-empty { padding:20px; text-align:center; font-size:13px; color:var(--text-sub); }
+.linklike { color:var(--brand); cursor:pointer; }
+.linklike:hover { text-decoration:underline; }
 .den-summary { font-size:16px; font-weight:600; color:var(--text-title); text-align:center;
   padding:32px 20px; background:#f8fafc; border-radius:8px;
   border: 1px solid var(--border); }

@@ -109,22 +109,16 @@
 
     <Modal v-if="trendData" :title="`${trendData.name} · ${year}年趋势`" @close="trendData=null"><TrendModal :data="trendData" /></Modal>
     <Modal v-if="detailData" :title="detailTitle" @close="detailData=null">
-      <DetailModal :data="detailData" :period="period" :end-period="isMultiMonth ? periodEnd : ''" :unit="unit" :unit-name="deptName" />
+      <DetailModal :data="detailData" :summary="detailData.summary" :parts="detailData.parts"
+                   :funnel="detailData.funnel"
+                   :period="period" :end-period="isMultiMonth ? periodEnd : ''" :unit="unit" :unit-name="deptName"
+                   @exclusion-changed="onDetailExclusionChanged" />
     </Modal>
-    <!-- 月份单元格下钻弹窗：独立查询上下文，支持分子/分母切换 -->
+    <!-- 月份单元格下钻弹窗：独立查询上下文（分子/分母切换由 DetailModal 内部处理） -->
     <Modal v-if="monthDetailData" :title="monthDetailTitle" @close="closeMonthDetail">
-      <!-- 分子/分母切换标签 -->
-      <div v-if="monthDetailNumerator && monthDetailDenominator" class="part-tabs">
-        <button :class="['part-tab', { active: monthDetailPart === 'numerator' }]"
-                @click="switchMonthDetailPart('numerator')">
-          分子 ({{ monthDetailNumerator.count }})
-        </button>
-        <button :class="['part-tab', { active: monthDetailPart === 'denominator' }]"
-                @click="switchMonthDetailPart('denominator')">
-          分母 ({{ monthDetailDenominator.count }})
-        </button>
-      </div>
-      <DetailModal :data="monthDetailData" :period="monthDetailPeriod" :end-period="''" :unit="unit" :unit-name="deptName"
+      <DetailModal :data="monthDetailData" :summary="monthDetailData.summary" :parts="monthDetailData.parts"
+                   :funnel="monthDetailData.funnel"
+                   :period="monthDetailPeriod" :end-period="''" :unit="unit" :unit-name="deptName"
                    @exclusion-changed="onMonthExclusionChanged" />
     </Modal>
     <Modal v-if="guideVisible" title="指标口径说明" @close="guideVisible=false"><IndicatorGuideModal /></Modal>
@@ -165,7 +159,6 @@ const census = ref(null); const selectedRow = ref(null);
 // 月份单元格下钻
 const monthDetailData = ref(null);
 const monthDetailPeriod = ref('');
-const monthDetailPart = ref('numerator'); // 当前显示的分子/分母
 const monthDetailNumerator = ref(null);   // 分子数据缓存
 const monthDetailDenominator = ref(null); // 分母数据缓存
 const monthDetailAbort = ref(null); // 用于取消过期请求
@@ -275,12 +268,49 @@ async function drillDetail(row, part) {
   if (row[part] == null) return;
   const endP = isMultiMonth.value ? periodEnd.value : '';
   const base = { code: row.code, name: row.name, part, count: 0, source_desc: '明细加载中...', patients: [], loading: true };
-  detailData.value = base;
+  // 公式条/漏斗在加载期间即显示
+  detailData.value = { ...base, summary: buildSummary(row), funnel: buildFunnel(row) };
   try {
-    detailData.value = await apiFetchDetail(row.code, period.value, part, unit.value, endP, { limit: 200, offset: 0 });
+    const [numR, denR] = await Promise.all([
+      apiFetchDetail(row.code, period.value, 'numerator', unit.value, endP, { limit: 200, offset: 0 }),
+      apiFetchDetail(row.code, period.value, 'denominator', unit.value, endP, { limit: 200, offset: 0 }),
+    ]);
+    const clicked = part === 'numerator' ? numR : denR;
+    detailData.value = {
+      ...clicked,
+      summary: buildSummary(row),
+      parts: { numerator: numR, denominator: denR },
+      funnel: buildFunnel(row),
+    };
   } catch (e) {
-    detailData.value = { ...base, loading: false, error: e.message || '明细加载失败', source_desc: '明细加载失败' };
+    detailData.value = { ...base, loading: false, error: e.message || '明细加载失败', source_desc: '明细加载失败',
+                         summary: buildSummary(row), funnel: buildFunnel(row) };
   }
+}
+
+// 公式条数据：单期/跨期用行上的真实分子分母；月度下钻 fromCounts 用明细条数近似
+const MONTH_COUNT_SKIP = ['ICU-01', 'ICU-02', 'ICU-03', 'ICU-11']; // 分子/分母值≠明细条数的指标
+function buildSummary(row, opts = {}) {
+  const s = { value: opts.value ?? row.value, unit: row.unit || '' };
+  if (opts.fromCounts) {
+    if (!MONTH_COUNT_SKIP.includes(row.code)) {
+      s.numerator = opts.numCount;
+      s.denominator = opts.denCount;
+    }
+  } else {
+    if (row.numerator != null) s.numerator = row.numerator;
+    if (row.denominator != null) s.denominator = row.denominator;
+  }
+  return s;
+}
+// ICU-05 人群漏斗：候选池 → 休克确认(K1∧K2) → Bundle达标
+function buildFunnel(row, opts = {}) {
+  if (!row.code || !String(row.code).startsWith('ICU-05')) return null;
+  return {
+    candidate: opts.candidate ?? row.candidate_den ?? row.denominator ?? null,
+    shock: opts.shock ?? row.old_shock_count ?? null,
+    completed: opts.completed ?? row.numerator ?? null,
+  };
 }
 
 // 月份单元格下钻：查询被点击月份的分子和分母
@@ -298,13 +328,14 @@ async function drillMonthDetail(row, m) {
   monthDetailAbort.value = controller;
 
   monthDetailPeriod.value = monthPeriod;
-  monthDetailPart.value = 'numerator';
-  monthDetailNumerator.value = null;
-  monthDetailDenominator.value = null;
 
-  // 先显示加载状态
+  // 先显示加载状态（含公式条）
   const base = { code: row.code, name: row.name, part: 'numerator', count: 0, source_desc: '明细加载中...', patients: [], loading: true };
-  monthDetailData.value = base;
+  monthDetailData.value = {
+    ...base,
+    summary: buildSummary(row, { fromCounts: true, value: row.monthly?.[m] }),
+    // 月度口径: 候选/达标=当月明细条数；休克确认无当月数据 → 显示 '—'
+  };
 
   // 并行获取分子和分母
   try {
@@ -315,7 +346,15 @@ async function drillMonthDetail(row, m) {
     if (!controller.signal.aborted) {
       monthDetailNumerator.value = numResult;
       monthDetailDenominator.value = denResult;
-      monthDetailData.value = numResult; // 默认显示分子
+      monthDetailData.value = {
+        ...numResult,
+        summary: buildSummary(row, { fromCounts: true, value: row.monthly?.[m], numCount: numResult.count, denCount: denResult.count }),
+        parts: { numerator: numResult, denominator: denResult },
+        // 月度漏斗: 候选/达标为当月值；休克确认无当月口径 → null 显示 '—'
+        funnel: String(row.code).startsWith('ICU-05')
+          ? { candidate: denResult.count, shock: null, completed: numResult.count }
+          : null,
+      }; // 默认显示分子
     }
   } catch (e) {
     if (!controller.signal.aborted) {
@@ -324,24 +363,13 @@ async function drillMonthDetail(row, m) {
   }
 }
 
-// 切换分子/分母显示
-function switchMonthDetailPart(part) {
-  if (part === 'numerator' && monthDetailNumerator.value) {
-    monthDetailPart.value = 'numerator';
-    monthDetailData.value = monthDetailNumerator.value;
-  } else if (part === 'denominator' && monthDetailDenominator.value) {
-    monthDetailPart.value = 'denominator';
-    monthDetailData.value = monthDetailDenominator.value;
-  }
-}
+// 分子/分母切换已内置于 DetailModal（parts prop），无需外部维护当前 part
 
-const detailTitle = computed(()=> detailData.value
-  ? `${detailData.value.name} · ${detailData.value.part==='numerator'?'分子':'分母'}明细` : '');
+const detailTitle = computed(()=> detailData.value ? `${detailData.value.name} · 明细` : '');
 
 const monthDetailTitle = computed(() => {
   if (!monthDetailData.value) return '';
-  const part = monthDetailPart.value === 'numerator' ? '分子' : '分母';
-  return `${monthDetailData.value.name} · ${monthDetailPeriod.value} · ${part}明细`;
+  return `${monthDetailData.value.name} · ${monthDetailPeriod.value} 明细`;
 });
 
 function closeMonthDetail() {
@@ -351,30 +379,57 @@ function closeMonthDetail() {
   }
   monthDetailData.value = null;
   monthDetailPeriod.value = '';
-  monthDetailPart.value = 'numerator';
   monthDetailNumerator.value = null;
   monthDetailDenominator.value = null;
 }
 
-function onMonthExclusionChanged() {
-  // 排除变更后重新加载当前part的详情
-  if (monthDetailData.value && monthDetailPeriod.value) {
-    const code = monthDetailData.value.code;
-    const currentPart = monthDetailPart.value;
-    const base = { ...monthDetailData.value, loading: true, patients: [], source_desc: '重新加载中...' };
-    monthDetailData.value = base;
-    apiFetchDetail(code, monthDetailPeriod.value, currentPart, unit.value, '', { limit: 200, offset: 0 })
-      .then(result => {
-        monthDetailData.value = result;
-        // 更新对应的缓存
-        if (currentPart === 'numerator') {
-          monthDetailNumerator.value = result;
-        } else {
-          monthDetailDenominator.value = result;
-        }
-      })
-      .catch(e => { monthDetailData.value = { ...base, loading: false, error: e.message }; });
-  }
+function onMonthExclusionChanged(part) {
+  // 排除变更后重新加载分子+分母（公式条计数同步更新）
+  if (!monthDetailData.value || !monthDetailPeriod.value) return;
+  const code = monthDetailData.value.code;
+  reloadBothParts(
+    (p) => apiFetchDetail(code, monthDetailPeriod.value, p, unit.value, '', { limit: 200, offset: 0 }),
+    part || monthDetailData.value.part,
+    monthDetailData.value,
+    (next) => { monthDetailData.value = next; },
+    (numR, denR) => { monthDetailNumerator.value = numR; monthDetailDenominator.value = denR; }
+  );
+}
+
+function onDetailExclusionChanged(part) {
+  if (!detailData.value) return;
+  const endP = isMultiMonth.value ? periodEnd.value : '';
+  const cur = detailData.value;
+  reloadBothParts(
+    (p) => apiFetchDetail(cur.code, period.value, p, unit.value, endP, { limit: 200, offset: 0 }),
+    part || cur.part,
+    cur,
+    (next) => { detailData.value = next; },
+    () => {}
+  );
+}
+
+// 排除变更后统一重载两份明细：更新 parts + 公式条计数，并保持当前 tab
+function reloadBothParts(fetcher, stayPart, current, apply, onLoaded) {
+  const base = { ...current, loading: true, patients: [], source_desc: '重新加载中...' };
+  apply(base);
+  Promise.all([fetcher('numerator'), fetcher('denominator')])
+    .then(([numR, denR]) => {
+      onLoaded(numR, denR);
+      const summary = { ...(current.summary || {}) };
+      if (summary.numerator != null) summary.numerator = numR.count;
+      if (summary.denominator != null) summary.denominator = denR.count;
+      const funnel = current.funnel
+        ? { ...current.funnel, candidate: denR.count, completed: numR.count }
+        : null;
+      apply({
+        ...(stayPart === 'numerator' ? numR : denR),
+        summary,
+        parts: { numerator: numR, denominator: denR },
+        funnel,
+      });
+    })
+    .catch(e => { apply({ ...base, loading: false, error: e.message }); });
 }
 function showToast(message, type = 'success', duration = 4000) {
   toast.value = { show: true, message, type };

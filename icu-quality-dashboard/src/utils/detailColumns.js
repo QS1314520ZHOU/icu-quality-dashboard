@@ -1,4 +1,4 @@
-﻿// src/utils/detailColumns.js
+// src/utils/detailColumns.js
 // ============================================================
 // 指标明细「单一数据源」列定义
 // DetailModal.vue（渲染表头/单元格）与 exportExcel.js（导出）共同调用，
@@ -40,24 +40,59 @@ const BUNDLE_CODES = ['ICU-05-1h', 'ICU-05-3h', 'ICU-05-6h']
 
 /* ---------------- ICU-05 Bundle 原因码映射 ---------------- */
 
-const REASON_MAP = {
+export const REASON_MAP = {
   'NO_T0': '找不到T0锚点',
-  'NOT_SEPTIC_SHOCK': '非脓毒性休克',
+  'NOT_SEPTIC_SHOCK': '未通过休克确认(乳酸/升压药)',
+  'NO_ORGAN_DYSFUNCTION': '无器官障碍证据',
   'NO_INFECTION': '无感染证据',
+  'NO_INFECTION_EVIDENCE': '无感染证据',
   'A1_NOT_MET': '乳酸未测量',
   'B3_NOT_MET': '血培养/抗生素不达标',
+  'AB_MISSING': '无抗生素记录',
+  'AB_LATE': '抗生素超出时间窗',
+  'BC_MISSING': '无血培养记录',
+  'BC_LATE': '血培养超出时间窗',
+  'BC_AFTER_AB': '先用抗生素后采培养(顺序错)',
   'C3_FLUID_INSUFFICIENT': '液体量不足',
-  'MAP_NOT_TRIGGERED': 'MAP未触发',
-  'LACTATE_NOT_TRIGGERED': '乳酸未触发',
+  'FLUID_NONE': '无液体执行',
+  'FLUID_INSUFFICIENT': '液体量不足1500ml',
+  'MAP_NOT_MET': 'MAP<70(需液体复苏)',
+  'MAP_NOT_TRIGGERED': 'MAP未触发(<70mmHg)',
+  'LACTATE_NOT_TRIGGERED': '乳酸未触发(<4mmol/L)',
+  'LACTATE_RECHECK_MISSING': '未复测乳酸',
   'FINISH_FALSE': 'Bundle未完成',
   'DATA_MISSING_LAC': '乳酸数据缺失',
   'DATA_MISSING_MAP': 'MAP数据缺失',
-  'AB_MISSING': '无抗生素记录',
-  'BC_MISSING': '无血培养记录',
-  'FLUID_NONE': '无液体执行',
-  'FLUID_INSUFFICIENT': '液体量不足',
+  'DATA_MISSING_FLUID': '液体数据缺失',
   'SITE_UNCONFIRMED': '感染部位未确认',
   'MANUAL_EXCLUDED': '人工排除',
+}
+
+/* gate 级原因（未进判定，非数据缺失） —— 与 finish=None 的"数据缺失"区分开 */
+export const GATE_REASONS = new Set([
+  'NOT_SEPTIC_SHOCK', 'NO_ORGAN_DYSFUNCTION',
+  'NO_INFECTION', 'NO_INFECTION_EVIDENCE', 'NO_T0',
+])
+
+/* 结论三色语义: 红=明确未达标 / 橙=顺序问题 / 灰=数据缺失 / 蓝灰=未确认 */
+export function verdictOf(p) {
+  const v3 = p.v3 || {}
+  if (p.excluded) return { text: '已排除', cls: 'v-excluded' }
+  const codes = (v3.reason_codes && v3.reason_codes.length)
+    ? v3.reason_codes
+    : (v3.reason ? [v3.reason] : [])
+  const labels = codes.map(c => REASON_MAP[c] || c)
+  if (v3.finish === true) return { text: '达标', cls: 'v-ok' }
+  if (v3.finish === false) {
+    const cls = codes[0] === 'BC_AFTER_AB' ? 'v-order' : 'v-fail'
+    return { text: labels.join(' · ') || '未达标', cls }
+  }
+  if (codes.some(c => GATE_REASONS.has(c))) {
+    return { text: labels.join(' · ') || '未通过门控', cls: 'v-gate' }
+  }
+  if (codes.length) return { text: labels.join(' · '), cls: 'v-missing' }
+  if (v3.t0 || v3.finish === null) return { text: '无法判定(数据缺失)', cls: 'v-missing' }
+  return { text: '—', cls: '' }
 }
 
 function fmtReason(code) {
@@ -230,8 +265,8 @@ const CONFIRMATION_STATUS_MAP = {
   'insufficient': '证据不足',
 }
 
-function resolveIcu05Cols(part) {
-  return [
+function resolveIcu05Cols(part, forExport = false) {
+  const full = [
     COL_PATIENT_ID,
     COL_NAME,
     { header: '候选状态', get: (p) => {
@@ -301,18 +336,32 @@ function resolveIcu05Cols(part) {
       }},
     ]),
   ]
+  if (forExport) return full
+  // 界面精简列（#设计 P2: 7列 + 结论列，其余收进展开行）
+  return [
+    COL_PATIENT_ID,
+    COL_NAME,
+    { header: 'T0', get: (p) => fmtDate(p.t0 || p.admit_time) },
+    { header: '乳酸', get: (p) => {
+      const v = (p.v3 || {}).lactate
+      return v == null ? '—' : Number(v).toFixed(1)
+    }},
+    { header: '升压药', get: (p) => ((p.v3 || {}).vaso_name ? '有' : '无') },
+    { header: '结论', get: (p) => verdictOf(p).text, cls: (p) => verdictOf(p).cls },
+  ]
 }
 
 /* ============================================================
- * 主入口：getDetailColumns(code, part)
+ * 主入口：getDetailColumns(code, part, opts)
  * part: 'numerator' | 'denominator'
- * 返回：[{ header, get }]
+ * opts.forExport: true 时返回全列（Excel 导出用），默认精简展示列
+ * 返回：[{ header, get, cls? }]
  * ============================================================ */
 
-export function getDetailColumns(code, part) {
+export function getDetailColumns(code, part, opts = {}) {
   // ---- ICU-05 Bundle ----
   if (BUNDLE_CODES.includes(code)) {
-    return resolveIcu05Cols(part)
+    return resolveIcu05Cols(part, !!opts.forExport)
   }
   // ---- ICU-15：转出ICU后48h重返率 ----
   if (code === 'ICU-15') {
