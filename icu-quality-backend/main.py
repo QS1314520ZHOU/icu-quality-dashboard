@@ -238,7 +238,10 @@ def _cache_clear():
 
 DETAIL_CACHE_COLLECTION = "icu_indicator_detail_cache"
 # 缓存版本号：修改口径时 +1，旧条目自然失效
-CACHE_VERSION = 10  # v10: detail 原因字段修复(reasons[]) + ICU-05 reason_summary
+CACHE_VERSION = 13  # v11: ICU-07 口径修复(分母队列反查pid/剔假匹配/气压治疗)
+                    # v12: ICU-07 明细统一住院号=mrn + detail_id=在科记录_id(分子分母可逐行对账)
+                    # v13: ICU-04/07/09/10 统一**人数口径**(按 mrn 去重，
+                    #      与 INDICATORS_CONFIG「患者数」定义一致；明细一人一行)
 
 
 def _dept_cache_key(dept_codes: list) -> str:
@@ -900,8 +903,10 @@ def query_summary(period: str, icu_unit: str = "all"):
 
     # ----- ICU-07：DVT预防率（DataCenter.VI_ICU_ZYYZ 医嘱包含匹配）-----
     dvt_data = get_dvt_prevention_patients(dept_codes, start_date, end_date)
+    # 人数口径（INDICATORS_CONFIG 定义分子分母均为“患者数”）：
+    # 分子=实施预防的患者数 all_count，分母=同期在科患者数 icu04_den（均按 mrn 去重）
     icu07_num = dvt_data.get("all_count", 0)
-    icu07_den = icu04_den  # 分母=同期在科患者（同ICU-04）
+    icu07_den = icu04_den  # 分母=同期在科患者（同ICU-04，共用 get_icu_denominator_stays）
 
     # ----- ICU-08：ARDS俯卧位实施率（三闸门分母 + 俯卧位分子）-----
     icu08_data = get_icu08_data(dept_codes, start_date, end_date)
@@ -1896,41 +1901,41 @@ def query_detail(code: str, period: str, part: str, icu_unit: str = "all"):
     if code == "ICU-07":
         data = get_dvt_prevention_patients(dept_codes, start_date, end_date)
         if part == "numerator":
+            # 人数口径：num_stays 已按患者去重，行数 == 汇总分子（all_count），
+            # 与分母明细同为一人一行，可逐行核对
             items = []
-            for p in data.get("drug_patients", []):
-                orders = p.get("matched_orders", [])
+            for s in data.get("num_stays", []):
+                orders = s.get("matched_orders", [])
+                _dis = s.get("icuDischargeTime")
                 items.append({
-                    "patient_id": p.get("patient_id", p.get("pid", "")),
-                    "name": p.get("name", ""),
+                    # 「住院号」列与分母明细同为 mrn，分子分母可逐行对上；
+                    # detail_id = 该次在科记录 _id（两侧都取该患者入科最早的一次），
+                    # 所以分子的 detail_id 一定 ⊆ 分母的 detail_id
+                    "patient_id": s.get("mrn", "") or s.get("patient_id", ""),
+                    "detail_id": str(s.get("stay_id", ""))[-8:] or s.get("patient_id", ""),
+                    "mrn": s.get("mrn", ""),
+                    "name": s.get("name", ""),
                     "gender": "", "age": "",
-                    "bed_no": "药物预防",
-                    "dept": "",
-                    "admit_time": orders[0][:60] if orders else "",
-                    "discharge_time": "",
+                    "bed_no": s.get("measure", ""),          # 列头「预防措施」
+                    "dept": s.get("deptCode", ""),
+                    "admit_time": orders[0][:60] if orders else "",   # 列头「医嘱示例」
+                    "discharge_time": _dis.strftime("%Y-%m-%d %H:%M") if _dis else "",
                     "admission_source": "",
-                    "value": p.get("order_count", 0),
-                })
-            for p in data.get("mech_patients", []):
-                orders = p.get("matched_orders", [])
-                items.append({
-                    "patient_id": p.get("patient_id", p.get("pid", "")),
-                    "name": p.get("name", ""),
-                    "gender": "", "age": "",
-                    "bed_no": "机械预防",
-                    "dept": "",
-                    "admit_time": orders[0][:60] if orders else "",
-                    "discharge_time": "",
-                    "admission_source": "",
-                    "value": p.get("order_count", 0),
+                    "patient_type": "原有" if s.get("icuAdmissionTime") and s.get("icuAdmissionTime") < start_dt else "新入",
+                    "value": s.get("order_count", 0),        # 列头「医嘱条数」
                 })
             _enrich_admission_discharge(items, dept_codes)
             return items
         else:
             data2 = get_icu04_apache_data(dept_codes, start_date, end_date)
-            items = [{"patient_id": p.get("patientId", str(p.get("_id", ""))[-8:]), "name": p.get("name", ""),
-                      "gender": "", "age": "", "bed_no": p.get("hisBed", ""), "dept": "",
+            items = [{"patient_id": p.get("mrn", "") or p.get("patientId", ""),
+                      "detail_id": str(p.get("_id", ""))[-8:],
+                      "mrn": p.get("mrn", ""),
+                      "name": p.get("name", ""),
+                      "gender": "", "age": "", "bed_no": p.get("hisBed", ""), "dept": p.get("deptCode", ""),
                       "admit_time": p.get("icuAdmissionTime").strftime("%Y-%m-%d %H:%M") if p.get("icuAdmissionTime") else "-",
-                      "discharge_time": "", "admission_source": "", "patient_type": "原有" if p.get("icuAdmissionTime", end_dt) < start_dt else "新入", "value": 1}
+                      "discharge_time": p.get("icuDischargeTime").strftime("%Y-%m-%d %H:%M") if p.get("icuDischargeTime") else "",
+                      "admission_source": "", "patient_type": "原有" if p.get("icuAdmissionTime", end_dt) < start_dt else "新入", "value": 1}
                      for p in data2.get("den_patients", [])]
             _enrich_admission_discharge(items, dept_codes)
             return items
@@ -2913,7 +2918,7 @@ def indicator_detail(code: str, period: str, part: str, icu_unit: str = "all", e
             else "分母：来自 configBed 表，统计科室实际开放床位数"
     elif code == "ICU-04":
         source_desc = "分子：来自 score 表，当月首次 APACHEⅡ 评分 total ≥ 15 的患者" if part == "numerator" \
-            else "分母：来自 patient 表，统计期内在科患者（排除 invalid）"
+            else "分母：来自 patient 表，统计期内在科患者（排除 invalid）。人数口径 —— 按住院号去重，同一患者当月多次入科只算一人"
     elif code in ("ICU-05-1h", "ICU-05-3h", "ICU-05-6h"):
         h = code.split("-")[2]
         # 人话文案（#设计: 替换原 V3/K1/A1/B3 技术黑话）
@@ -2928,14 +2933,17 @@ def indicator_detail(code: str, period: str, part: str, icu_unit: str = "all", e
         source_desc = (f"分子：来自 VI_ICU_ZYYZ 培养类检验医嘱，首次抗生素前有病原学送检的患者（送检≤首剂时间）" if part == "numerator"
             else f"分母：来自 drugExe 抗菌药执行记录，经三层判定（A感染信号→B围术期→C短疗程→AI灰区）确认治疗目的，已剔除预防性用药")
     elif code == "ICU-07":
-        source_desc = "分子：来自 DataCenter.VI_ICU_ZYYZ，抗凝药或机械预防医嘱包含匹配（排除封管/有创压肝素）" if part == "numerator" \
-            else "分母：来自 patient 表，统计期内在科患者（排除 invalid）"
+        source_desc = ("分子：来自 DataCenter.VI_ICU_ZYYZ，统计期内已执行的抗凝药或机械预防医嘱"
+                       "（按分母队列 mrn 反查 pid，不经 ZYBR 科室过滤；剔除检验假匹配、"
+                       "封管/有创压管路维护、血液净化管路抗凝）" if part == "numerator"
+            else "分母：来自 patient 表，统计期内在科患者（deptCode 属本科室、排除 invalid、入出科时间与统计期有交集）。"
+                 "人数口径 —— 按住院号去重，同一患者当月多次入科只算一人，与分子同口径")
     elif code == "ICU-09":
         source_desc = "分子：床旁评估记录或量表评分记录中完成镇痛评分（NRS/CPOT/BPS等）的患者，明细展示评分中文名、分值和时间" if part == "numerator" \
-            else "分母：同期入住ICU的患者总人数"
+            else "分母：同期入住ICU的患者总人数（人数口径 —— 按住院号去重，同一患者当月多次入科只算一人）"
     elif code == "ICU-10":
         source_desc = "分子：床旁评估记录或量表评分记录中完成镇静评分（RASS等）的患者，明细展示评分中文名、分值和时间" if part == "numerator" \
-            else "分母：同期入住ICU的患者总人数"
+            else "分母：同期入住ICU的患者总人数（人数口径 —— 按住院号去重，同一患者当月多次入科只算一人）"
     elif code == "ICU-11":
         source_desc = "分子：已结案完整病例中在院死亡或非医嘱离院的患者数" if part == "numerator" \
             else "分母：死亡、出院、非医嘱离院且有入科24小时内首次APACHEⅡ评分病例的预计死亡率之和"

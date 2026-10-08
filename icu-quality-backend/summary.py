@@ -24,6 +24,7 @@ from db import (
     get_icu16_data, get_icu17_data, get_icu18_data, get_icu19_data, get_cauti_data,
     get_dvt_prevention_patients, get_icu08_data,
     get_patient_census, get_patient_census_detail,
+    get_icu_denominator_stays,
 )
 
 # ============================================================
@@ -375,10 +376,10 @@ def _compute_icu06(dept_codes, start, end):
 
 
 def _compute_icu07(dept_codes, start, end):
-    """ICU-07: DVT预防率"""
+    """ICU-07: DVT预防率（人数口径：分子分母均按 mrn 去重）"""
     d = get_dvt_prevention_patients(dept_codes, start, end)
+    # all_count = 实施预防的患者数；分母 = 同期在科患者数（同为人数口径）
     num = d.get("all_count", 0)
-    # 分母 = 在科患者
     den = _count_icu_patients(dept_codes, start, end)
     val = round(num / den * 100, 1) if den > 0 else 0.0
     return {"num": num, "den": den, "val": val, "val_type": "percent"}
@@ -554,10 +555,16 @@ def _compute_cauti(dept_codes, start, end):
 
 
 def _count_icu_patients(dept_codes, start, end):
-    """辅助：统计期内在科患者数（原有 + 新入）"""
+    """
+    辅助：统计期内在科患者数 —— **人数口径**，按 mrn 去重。
+
+    不能用 get_patient_census(distinct_by="patient")：它的 total = carry_in + new_admit
+    是两个 distinct 集合相加，同一患者「上月带入 + 本月新入」会被数两次。
+    这里直接对与分母明细同一份在科记录去重，保证与 icu04_den 完全一致。
+    """
     try:
-        c = get_patient_census(dept_codes, start, end, distinct_by="admission")
-        return c["total"]
+        stays = get_icu_denominator_stays(dept_codes, start, end)
+        return len({s.get("mrn") for s in stays if s.get("mrn")})
     except Exception:
         return 0
 

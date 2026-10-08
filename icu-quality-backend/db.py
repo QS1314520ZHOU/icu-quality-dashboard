@@ -665,6 +665,92 @@ def get_staff_count(dept_code: str, role: str) -> int:
 
 
 # ============================================================
+# ICU 分母共用查询（ICU-04 / ICU-07 等「同期在科患者」口径）
+# ============================================================
+
+def get_icu_denominator_stays(dept_codes: list, start_date: str, end_date: str) -> list:
+    """
+    统计期内该科室的在科记录（**按人次**，一个患者多次入科算多条）。
+
+    条件：deptCode 属于本科室、status != invalid、
+          icuAdmissionTime <= 期末 且 (icuDischargeTime >= 期初 或 未出院)。
+
+    ICU-04、ICU-07 等分母共用此查询，保证分子分母来自同一队列。
+    """
+    from datetime import datetime as dt
+
+    start_dt = dt.fromisoformat(start_date)
+    end_dt = dt.fromisoformat(end_date)
+    end_of_day = dt(end_dt.year, end_dt.month, end_dt.day, 23, 59, 59)
+
+    for _db_name, db in iter_bed_dbs():
+        try:
+            stays = list(db.patient.find(
+                {
+                    "deptCode": {"$in": dept_codes},
+                    "status": {"$ne": "invalid"},
+                    "icuAdmissionTime": {"$lte": end_of_day},
+                    "$or": [
+                        {"icuDischargeTime": {"$gte": start_dt}},
+                        {"icuDischargeTime": None},
+                        {"icuDischargeTime": {"$exists": False}},
+                    ],
+                },
+                {"_id": 1, "mrn": 1, "hisPid": 1, "patientId": 1, "name": 1,
+                 "hisBed": 1, "icuAdmissionTime": 1, "icuDischargeTime": 1, "deptCode": 1},
+            ))
+        except Exception as _exc:
+            logger.warning("DB %s failed in get_icu_denominator_stays: %s", _db_name, _exc)
+            continue
+        if stays:
+            return stays
+    return []
+
+
+def person_key_of(row: dict) -> str:
+    """
+    患者唯一键：mrn（住院号）优先，依次退回 hisPid / pid / _id。
+
+    同一患者当月多次入科时，各条记录的 mrn、hisPid 相同，据此归并为「一个人」。
+    全部键都为空时返回带 id() 的哨兵值 —— 宁可不去重（退回人次），
+    也绝不能把两个不同患者合并成一个。
+    """
+    for k in ("mrn", "hisPid", "pid", "_id"):
+        v = row.get(k)
+        if v:
+            return str(v)
+    return f"\x00unkeyed:{id(row)}"
+
+
+def dedup_persons(rows: list, time_key: str = "icuAdmissionTime") -> list:
+    """
+    人数口径去重：同一患者多条记录只保留 time_key 最早的一条。
+
+    ICU-04 / ICU-07 / ICU-09 / ICU-10 的 INDICATORS_CONFIG 定义分子分母都是
+    「患者数」，而 SmartCare patient 表一行 = 一次 ICU 入住，直接 len() 得到的是
+    人次（2026-09 科室3439 有 7 人各入科 2 次：145 人次 / 138 人）。
+    分子分母都要过这里，才能保证两边都是「人数」。
+
+    time_key: 决定保留哪一条（ICU-04 分子用 score_time、ICU-09/10 用 assess_time）。
+    """
+    best = {}
+    for row in rows:
+        key = person_key_of(row)
+        cur = best.get(key)
+        if cur is None:
+            best[key] = row
+            continue
+        a, b = cur.get(time_key), row.get(time_key)
+        # 有时间的优先于没时间的；两个都有则取更早的（对应「首次」评估）
+        if b is not None and (a is None or b < a):
+            best[key] = row
+    out = list(best.values())
+    # 按时间排序，保证明细输出稳定（num_pids 等来源是 set，不排会抖）
+    out.sort(key=lambda r: str(r.get(time_key) or "9999-99-99 99:99:99"))
+    return out
+
+
+# ============================================================
 # ICU-04：APACHEⅡ≥15 收治率
 # ============================================================
 
@@ -674,6 +760,9 @@ def get_icu04_apache_data(dept_codes: list, start_date: str, end_date: str) -> d
 
     分母：统计期内该科室在科患者数（status != invalid，入出科时间与统计期有交集）
     分子：分母患者中，当月首次 apacheII 评分 total ≥ 15 的人数
+
+    口径：人数（按 mrn 去重）—— 同一患者当月多次入科只算一人，
+          分子分母均经 dedup_persons 归并；评分关联仍覆盖其全部在科记录。
     """
     from datetime import datetime as dt, timedelta
     from bson import ObjectId
@@ -683,29 +772,19 @@ def get_icu04_apache_data(dept_codes: list, start_date: str, end_date: str) -> d
 
     result = {"den_count": 0, "num_count": 0, "num_patients": [], "den_patients": []}
 
+    # 分母：在科记录（与 ICU-07 共用 get_icu_denominator_stays，保证同队列）
+    all_stays = get_icu_denominator_stays(dept_codes, start_date, end_date)
+    # 人数口径：明细与计数一人一行；den_ids 仍取全部在科记录，
+    # 否则第二次入科做的评分会因为 pid 不在关联集合里被整条丢掉
+    den_patients = dedup_persons(all_stays)
+    den_ids = [str(p["_id"]) for p in all_stays]
+    result["den_count"] = len(den_patients)
+    result["den_patients"] = den_patients
+    if not den_ids:
+        return result
+
     for db_name, db in iter_bed_dbs():
         try:
-
-            # 分母：在科患者
-            den_patients = list(db.patient.find(
-                {
-                    "deptCode": {"$in": dept_codes},
-                    "status": {"$ne": "invalid"},
-                    "icuAdmissionTime": {"$lte": dt(end_dt.year, end_dt.month, end_dt.day, 23, 59, 59)},
-                    "$or": [
-                        {"icuDischargeTime": {"$gte": start_dt}},
-                        {"icuDischargeTime": None},
-                        {"icuDischargeTime": {"$exists": False}},
-                    ],
-                },
-                {"_id": 1, "mrn": 1, "hisPid": 1, "patientId": 1, "name": 1, "hisBed": 1, "icuAdmissionTime": 1},
-            ))
-            den_ids = [str(p["_id"]) for p in den_patients]
-            result["den_count"] = len(den_ids)
-            result["den_patients"] = den_patients
-
-            if not den_ids:
-                continue
 
             # 分子：聚合查询 — 一次查出所有患者的首次 apacheII 评分
             pipeline = [
@@ -728,13 +807,14 @@ def get_icu04_apache_data(dept_codes: list, start_date: str, end_date: str) -> d
             ]
             high_scores = {s["_id"]: s for s in list(db.score.aggregate(pipeline))}
 
-            # 构建患者映射
-            pat_map = {str(p["_id"]): p for p in den_patients}
-            num_patients = []
+            # 构建患者映射 —— 必须覆盖全部在科记录（含同一患者的第二次入科），
+            # 否则只在第二次入科做的评分会查不到患者而被丢掉
+            pat_map = {str(p["_id"]): p for p in all_stays}
+            num_rows = []
             for pid_str, s in high_scores.items():
                 p = pat_map.get(pid_str)
                 if p:
-                    num_patients.append({
+                    num_rows.append({
                         "_id": pid_str,
                         "mrn": p.get("mrn", "") or p.get("hisPid", ""),
                         "patientId": p.get("patientId", ""),
@@ -744,6 +824,9 @@ def get_icu04_apache_data(dept_codes: list, start_date: str, end_date: str) -> d
                         "score_time": s.get("score_time"),
                     })
 
+            # 人数口径：同一患者两次入科都达标时只算一人，取更早的那次评分
+            # （对应定义里的「首次 APACHEⅡ 评分」）
+            num_patients = dedup_persons(num_rows, time_key="score_time")
             result["num_count"] = min(len(num_patients), result["den_count"])
             result["num_patients"] = num_patients
             break
@@ -1858,7 +1941,19 @@ MECH_DVT_KEYWORDS = [
     "充气加压", "加压泵", "抗栓泵",
     "弹力袜", "压力袜", "梯度压力袜", "抗血栓袜",
     "足底静脉泵", "足底泵", "VFP", "足底脉冲",
+    "气压治疗",   # 本院收费项「气压治疗费 单肢 bid」= 间歇充气加压(IPC)，不加会漏掉绝大多数机械预防
 ]
+
+# 检验项目假匹配：关键词"肝素"会命中「肝素结合蛋白（HBP）/降钙素原（PCT）二联检」，
+# 这是抽血化验不是预防措施，必须剔除。
+DVT_LAB_FALSE_MATCH_PATTERN = "肝素结合蛋白|降钙素原|二联检|三联检|HBP|PCT"
+
+# 给药途径/用途属于管路维护、体外循环抗凝的执行记录 —— 不是 DVT 预防。
+# VI_ICU_ZYYZ 的短医嘱名（如 "*肝素钠注射液(海普天)0.250万iu"）不带用法，
+# 名称匹配无法排除，必须看 exeMethod / exeMethodCode：
+#   有创压用(50) / 封管用(41) = 导管维护、血液净化(40) = CRRT/血液净化管路抗凝
+NON_PROPHYLAXIS_EXE_METHODS = ("有创压用", "封管用", "冲管", "血液净化", "PICC", "CVC")
+NON_PROPHYLAXIS_EXE_CODES = ("50", "41", "40")
 
 # 滤器关键词（单独标记，不直接计入分子 — 待质控医生确认）
 FILTER_KEYWORDS = [
@@ -1866,123 +1961,178 @@ FILTER_KEYWORDS = [
 ]
 
 
+def _dvt_patterns():
+    """构建 ICU-07 医嘱匹配用的编译正则（惰性，模块导入时关键词已就绪）。"""
+    global _DVT_RES
+    if _DVT_RES is None:
+        _DVT_RES = {
+            "all": re.compile(_keyword_regex(DRUG_DVT_KEYWORDS + MECH_DVT_KEYWORDS + FILTER_KEYWORDS), re.I),
+            "drug": re.compile(_keyword_regex(DRUG_DVT_KEYWORDS), re.I),
+            "mech": re.compile(_keyword_regex(MECH_DVT_KEYWORDS), re.I),
+            "filter": re.compile(_keyword_regex(FILTER_KEYWORDS), re.I),
+            "flush": re.compile(_keyword_regex(FLUSH_EXCLUDE_KEYWORDS), re.I),
+            "lab": re.compile(DVT_LAB_FALSE_MATCH_PATTERN, re.I),
+            "bad_exe": re.compile("|".join(NON_PROPHYLAXIS_EXE_METHODS)),
+        }
+    return _DVT_RES
+
+
+_DVT_RES = None
+
+
+def classify_dvt_order(order_name: str, exe_method=None, exe_code=None) -> str:
+    """
+    判断 VI_ICU_ZYYZ 的一条医嘱是否为 DVT 预防措施。
+
+    返回: "drug"（药物预防） / "mech"（机械预防） / "filter"（滤器，不计分子） / ""（不是）
+
+    剔除三类假阳性：
+      1. 检验项目 —— 关键词"肝素"会命中「肝素结合蛋白（HBP）/降钙素原（PCT）二联检」
+      2. 名称带封管/冲管/有创压用的导管维护医嘱
+      3. 给药途径为管路维护或体外循环抗凝 —— 短医嘱名（如 "*肝素钠注射液(海普天)0.250万iu"）
+         不带用法，只能靠 exeMethod / exeMethodCode 判断
+    注意：「停*xxx」停止医嘱记录 status=已执行，说明当月确实存在过该预防医嘱，予以保留。
+    """
+    if not order_name:
+        return ""
+    rx = _dvt_patterns()
+    if rx["lab"].search(order_name):
+        return ""
+
+    hit_drug = bool(rx["drug"].search(order_name))
+    hit_mech = bool(rx["mech"].search(order_name))
+    hit_filter = bool(rx["filter"].search(order_name))
+    if not (hit_drug or hit_mech or hit_filter):
+        return ""
+
+    if hit_drug:
+        if rx["flush"].search(order_name):
+            hit_drug = False
+        else:
+            exe = str(exe_method or "")
+            code = str(exe_code or "")
+            if rx["bad_exe"].search(exe) or code in NON_PROPHYLAXIS_EXE_CODES:
+                hit_drug = False
+
+    if hit_drug and hit_mech:
+        return "drug"
+    if hit_drug:
+        return "drug"
+    if hit_mech:
+        return "mech"
+    if hit_filter:
+        return "filter"
+    return ""
+
+
 def get_dvt_prevention_patients(dept_codes: list, start_date: str, end_date: str) -> dict:
     """
-    ICU-07 分子：采取了DVT预防措施的患者。
-    数据源：DataCenter.VI_ICU_ZYYZ.orderName（医嘱名称包含匹配）。
+    ICU-07 分子：实施了 DVT 预防措施的患者。
+    数据源：DataCenter.VI_ICU_ZYYZ（医嘱名称关键词匹配 + 给药途径过滤）。
 
-    返回: {drug_patients, mech_patients, filter_patients, all_patients}
-    每个患者列表: [{pid, mrn, name, matched_orders: [orderName]}]
+    队列 = 分母队列（get_icu_denominator_stays，与 ICU-04 完全一致），
+    再按 mrn 反查 DataCenter.VI_ICU_ZYBR.pid 取医嘱。
+
+    ⚠ 这里不能用 VI_ICU_ZYBR.deptCode 过滤：该表每个 mrn 只保留最近一次住院科室记录，
+      已转出本科室的患者会被整条剔除（2026-09 科室3439 曾因此漏计 12 人）。
+
+    返回:
+        drug_patients / mech_patients / filter_patients —— 按人归类的明细列表
+        all_count      —— 纳入分子的患者数（人数口径，算比率用它）
+        all_stay_count —— 纳入分子的在科人次（仅审计对照用，不参与比率）
+        num_stays      —— 分子明细（人数口径，与 all_count 行数一致）
     """
     from datetime import datetime as dt
-    import re
 
     start_dt = dt.fromisoformat(start_date)
     end_dt = dt.fromisoformat(end_date)
+    end_of_day = dt(end_dt.year, end_dt.month, end_dt.day, 23, 59, 59)
 
     result = {
         "drug_pids": set(), "mech_pids": set(), "filter_pids": set(),
         "drug_patients": [], "mech_patients": [], "filter_patients": [],
+        "all_count": 0, "all_stay_count": 0, "num_stays": [],
     }
 
     try:
+        # Step 1: 分母队列（按人次），与 ICU-04 同一查询 —— 保证分子分母同队列
+        stays = get_icu_denominator_stays(dept_codes, start_date, end_date)
+        den_mrns = {s.get("mrn") for s in stays if s.get("mrn")}
+        if not den_mrns:
+            return result
+
+        # 代表次在科：与分母明细同样取该患者入科最早的一次，分子分母行能对上
+        den_persons = dedup_persons(stays)
+        stay_by_mrn = {s.get("mrn"): s for s in den_persons}
+
         db = get_datacenter_db()
 
-        # 构建正则
-        drug_pattern = _keyword_regex(DRUG_DVT_KEYWORDS)
-        mech_pattern = _keyword_regex(MECH_DVT_KEYWORDS)
-        filter_pattern = _keyword_regex(FILTER_KEYWORDS)
-        flush_pattern = _keyword_regex(FLUSH_EXCLUDE_KEYWORDS)
-        all_pattern = _keyword_regex(DRUG_DVT_KEYWORDS + MECH_DVT_KEYWORDS + FILTER_KEYWORDS)
-
-        # Step 1: 从 VI_ICU_ZYBR 获取指定科室和时间段的住院记录 → {pid: {mrn, name, deptCode}}
+        # Step 2: mrn → DataCenter pid（不按 deptCode / 时间过滤，见 docstring）
         zybr_docs = list(db["VI_ICU_ZYBR"].find(
-            {
-                "deptCode": {"$in": dept_codes},
-                "admitTime": {"$lte": dt(end_dt.year, end_dt.month, end_dt.day, 23, 59, 59)},
-                "$or": [
-                    {"dischargeTime": {"$gte": start_dt}},
-                    {"dischargeTime": None},
-                    {"dischargeTime": ""},
-                ],
-            },
-            {"pid": 1, "mrn": 1, "name": 1, "deptCode": 1},
+            {"mrn": {"$in": list(den_mrns)}},
+            {"pid": 1, "mrn": 1, "name": 1},
         ))
         zybr_by_pid = {d["pid"]: d for d in zybr_docs if d.get("pid")}
         valid_pids = set(zybr_by_pid.keys())
-        print(f"[ICU-07] VI_ICU_ZYBR matched {len(valid_pids)} patients in dept={dept_codes}")
-
         if not valid_pids:
             return result
 
-        # Step 2: 查 VI_ICU_ZYYZ 医嘱（只查这些 pid）
+        # Step 3: 统计期内的医嘱
+        rx = _dvt_patterns()
         orders = list(db["VI_ICU_ZYYZ"].find(
             {
                 "pid": {"$in": list(valid_pids)},
-                "orderName": {"$regex": all_pattern, "$options": "i"},
-                "orderTime": {
-                    "$gte": start_dt,
-                    "$lte": dt(end_dt.year, end_dt.month, end_dt.day, 23, 59, 59),
-                },
+                "orderName": {"$regex": rx["all"].pattern, "$options": "i"},
+                "orderTime": {"$gte": start_dt, "$lte": end_of_day},
                 "status": {"$in": EXECUTED_ORDER_STATUSES},
             },
-            {"pid": 1, "orderName": 1, "orderTime": 1},
-        ).limit(50000))
+            {"pid": 1, "orderName": 1, "orderTime": 1, "exeMethod": 1, "exeMethodCode": 1},
+        ).limit(200000))
 
-        # Step 3: 分类匹配
-        drug_by_pid = {}
-        mech_by_pid = {}
-        filter_by_pid = {}
-
+        # Step 4: 分类（剔检验假匹配 / 名称封管 / 给药途径为管路维护或血液净化）
+        drug_by_pid, mech_by_pid, filter_by_pid = {}, {}, {}
         for o in orders:
-            name = o.get("orderName", "")
             pid = o.get("pid", "")
+            name = o.get("orderName", "")
             if not pid or not name:
                 continue
-
-            if re.search(drug_pattern, name, re.IGNORECASE):
-                if re.search(flush_pattern, name, re.IGNORECASE):
-                    continue
+            if pid not in valid_pids:
+                continue
+            mrn = zybr_by_pid.get(pid, {}).get("mrn")
+            if mrn not in den_mrns:
+                continue
+            kind = classify_dvt_order(name, o.get("exeMethod"), o.get("exeMethodCode"))
+            if kind == "drug":
                 drug_by_pid.setdefault(pid, []).append(name)
-
-            if re.search(mech_pattern, name, re.IGNORECASE):
+            elif kind == "mech":
                 mech_by_pid.setdefault(pid, []).append(name)
-
-            if re.search(filter_pattern, name, re.IGNORECASE):
+            elif kind == "filter":
                 filter_by_pid.setdefault(pid, []).append(name)
 
-        all_pids = set(drug_by_pid.keys()) | set(mech_by_pid.keys())
-        result["drug_pids"] = set(drug_by_pid.keys())
-        result["mech_pids"] = set(mech_by_pid.keys())
-        result["filter_pids"] = set(filter_by_pid.keys())
+        result["drug_pids"] = set(drug_by_pid)
+        result["mech_pids"] = set(mech_by_pid)
+        result["filter_pids"] = set(filter_by_pid)
+        all_pids = set(drug_by_pid) | set(mech_by_pid)
 
-        # 通过 mrn 桥接 SmartCare patient 表，取 hisPid 和 name
-        dc_mrns = [zybr_by_pid[pid].get("mrn", "") for pid in all_pids if zybr_by_pid.get(pid, {}).get("mrn")]
-        smart_pat_map = {}  # mrn → {hisPid, name}
-        for db_name, db in iter_bed_dbs():
-            try:
-                docs = list(db.patient.find(
-                    {"mrn": {"$in": dc_mrns}},
-                    {"mrn": 1, "hisPid": 1, "name": 1, "_id": 0},
-                ))
-                for d in docs:
-                    smart_pat_map[d["mrn"]] = {"hisPid": d.get("hisPid", ""), "name": d.get("name", "")}
-                if smart_pat_map:
-                    break
-            except Exception as _exc:
-                logger.warning("DB %s failed in get_dvt_prevention_patients: %s", db_name, _exc)
-                continue
+        # Step 5: 患者数 / 人次
+        all_mrns = {zybr_by_pid[p].get("mrn") for p in all_pids} & den_mrns
+        result["all_count"] = len(all_mrns)
+        result["all_stay_count"] = sum(1 for s in stays if s.get("mrn") in all_mrns)
 
         def build_list(by_pid):
             out = []
             for pid, olist in by_pid.items():
                 zybr = zybr_by_pid.get(pid, {})
                 mrn = zybr.get("mrn", "")
-                sp = smart_pat_map.get(mrn, {})
+                stay = stay_by_mrn.get(mrn, {})
                 out.append({
                     "pid": pid,
-                    "patient_id": sp.get("hisPid", mrn),  # 住院号 = hisPid
-                    "name": sp.get("name") or zybr.get("name", ""),
+                    "mrn": mrn,
+                    "patient_id": stay.get("hisPid") or mrn,   # 住院号
+                    "name": stay.get("name") or zybr.get("name", ""),
+                    "hisBed": stay.get("hisBed", ""),
+                    "icuAdmissionTime": stay.get("icuAdmissionTime"),
+                    "icuDischargeTime": stay.get("icuDischargeTime"),
                     "matched_orders": olist[:5],
                     "order_count": len(olist),
                 })
@@ -1991,7 +2141,47 @@ def get_dvt_prevention_patients(dept_codes: list, start_date: str, end_date: str
         result["drug_patients"] = build_list(drug_by_pid)
         result["mech_patients"] = build_list(mech_by_pid)
         result["filter_patients"] = build_list(filter_by_pid)
-        result["all_count"] = len(all_pids)
+
+        # 分子明细先按在科记录展开（便于核对 all_stay_count），
+        # 再 dedup_persons 归并成人数口径 —— 与分母明细、all_count 同为一人一行。
+        orders_by_mrn = defaultdict(list)
+        for src in (drug_by_pid, mech_by_pid):
+            for _pid, names in src.items():
+                _mrn = zybr_by_pid.get(_pid, {}).get("mrn")
+                if _mrn:
+                    orders_by_mrn[_mrn].extend(names)
+        drug_mrns = {zybr_by_pid[p].get("mrn") for p in drug_by_pid} & den_mrns
+        mech_mrns = {zybr_by_pid[p].get("mrn") for p in mech_by_pid} & den_mrns
+        num_stays = []
+        for s in stays:
+            mrn = s.get("mrn")
+            if mrn not in all_mrns:
+                continue
+            in_drug, in_mech = mrn in drug_mrns, mrn in mech_mrns
+            names = orders_by_mrn.get(mrn, [])
+            num_stays.append({
+                "patient_id": s.get("hisPid") or mrn,
+                # stay_id = SmartCare patient._id，与分母明细同一主键，
+                # 分子/分母同一次在科可逐行对上；同一患者 2 次入科时也能区分
+                "stay_id": str(s.get("_id", "")),
+                "mrn": mrn,
+                "name": s.get("name", ""),
+                "hisBed": s.get("hisBed", ""),
+                "deptCode": s.get("deptCode", ""),
+                "icuAdmissionTime": s.get("icuAdmissionTime"),
+                "icuDischargeTime": s.get("icuDischargeTime"),
+                "measure": ("药物+机械" if in_drug and in_mech
+                            else "药物预防" if in_drug else "机械预防"),
+                "order_count": len(names),
+                "matched_orders": names[:5],
+            })
+        # 人数口径：同一患者多次入科合并为一行（保留入科最早的一次），
+        # 行数应与 all_count 相等（icu07_verify_api.py 会校验）
+        result["num_stays"] = dedup_persons(num_stays)
+
+        print(f"[ICU-07] 分母 {len(stays)}人次/{len(den_mrns)}人 | "
+              f"分子 {result['all_count']}人/{result['all_stay_count']}人次 | "
+              f"药物 {len(drug_by_pid)}人 机械 {len(mech_by_pid)}人")
 
     except Exception as e:
         print(f"[ICU-07] Error: {e}")
@@ -3910,8 +4100,9 @@ def get_icu09_data(dept_codes: list, start_date: str, end_date: str) -> dict:
     """
     ICU-09：镇痛评估率。
 
-    分母 = 统计期内本科室 ICU 患者总人数（按 _id 去重，无排除）。
-    分子 = 分母中住 ICU 期间进行过 ≥1 次镇痛评估的患者数。
+    分母 = 统计期内本科室 ICU 患者总人数（按 mrn 去重的**人数**口径，无排除；
+          同一患者当月多次入科只算一人）。
+    分子 = 分母中住 ICU 期间进行过 ≥1 次镇痛评估的患者数（同样按患者去重）。
 
     分子源 A（优先）：bedside 表，code ∈ BEDSIDE_PAIN_CODES 且 valid=True。
           命中患者不再回查源 B。
@@ -3950,6 +4141,7 @@ def get_icu09_data(dept_codes: list, start_date: str, end_date: str) -> dict:
                 continue
 
             # pid 映射：ObjectId → str (统一为字符串用于关联)
+            # 保留全部在科记录 —— 同一患者第二次入科做的评分也要能关联上
             den_pids_obj = set()
             pat_by_strpid = {}
             for p in patients:
@@ -3958,7 +4150,8 @@ def get_icu09_data(dept_codes: list, start_date: str, end_date: str) -> dict:
                 den_pids_obj.add(spid)
                 pat_by_strpid[spid] = p
 
-            result["den_count"] = len(den_pids_obj)
+            # 人数口径：分母按患者去重，多次入科只算一人
+            result["den_count"] = len(dedup_persons(patients))
             if not den_pids_obj:
                 continue
 
@@ -4057,25 +4250,25 @@ def get_icu09_data(dept_codes: list, start_date: str, end_date: str) -> dict:
 
             # ---- 4. 分子 = A ∪ B ----
             num_pids = a_pids | b_pids
-            result["num_count"] = min(len(num_pids), result["den_count"])
 
-            # ---- 5. 构建明细 ----
+            # ---- 5. 构建明细（人数口径：一人一行）----
+            # 分母明细取每个患者入科最早的一次在科记录
             result["den_patients"] = [
-                {"pid": spid,
-                 "mrn": pat_by_strpid[spid].get("mrn", "") or pat_by_strpid[spid].get("hisPid", ""),
-                 "name": pat_by_strpid[spid].get("name", ""),
-                 "patient_id": pat_by_strpid[spid].get("hisPid", ""),
-                 "hisBed": pat_by_strpid[spid].get("hisBed", ""),
-                 "icu_admit": pat_by_strpid[spid].get("icuAdmissionTime"),
+                {"pid": str(p["_id"]),
+                 "mrn": p.get("mrn", "") or p.get("hisPid", ""),
+                 "name": p.get("name", ""),
+                 "patient_id": p.get("hisPid", ""),
+                 "hisBed": p.get("hisBed", ""),
+                 "icu_admit": p.get("icuAdmissionTime"),
                  }
-                for spid in den_pids_obj
+                for p in dedup_persons(patients)
             ]
 
-            result["num_patients"] = []
-            for spid in num_pids:
+            num_rows = []
+            for spid in sorted(num_pids):          # sorted: 明细输出顺序稳定
                 p = pat_by_strpid[spid]
                 detail = a_detail.get(spid) or b_detail.get(spid) or {}
-                result["num_patients"].append({
+                num_rows.append({
                     "pid": spid,
                     "mrn": p.get("mrn", "") or p.get("hisPid", ""),
                     "name": p.get("name", ""),
@@ -4085,6 +4278,9 @@ def get_icu09_data(dept_codes: list, start_date: str, end_date: str) -> dict:
                     "assess_value": detail.get("score_value", ""),
                     "assess_time": detail.get("time"),
                 })
+            # 同一患者两次入科都有评估时只算一人，取更早的那次
+            result["num_patients"] = dedup_persons(num_rows, time_key="assess_time")
+            result["num_count"] = min(len(result["num_patients"]), result["den_count"])
 
             break  # 拿到数据即退出库名循环
 
@@ -4112,8 +4308,9 @@ def get_icu10_data(dept_codes: list, start_date: str, end_date: str) -> dict:
     """
     ICU-10：镇静评估率。
 
-    分母 = 统计期内本科室 ICU 患者总人数（按 _id 去重，无排除）。
-    分子 = 分母中住 ICU 期间进行过 ≥1 次镇静评估（RASS）的患者数。
+    分母 = 统计期内本科室 ICU 患者总人数（按 mrn 去重的**人数**口径，无排除；
+          同一患者当月多次入科只算一人）。
+    分子 = 分母中住 ICU 期间进行过 ≥1 次镇静评估（RASS）的患者数（同样按患者去重）。
 
     分子源 A（优先）：bedside 表，code='param_score_rass_obs' 且 valid=True。
     分子源 B（兜底）：score 表，scoreType='rass' 且 valid=True。
@@ -4148,6 +4345,7 @@ def get_icu10_data(dept_codes: list, start_date: str, end_date: str) -> dict:
             if not patients:
                 continue
 
+            # 保留全部在科记录 —— 同一患者第二次入科做的评分也要能关联上
             den_pids_obj = set()
             pat_by_strpid = {}
             for p in patients:
@@ -4155,7 +4353,8 @@ def get_icu10_data(dept_codes: list, start_date: str, end_date: str) -> dict:
                 den_pids_obj.add(spid)
                 pat_by_strpid[spid] = p
 
-            result["den_count"] = len(den_pids_obj)
+            # 人数口径：分母按患者去重，多次入科只算一人
+            result["den_count"] = len(dedup_persons(patients))
             if not den_pids_obj:
                 continue
             den_pids_list = list(den_pids_obj)
@@ -4239,25 +4438,25 @@ def get_icu10_data(dept_codes: list, start_date: str, end_date: str) -> dict:
 
             # ---- 4. 分子 = A ∪ B ----
             num_pids = a_pids | b_pids
-            result["num_count"] = min(len(num_pids), result["den_count"])
 
-            # ---- 5. 构建明细 ----
+            # ---- 5. 构建明细（人数口径：一人一行）----
+            # 分母明细取每个患者入科最早的一次在科记录
             result["den_patients"] = [
-                {"pid": spid,
-                 "mrn": pat_by_strpid[spid].get("mrn", "") or pat_by_strpid[spid].get("hisPid", ""),
-                 "name": pat_by_strpid[spid].get("name", ""),
-                 "patient_id": pat_by_strpid[spid].get("hisPid", ""),
-                 "hisBed": pat_by_strpid[spid].get("hisBed", ""),
-                 "icu_admit": pat_by_strpid[spid].get("icuAdmissionTime"),
+                {"pid": str(p["_id"]),
+                 "mrn": p.get("mrn", "") or p.get("hisPid", ""),
+                 "name": p.get("name", ""),
+                 "patient_id": p.get("hisPid", ""),
+                 "hisBed": p.get("hisBed", ""),
+                 "icu_admit": p.get("icuAdmissionTime"),
                  }
-                for spid in den_pids_obj
+                for p in dedup_persons(patients)
             ]
 
-            result["num_patients"] = []
-            for spid in num_pids:
+            num_rows = []
+            for spid in sorted(num_pids):          # sorted: 明细输出顺序稳定
                 p = pat_by_strpid[spid]
                 detail = a_detail.get(spid) or b_detail.get(spid) or {}
-                result["num_patients"].append({
+                num_rows.append({
                     "pid": spid,
                     "mrn": p.get("mrn", "") or p.get("hisPid", ""),
                     "name": p.get("name", ""),
@@ -4267,6 +4466,9 @@ def get_icu10_data(dept_codes: list, start_date: str, end_date: str) -> dict:
                     "assess_value": detail.get("score_value", ""),
                     "assess_time": detail.get("time"),
                 })
+            # 同一患者两次入科都有评估时只算一人，取更早的那次
+            result["num_patients"] = dedup_persons(num_rows, time_key="assess_time")
+            result["num_count"] = min(len(result["num_patients"]), result["den_count"])
 
             break
 
