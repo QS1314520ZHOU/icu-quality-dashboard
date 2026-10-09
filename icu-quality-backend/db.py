@@ -11,6 +11,14 @@ import logging
 
 logger = logging.getLogger("db")
 
+# 医院变体开关（config/bundle_rules.py: BUNDLE_HOSPITAL_VARIANT）
+# cg 变体: 整库路由到 SmartCare_cg / DataCenter_cg + bundle 提取口径切换
+from config.bundle_rules import (  # noqa: E402
+    BUNDLE_HOSPITAL_VARIANT,
+    CG_ORDER_KEYWORDS,
+    CG_CONFIRM_DIAG_KEYWORDS,
+)
+
 # 加载 .env 文件。打包成二进制后，优先读取可执行文件同目录的 .env。
 import sys
 
@@ -317,9 +325,26 @@ SMARTCARE_CFG = DBConfig("SMARTCARE")
 # DataCenter（数据中心 / 指标汇总库）
 DATACENTER_CFG = DBConfig("DATACENTER")
 
+# ---- 医院变体库名映射（BUNDLE_HOSPITAL_VARIANT）----
+# cg: get_client("SmartCare")["SmartCare"] 经 _VariantClient 重定向到 *_cg
+VARIANT_DB_MAP = {
+    "default": ("SmartCare", "DataCenter"),
+    "cg": ("SmartCare_cg", "DataCenter_cg"),
+}
+
+
+def _variant_db_names() -> tuple[str, str]:
+    """当前变体的 (SmartCare库名, DataCenter库名)。"""
+    return VARIANT_DB_MAP.get(BUNDLE_HOSPITAL_VARIANT, VARIANT_DB_MAP["default"])
+
+
 # bedRecord / configBed / patient 所在的数据库
 _smartcare_auth = SMARTCARE_CFG.auth_db or "SmartCare"
-BED_DB_NAMES = [_smartcare_auth]
+if BUNDLE_HOSPITAL_VARIANT == "cg":
+    # 变体医院: bed 库固定为 SmartCare_cg（开关优先于 .env）
+    BED_DB_NAMES = ["SmartCare_cg"]
+else:
+    BED_DB_NAMES = [_smartcare_auth]
 if not BED_DB_NAMES or not BED_DB_NAMES[0]:
     raise RuntimeError("BED_DB_NAMES is empty — check SMARTCARE_DB_AUTH in .env")
 
@@ -400,10 +425,36 @@ def _make_client(cfg: DBConfig, db_name: str) -> MongoClient:
     )
 
 
+class _VariantClient:
+    """按医院变体重定向库名的 MongoClient 薄代理。
+
+    变体为 default 时下标解析结果与原生 MongoClient 完全一致；
+    cg 变体下 client["SmartCare"] / client["DataCenter"] 落到 *_cg 库。
+    仅重载 __getitem__，其余属性全部透传给真实 client。
+    """
+
+    __slots__ = ("_real",)
+
+    def __init__(self, real: MongoClient):
+        self._real = real
+
+    def __getitem__(self, name: str):
+        sc_name, dc_name = _variant_db_names()
+        if name == "SmartCare":
+            name = sc_name
+        elif name == "DataCenter":
+            name = dc_name
+        return self._real[name]
+
+    def __getattr__(self, item):
+        return getattr(self._real, item)
+
+
 def get_client(db_name: str = "SmartCare") -> MongoClient:
     """
     懒加载 MongoDB 连接。
     优先匹配 DataCenter / SmartCare 配置，按 db_name 归属选择合适的凭证。
+    返回带医院变体重定向的代理（default 行为与原生 client 一致）。
     """
     if db_name in _clients:
         return _clients[db_name]
@@ -414,7 +465,7 @@ def get_client(db_name: str = "SmartCare") -> MongoClient:
     else:
         cfg = DATACENTER_CFG
 
-    client = _make_client(cfg, db_name)
+    client = _VariantClient(_make_client(cfg, db_name))
     _clients[db_name] = client
     return client
 
@@ -1003,6 +1054,63 @@ SEPSIS_DIAG_KEYWORDS = (
     "|septic shock|sepsis"
 )
 
+
+def resolve_bundle_dc_pid(pat: dict) -> str:
+    """judge_bundle_v3_for_patient 用的 DC pid（VI_ICU_ZYYZ.pid = hisPid）。
+
+    cg 变体: diseaseDiagnosis 源患者的 _id 是 SC ObjectId，查 VI_ICU_ZYYZ
+    必须用 hisPid；vi_zybr 源患者的 _id 本身就是 hisPid，语义不变。
+    default: 沿用现状 _id，行为完全不变。
+    """
+    if BUNDLE_HOSPITAL_VARIANT == "cg":
+        return pat.get("hisPid") or pat.get("_id", "")
+    return pat.get("_id", "")
+
+
+def _apply_cg_confirm_time(den_patients: list) -> None:
+    """cg 变体: 分母确诊时间取 patient.diagnosisHistoryList 中最早含
+    脓毒血症/败血症/感染性休克 的 time。
+
+    - 无命中的患者保留原 diagnosisTime（其候选身份来自 diseaseDiagnosis /
+      VI_ICU_ZYBR 的诊断正则，不因确诊时间缺失被剔除）
+    - t0 若原本就是确诊时间兜底（t0_source=diagnosis_time）则同步迁移
+    """
+    mrns = {str(p.get("mrn")) for p in den_patients if p.get("mrn")}
+    if not mrns:
+        return
+    try:
+        sc = get_client("SmartCare")["SmartCare"]
+        earliest = {}
+        for doc in sc.patient.find(
+            {"mrn": {"$in": list(mrns)}},
+            {"mrn": 1, "diagnosisHistoryList": 1},
+        ):
+            m = str(doc.get("mrn") or "")
+            hits = [
+                d.get("time")
+                for d in (doc.get("diagnosisHistoryList") or [])
+                if isinstance(d.get("time"), datetime)
+                and any(k in str(d.get("diagnosis") or "")
+                        for k in CG_CONFIRM_DIAG_KEYWORDS)
+            ]
+            if hits:
+                earliest[m] = min(hits)
+        for pat in den_patients:
+            t = earliest.get(str(pat.get("mrn") or ""))
+            if not t:
+                continue
+            old_dt = pat.get("diagnosisTime")
+            pat["diagnosisTime"] = t
+            pat["confirm_time_source"] = "diagnosisHistoryList"
+            if (not pat.get("qc_t0")
+                    and pat.get("t0") == old_dt
+                    and pat.get("t0_source") == "diagnosis_time"):
+                pat["t0"] = t
+                pat["t0_source"] = "confirm_diagnosis_list"
+    except Exception as _exc:
+        logger.warning("cg confirm time resolution failed: %s", _exc)
+
+
 def get_bundle_data_v2(dept_codes: list, start_date: str, end_date: str) -> dict:
     """
     Bundle 判定 V3 — 双集合查询 + 完整分母逻辑。
@@ -1169,6 +1277,10 @@ def get_bundle_data_v2(dept_codes: list, start_date: str, end_date: str) -> dict
             # SmartCare 来源的患者，_id 本身就是 sc_pid
             pat["sc_pid"] = str(pat.get("_id", ""))
 
+    # ---- 阶段 3.5: cg 变体 — 分母确诊时间取 patient 诊断 list 最早命中 ----
+    if BUNDLE_HOSPITAL_VARIANT == "cg":
+        _apply_cg_confirm_time(result["den_patients"])
+
     # ---- 阶段 4: 批量预加载检验数据 ----
     # 收集所有患者的 his_pid 和时间窗口，批量查询 VI_ICU_EXAM 和 VI_ICU_EXAM_ITEM
     batch_lab_cache = {}
@@ -1241,7 +1353,7 @@ def get_bundle_data_v2(dept_codes: list, start_date: str, end_date: str) -> dict
             event_id = str(pat.get("dc_pid") or pat.get("_id") or sc_pid)
             pat["detail_id"] = build_exclusion_key(event_id, t0)
             pat["exclusion_key"] = pat["detail_id"]
-            v3 = judge_bundle_v3_for_patient(sc_pid, pat.get("_id", ""), pat.get("mrn", ""), t0, diag,
+            v3 = judge_bundle_v3_for_patient(sc_pid, resolve_bundle_dc_pid(pat), pat.get("mrn", ""), t0, diag,
                                             batch_lab_cache=batch_lab_cache)
             pat["v3"] = v3
             # 分母判定: 使用候选引擎 (高召回四通道)
@@ -2882,6 +2994,15 @@ def judge_bundle_v3_for_patient(sc_pid: str, dc_pid: str, mrn: str, t0: datetime
     # #修复: I3和B2应该区分血培养和其他培养
     # I3: 病原学送检（包括血培养、痰培养、尿培养等）
     # B2: 血培养（仅血培养）
+    # cg 变体: 按 VI_ICU_ZYYZ 医嘱名识别 — 痰培养=含"细菌培养"、血培养=含"血培养鉴定"
+    if BUNDLE_HOSPITAL_VARIANT == "cg":
+        _cult_regex = (CG_ORDER_KEYWORDS["sputum_culture"] + "|"
+                       + CG_ORDER_KEYWORDS["blood_culture"])
+        _blood_kw = CG_ORDER_KEYWORDS["blood_culture"]
+    else:
+        _cult_regex = ('血培养|痰培养|尿培养|细菌培养|真菌培养|分泌物培养'
+                       '|引流液培养|胸水培养|腹水培养|脑脊液培养|导管培养')
+        _blood_kw = '血培养'
     has_culture = False
     culture_time = None
     culture_name = None
@@ -2892,7 +3013,7 @@ def judge_bundle_v3_for_patient(sc_pid: str, dc_pid: str, mrn: str, t0: datetime
         if dc is not None:
             # 查询所有病原学送检记录
             culture_docs = list(dc.VI_ICU_ZYYZ.find(
-                {'pid': dc_pid, 'orderName': {'$regex': '血培养|痰培养|尿培养|细菌培养|真菌培养|分泌物培养|引流液培养|胸水培养|腹水培养|脑脊液培养|导管培养'}},
+                {'pid': dc_pid, 'orderName': {'$regex': _cult_regex}},
                 {'orderName': 1, 'orderTime': 1}
             ).sort('orderTime', 1))
             for cd in culture_docs:
@@ -2905,12 +3026,28 @@ def judge_bundle_v3_for_patient(sc_pid: str, dc_pid: str, mrn: str, t0: datetime
                         culture_time = ct
                         culture_name = order_name
                     # B2: 只有血培养才算
-                    if '血培养' in order_name and not has_blood_culture:
+                    if _blood_kw in order_name and not has_blood_culture:
                         has_blood_culture = True
                         blood_culture_time = ct
                         blood_culture_name = order_name
     except Exception:
         pass
+
+    # ---- cg 变体: 血气识别（VI_ICU_ZYYZ 医嘱名含"ICU血气"） ----
+    # 供 A1（乳酸测定）窗口判定；乳酸数值仍取 bGATemp（有则优先生效）
+    blood_gas_times = []
+    if BUNDLE_HOSPITAL_VARIANT == "cg":
+        try:
+            if dc is not None:
+                bg_docs = dc.VI_ICU_ZYYZ.find(
+                    {'pid': dc_pid,
+                     'orderName': {'$regex': CG_ORDER_KEYWORDS['blood_gas']}},
+                    {'orderTime': 1, '_id': 0}
+                ).sort('orderTime', 1)
+                blood_gas_times = [b.get('orderTime') for b in bg_docs
+                                   if b.get('orderTime')]
+        except Exception:
+            pass
 
     # ---- C3: 液体 ----
     has_fluid_1h = False
@@ -2984,6 +3121,17 @@ def judge_bundle_v3_for_patient(sc_pid: str, dc_pid: str, mrn: str, t0: datetime
     abx_6h = antibiotic_time if antibiotic_time and t0 <= antibiotic_time <= min(t0_6h, eval_time) else None
     blood_6h = blood_culture_time if blood_culture_time and t0 <= blood_culture_time <= min(t0_6h, eval_time) else None
 
+    # cg 变体: 血气医嘱窗口内首个 orderTime（供 A1 判定）
+    def _bg_first(end):
+        if not blood_gas_times:
+            return None
+        lim = min(end, eval_time)
+        return next((t for t in blood_gas_times if t0 <= t <= lim), None)
+
+    bg_1h = _bg_first(t0_1h)
+    bg_3h = _bg_first(t0_3h)
+    bg_6h = _bg_first(t0_6h)
+
     patient_data = {
         't0': t0,
         'eval_time': eval_time,
@@ -3028,6 +3176,10 @@ def judge_bundle_v3_for_patient(sc_pid: str, dc_pid: str, mrn: str, t0: datetime
             'lactate_recheck_value': lactate_recheck_value,
         },
     }
+    if BUNDLE_HOSPITAL_VARIANT == "cg":
+        patient_data['w1h']['blood_gas_time'] = bg_1h
+        patient_data['w3h']['blood_gas_time'] = bg_3h
+        patient_data['w6h']['blood_gas_time'] = bg_6h
 
     result = judge_bundle_v3(patient_data)
 
@@ -3067,6 +3219,9 @@ def judge_bundle_v3_for_patient(sc_pid: str, dc_pid: str, mrn: str, t0: datetime
         'vaso_name': vaso_name,
         'vaso_start_time': vaso_start_time,
     })
+    if BUNDLE_HOSPITAL_VARIANT == "cg":
+        # cg 变体: 血气识别明细（VI_ICU_ZYYZ 医嘱 orderTime 列表）
+        result['blood_gas_times'] = blood_gas_times
 
     # ---- 正式 SOFA 评分 ----
     try:

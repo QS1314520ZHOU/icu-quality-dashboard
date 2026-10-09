@@ -234,15 +234,21 @@ def judge_K2_pressor_needed(has_vasopressor: Optional[bool]) -> Optional[bool]:
 def judge_A1_lactate_measured(
     lactate_value: Optional[float],
     rule: str = "value_present",
+    blood_gas_time: Optional[datetime] = None,
 ) -> Optional[bool]:
     """
     A1: 乳酸测定 (窗口内最早一条)
     #5: A1_RULE 配置
     - "value_present": 取到值即达标
     - "value_below_threshold": 值低于阈值(2 mmol/L)才算达标
+    blood_gas_time: 医院变体（cg）的血气医嘱识别结果 —— 窗口内取到
+    ICU血气医嘱即视为已测乳酸（该医院按医嘱名识别血气，数值仍走 bGATemp）。
     """
-    if lactate_value is None:
+    if lactate_value is None and blood_gas_time is None:
         return None
+    if lactate_value is None:
+        # 血气医嘱命中但无数值 → 已测定即达标
+        return True
     if rule == "value_below_threshold":
         return lactate_value < 2
     return True
@@ -481,7 +487,8 @@ def judge_bundle_v3(patient_data: Dict[str, Any]) -> Dict[str, Any]:
     abx_time_1h = w1h.get("antibiotic_time")
     culture_time_1h = w1h.get("culture_time")
     # #5: A1_RULE 配置
-    a1_1h = judge_A1_lactate_measured(w1h.get("lactate_initial"), _br.A1_RULE)
+    a1_1h = judge_A1_lactate_measured(w1h.get("lactate_initial"), _br.A1_RULE,
+                                      w1h.get("blood_gas_time"))
     # #8: 窗口校验
     b1_1h = judge_B1_antibiotic_time(abx_time_1h) if _in_window(abx_time_1h, t0_1h) else None
     b2_1h = judge_B2_culture_time(culture_time_1h) if _in_window(culture_time_1h, t0_1h) else None
@@ -498,13 +505,15 @@ def judge_bundle_v3(patient_data: Dict[str, Any]) -> Dict[str, Any]:
         # 时间戳照常回填（红字展示用）
         "antibiotic_time": abx_time_1h,
         "culture_time": culture_time_1h,
+        "blood_gas_time": w1h.get("blood_gas_time"),
     })
 
     # ---- 3h 窗口判定 ----
     abx_time_3h = w3h.get("antibiotic_time")
     culture_time_3h = w3h.get("culture_time")
     # #5: A1_RULE 配置
-    a1_3h = judge_A1_lactate_measured(w3h.get("lactate_initial"), _br.A1_RULE)
+    a1_3h = judge_A1_lactate_measured(w3h.get("lactate_initial"), _br.A1_RULE,
+                                      w3h.get("blood_gas_time"))
     b1_3h = judge_B1_antibiotic_time(abx_time_3h) if _in_window(abx_time_3h, t0_3h) else None
     b2_3h = judge_B2_culture_time(culture_time_3h) if _in_window(culture_time_3h, t0_3h) else None
     b3_3h, b3_reason_3h = judge_B3_step2(b1_3h, b2_3h, abx_time_3h, culture_time_3h)
@@ -520,6 +529,7 @@ def judge_bundle_v3(patient_data: Dict[str, Any]) -> Dict[str, Any]:
         # 时间戳照常回填（红字展示用）
         "antibiotic_time": abx_time_3h,
         "culture_time": culture_time_3h,
+        "blood_gas_time": w3h.get("blood_gas_time"),
     })
 
     # ---- 6h 窗口判定 ----
@@ -528,7 +538,8 @@ def judge_bundle_v3(patient_data: Dict[str, Any]) -> Dict[str, Any]:
 
     abx_time_6h = w6h.get("antibiotic_time")
     culture_time_6h = w6h.get("culture_time")
-    a1_6h = judge_A1_lactate_measured(w6h.get("lactate_initial"), _br.A1_RULE)
+    a1_6h = judge_A1_lactate_measured(w6h.get("lactate_initial"), _br.A1_RULE,
+                                      w6h.get("blood_gas_time"))
     b1_6h = judge_B1_antibiotic_time(abx_time_6h) if _in_window(abx_time_6h, t0_6h) else None
     b2_6h = judge_B2_culture_time(culture_time_6h) if _in_window(culture_time_6h, t0_6h) else None
     b3_6h, b3_reason_6h = judge_B3_step2(b1_6h, b2_6h, abx_time_6h, culture_time_6h)
@@ -554,6 +565,7 @@ def judge_bundle_v3(patient_data: Dict[str, Any]) -> Dict[str, Any]:
         "has_lactate_recheck": has_lactate_recheck,
         "antibiotic_time": abx_time_6h,
         "culture_time": culture_time_6h,
+        "blood_gas_time": w6h.get("blood_gas_time"),
     })
 
     return {

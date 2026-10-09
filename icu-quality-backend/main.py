@@ -3,7 +3,7 @@ from fastapi import FastAPI, BackgroundTasks
 from pydantic import BaseModel
 from datetime import date, datetime, timedelta
 from ai_analyzer import analyze, get_all_ai_decisions, override_ai_decision, ensure_ai_cache_collection as ensure_ai_cache
-from db import assert_db_ready, get_open_bed_count, get_occupied_bed_days, get_staff_count, get_icu04_apache_data, get_bundle_data, get_bundle_data_v2, judge_bundle_v3_for_patient, get_icu08_data, get_icu06_data, get_icu09_data, get_icu10_data, get_icu11_data, get_icu12_data, get_icu13_data, get_icu14_data, get_icu15_data, get_icu16_data, get_icu17_data, get_icu18_data, get_icu19_data, get_cauti_data, get_tri_tube_suspected_warnings, get_sepsis_alert_warnings, confirm_tri_tube_warning, get_dvt_prevention_patients, get_client, BED_DB_NAMES, PROFESSION_CN, get_patient_census, get_patient_census_detail, iter_bed_dbs
+from db import assert_db_ready, get_open_bed_count, get_occupied_bed_days, get_staff_count, get_icu04_apache_data, get_bundle_data, get_bundle_data_v2, judge_bundle_v3_for_patient, get_icu08_data, get_icu06_data, get_icu09_data, get_icu10_data, get_icu11_data, get_icu12_data, get_icu13_data, get_icu14_data, get_icu15_data, get_icu16_data, get_icu17_data, get_icu18_data, get_icu19_data, get_cauti_data, get_tri_tube_suspected_warnings, get_sepsis_alert_warnings, confirm_tri_tube_warning, get_dvt_prevention_patients, get_client, BED_DB_NAMES, PROFESSION_CN, get_patient_census, get_patient_census_detail, iter_bed_dbs, resolve_bundle_dc_pid
 import random
 import os
 import sys
@@ -3101,7 +3101,7 @@ def get_bundle_v3_detail(mrn: str, period: str = ""):
     for p in data.get("den_patients", []):
         if p.get("mrn") == mrn:
             sc_pid = p.get("sc_pid")
-            dc_pid = p.get("_id", "")
+            dc_pid = resolve_bundle_dc_pid(p)
             t0 = p.get("t0")
             diag = p.get("diagnose", "")
             if t0 and sc_pid:
