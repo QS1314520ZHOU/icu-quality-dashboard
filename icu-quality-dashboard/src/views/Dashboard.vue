@@ -1,41 +1,33 @@
 <template>
   <div class="dashboard" :class="{ compact: compactMode }">
-    <!-- 页面头：标题行 + 期间选择 + 状态 + 密度切换 -->
-    <header class="db-header">
-      <div class="db-header-left">
-        <h1 class="db-title">实时大屏看板</h1>
-        <span class="db-subtitle">统计期间 {{ periodLabel }}</span>
+    <!-- 顶栏：标题 + 范围 + 期间选择 + 状态 -->
+    <header class="db-topbar">
+      <div class="tt-left">
+        <h1 class="tt-title">ICU 质控总览</h1>
+        <span class="tt-sub">{{ hospitalName }} · {{ scopeLabel }}</span>
       </div>
-      <div class="db-header-right">
-        <nav class="anchor-nav">
-          <a href="#sec-structure" class="anchor-link">结构</a>
-          <a href="#sec-process" class="anchor-link">过程</a>
-          <a href="#sec-outcome" class="anchor-link">结果</a>
-          <a href="#sec-combo" class="anchor-link">组合</a>
-          <a href="#sec-compare" class="anchor-link">对比表</a>
-        </nav>
+      <div class="tt-right">
         <div class="period-selector">
-          <span class="period-label">统计期间</span>
-          <select v-model.number="year" @change="loadData">
+          <select v-model.number="year" @change="loadData()" aria-label="年份">
             <option v-for="y in years" :key="y" :value="y">{{ y }}年</option>
           </select>
-          <select v-model.number="sMonth" @change="loadData">
+          <select v-model.number="sMonth" @change="loadData()" aria-label="起始月">
             <option v-for="m in 12" :key="m" :value="m">{{ m }}月</option>
           </select>
           <span class="period-to">至</span>
-          <select v-model.number="eMonth" @change="loadData">
+          <select v-model.number="eMonth" @change="loadData()" aria-label="结束月">
             <option v-for="m in 12" :key="m" :value="m">{{ m }}月</option>
           </select>
         </div>
-        <button class="density-btn" @click="compactMode = !compactMode" :title="compactMode ? '切换舒适模式' : '切换紧凑模式'">
+        <span class="status-text" :class="risk.overall_status">
+          <i class="dot"></i>{{ overallText }}
+        </span>
+        <span v-if="updatedAt" class="meta-update">更新 {{ updatedAt }}</span>
+        <button class="density-btn" @click="compactMode = !compactMode"
+                :title="compactMode ? '切换舒适模式' : '切换紧凑模式'">
           <svg v-if="compactMode" viewBox="0 0 16 16" fill="none" stroke="currentColor" stroke-width="1.5"><path d="M2 4h12M2 8h12M2 12h12"/></svg>
           <svg v-else viewBox="0 0 16 16" fill="none" stroke="currentColor" stroke-width="1.5"><path d="M3 5h10M3 8h10M3 11h10"/></svg>
         </button>
-        <span class="status-pill" :class="risk.overall_status">
-          <svg class="pill-icon" viewBox="0 0 16 16" fill="none" stroke="currentColor" stroke-width="1.5"><circle cx="8" cy="8" r="5"/></svg>
-          数据状态 · {{ overallText }}
-        </span>
-        <span v-if="updatedAt" class="meta-update">最后更新 {{ updatedAt }}</span>
       </div>
     </header>
 
@@ -57,90 +49,118 @@
       部分月份数据缺失 ({{ missingPeriods.join(', ') }})，显示为「/」。点击刷新可触发补算。
     </div>
 
-    <!-- KPI 条 6 张：数值 + DeltaBadge(环比、同比) + Sparkline -->
-    <section class="kpi-stats">
-      <div v-for="kpi in kpiCards" :key="kpi.code" class="kpi-stat-card" :class="kpi.status">
-        <div class="kpi-card-left" :class="kpi.status"></div>
-        <div class="kpi-card-body">
-          <div class="kpi-card-top">
-            <span class="kpi-card-label">{{ kpi.name }}</span>
-            <span class="kpi-card-code">{{ displayCode(kpi.code) }}</span>
-          </div>
-          <div class="kpi-card-main">
-            <strong class="kpi-card-big tabular-nums">{{ kpi.valueText }}</strong>
-            <small class="kpi-card-unit">{{ kpi.unit }}</small>
-          </div>
-          <div class="kpi-card-deltas">
-            <DeltaBadge
-              :text="kpi.momText"
-              :tooltip="kpi.momTooltip"
-              :css-class="kpi.momClass"
-              :arrow="kpi.momArrow"
-              label="环比"
-              :small-sample="kpi.momSmall"
-            />
-            <DeltaBadge
-              :text="kpi.yoyText"
-              :tooltip="kpi.yoyTooltip"
-              :css-class="kpi.yoyClass"
-              :arrow="kpi.yoyArrow"
-              label="同比"
-              :small-sample="kpi.yoySmall"
-            />
-          </div>
-          <Sparkline :data="trendData[kpi.code] || []" :height="24" />
+    <!-- KPI 六宫格 -->
+    <section class="kpi-row">
+      <div v-for="kpi in kpiCards" :key="kpi.code" class="kpi-tile" @click="openDetail(kpi)">
+        <div class="kpi-name">
+          <i class="dot" :class="kpi.status"></i>
+          <span class="kpi-label">{{ kpi.name }}</span>
+          <em class="kpi-code">{{ displayCode(kpi.code) }}</em>
+        </div>
+        <div class="kpi-value">
+          <strong class="tabular-nums">{{ kpi.valueText }}</strong>
+          <span class="kpi-unit">{{ kpi.unit }}</span>
+        </div>
+        <div class="kpi-deltas">
+          <DeltaBadge :text="kpi.momText" :tooltip="kpi.momTooltip" :css-class="kpi.momClass"
+                      :arrow="kpi.momArrow" label="环比" :small-sample="kpi.momSmall" />
+          <DeltaBadge :text="kpi.yoyText" :tooltip="kpi.yoyTooltip" :css-class="kpi.yoyClass"
+                      :arrow="kpi.yoyArrow" label="同比" :small-sample="kpi.yoySmall" />
         </div>
       </div>
     </section>
 
-    <!-- 异常指标清单 + AI 面板 -->
-    <section class="abnormal-ai-strip">
-      <div class="panel abnormal-panel">
-        <div class="panel-title">
-          <svg class="panel-icon" viewBox="0 0 16 16" fill="none" stroke="currentColor" stroke-width="1.5"><path d="M8 1L15 14H1L8 1zM8 6v4M8 12h.01"/></svg>
-          异常指标清单
-          <span class="abnormal-count" v-if="abnormalList.length">{{ abnormalList.length }}</span>
-        </div>
-        <div v-if="abnormalList.length" class="abnormal-list">
-          <div v-for="a in abnormalList" :key="a.code" class="abnormal-item" :class="a.status" @click="openDetail(a)">
-            <div class="ab-main">
-              <span class="ab-code">{{ displayCode(a.code) }}</span>
-              <strong>{{ a.name }}</strong>
-              <span class="ab-status">{{ statusText(a.status) }}</span>
-            </div>
-            <div class="ab-meta">
-              当前 {{ fmtValue(a.value) }}{{ a.unit }} · 分子 {{ a.numerator ?? '/' }} / 分母 {{ a.denominator ?? '/' }}
-            </div>
-          </div>
-        </div>
-        <div v-else class="empty">
-          <svg class="empty-icon" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.5"><path d="M9 12h6M12 9v6"/><circle cx="12" cy="12" r="10"/></svg>
-          当前范围内暂无异常或预警指标
+    <!-- 焦点横幅：达标环 + 异常摘要 + 质控提示 -->
+    <section class="focus-banner">
+      <div class="fb-donut">
+        <svg viewBox="0 0 80 80" class="donut-svg" aria-label="总体达标分布">
+          <circle cx="40" cy="40" r="30" fill="none" stroke="var(--border)" stroke-width="9" />
+          <circle v-for="(s, i) in donutSegs" :key="i" cx="40" cy="40" r="30" fill="none"
+                  :stroke="s.color" stroke-width="9" stroke-linecap="butt"
+                  :stroke-dasharray="s.len + ' ' + (188.5 - s.len)"
+                  :stroke-dashoffset="s.offset"
+                  transform="rotate(-90 40 40)" />
+          <text x="40" y="39" class="donut-num">{{ riskGood }}</text>
+          <text x="40" y="52" class="donut-cap">/ {{ donutTotal }} 达标</text>
+        </svg>
+        <div class="fb-legend">
+          <span><i class="dot good"></i>达标 {{ riskCounts.good }}</span>
+          <span><i class="dot warn"></i>预警 {{ riskCounts.warn }}</span>
+          <span><i class="dot danger"></i>异常 {{ riskCounts.danger }}</span>
+          <span><i class="dot unknown"></i>待定 {{ riskCounts.unknown }}</span>
         </div>
       </div>
-      <div class="panel ai-panel-wrap">
-        <AiPanel :analysis="ai" />
+      <div class="fb-main">
+        <div class="fb-headline" :class="headlineClass">{{ headlineText }}</div>
+        <div v-if="abnormalList.length" class="fb-chips">
+          <button v-for="a in abnormalList.slice(0, 3)" :key="a.code" class="fb-chip" @click="openDetail(a)">
+            <i class="dot" :class="a.status"></i>
+            <em>{{ displayCode(a.code) }}</em>
+            <span>{{ a.name }}</span>
+            <b class="tabular-nums">{{ fmtValue(a.value) }}{{ a.unit }}</b>
+          </button>
+        </div>
+        <button class="link-btn" @click="activeTab = 'abnormal'">
+          查看全部异常清单（{{ abnormalList.length }}）
+        </button>
+      </div>
+      <div class="fb-ai">
+        <div class="fb-ai-label">质控提示</div>
+        <p class="fb-ai-text">{{ ai.summary || '暂无质控提示' }}</p>
+        <button class="link-btn" @click="aiVisible = true">展开完整提示</button>
       </div>
     </section>
 
-    <!-- 结构指标区 -->
-    <section id="sec-structure" class="zone-section">
-      <div class="zone-title-bar">
-        <h2 class="zone-title">
-          <svg class="zone-icon" viewBox="0 0 16 16" fill="none" stroke="currentColor" stroke-width="1.5"><rect x="2" y="2" width="5" height="12" rx="1"/><rect x="9" y="4" width="5" height="10" rx="1"/></svg>
-          结构与资源
-        </h2>
-        <div class="zone-stats">
-          <span class="zone-stat good" v-if="zoneStats.structure.good">{{ zoneStats.structure.good }} 项达标</span>
-          <span class="zone-stat warn" v-if="zoneStats.structure.warn">{{ zoneStats.structure.warn }} 项预警</span>
-          <span class="zone-stat danger" v-if="zoneStats.structure.danger">{{ zoneStats.structure.danger }} 项异常</span>
+    <!-- Tab 导航 -->
+    <nav class="tab-bar">
+      <button v-for="t in tabs" :key="t.key" class="tab-btn" :class="{ active: activeTab === t.key }"
+              @click="activeTab = t.key">
+        {{ t.label }}
+        <span v-if="t.key === 'abnormal' && abnormalList.length" class="tab-badge">{{ abnormalList.length }}</span>
+      </button>
+    </nav>
+
+    <!-- Tab · 异常清单 -->
+    <section v-show="activeTab === 'abnormal'" class="tab-panel">
+      <div class="panel-head">
+        <h2>异常与预警</h2>
+        <span class="head-note">按严重程度排序，点击行查看患者明细</span>
+      </div>
+      <div v-if="abnormalList.length" class="ab-table">
+        <div class="ab-row ab-head">
+          <span>状态</span><span>编码</span><span>指标名称</span><span>当前值</span>
+          <span>分子 / 分母</span><span>环比</span><span>提示</span>
+        </div>
+        <div v-for="a in abnormalList" :key="a.code" class="ab-row" @click="openDetail(a)">
+          <span class="c-status"><i class="dot" :class="a.status"></i>{{ statusText(a.status) }}</span>
+          <span class="c-code">{{ displayCode(a.code) }}</span>
+          <span class="c-name">{{ a.name }}</span>
+          <span class="c-value tabular-nums">{{ fmtValue(a.value) }}{{ a.unit }}</span>
+          <span class="c-nd tabular-nums">{{ a.numerator ?? '/' }} / {{ a.denominator ?? '/' }}</span>
+          <span class="c-delta">{{ a.delta ?? '—' }}</span>
+          <span class="c-hint">{{ a.hint || '' }}</span>
         </div>
       </div>
-      <div class="zone-grid ring-grid">
-        <div v-for="code in structureCodes" :key="code" class="zone-cell" @click="openDetail(rowsByCode[code])">
+      <div v-else class="empty">
+        当前范围内暂无异常或预警指标，可切换上方标签查看各项指标明细。
+      </div>
+    </section>
+
+    <!-- Tab · 结构 -->
+    <section v-show="activeTab === 'structure'" class="tab-panel">
+      <div class="panel-head">
+        <h2>结构与资源</h2>
+        <span class="zone-stats-inline">
+          <em v-if="zoneStats.structure.good" class="s-good">{{ zoneStats.structure.good }} 项达标</em>
+          <em v-if="zoneStats.structure.warn" class="s-warn">{{ zoneStats.structure.warn }} 项预警</em>
+          <em v-if="zoneStats.structure.danger" class="s-danger">{{ zoneStats.structure.danger }} 项异常</em>
+        </span>
+      </div>
+      <div class="ring-grid">
+        <div v-for="code in structureCodes" :key="code" class="ring-cell" @click="openDetail(rowsByCode[code])">
           <RingProgress
             :name="rowsByCode[code]?.name || code"
-            :value="rowsByCode[code]?.value || 0"
+            :value="rowsByCode[code]?.value ?? null"
             :unit="rowsByCode[code]?.unit || '%'"
             :status="rowsByCode[code]?.status || 'unknown'"
             :numerator-label="getIndicatorProp(code, 'numerator')"
@@ -152,183 +172,122 @@
       </div>
     </section>
 
-    <!-- 过程指标区 -->
-    <section id="sec-process" class="zone-section">
-      <div class="zone-title-bar">
-        <h2 class="zone-title">
-          <svg class="zone-icon" viewBox="0 0 16 16" fill="none" stroke="currentColor" stroke-width="1.5"><circle cx="8" cy="8" r="6"/><path d="M8 4v4l3 2"/></svg>
-          过程质量
-        </h2>
-        <div class="zone-stats">
-          <span class="zone-stat good" v-if="zoneStats.process.good">{{ zoneStats.process.good }} 项达标</span>
-          <span class="zone-stat warn" v-if="zoneStats.process.warn">{{ zoneStats.process.warn }} 项预警</span>
-          <span class="zone-stat danger" v-if="zoneStats.process.danger">{{ zoneStats.process.danger }} 项异常</span>
-        </div>
+    <!-- Tab · 过程 -->
+    <section v-show="activeTab === 'process'" class="tab-panel">
+      <div class="panel-head">
+        <h2>过程质量</h2>
+        <span class="zone-stats-inline">
+          <em v-if="zoneStats.process.good" class="s-good">{{ zoneStats.process.good }} 项达标</em>
+          <em v-if="zoneStats.process.warn" class="s-warn">{{ zoneStats.process.warn }} 项预警</em>
+          <em v-if="zoneStats.process.danger" class="s-danger">{{ zoneStats.process.danger }} 项异常</em>
+        </span>
       </div>
-      <!-- 一排 ring -->
-      <div class="zone-grid ring-grid-wrap">
-        <div v-for="code in processCodes" :key="code" class="zone-cell" @click="openDetail(rowsByCode[code])">
-          <RingProgress
-            :name="rowsByCode[code]?.name || code"
-            :value="rowsByCode[code]?.value || 0"
-            :unit="rowsByCode[code]?.unit || '%'"
-            :status="rowsByCode[code]?.status || 'unknown'"
-            :numerator-label="getIndicatorProp(code, 'numerator')"
-            :numerator="rowsByCode[code]?.numerator"
-            :denominator-label="getIndicatorProp(code, 'denominator')"
-            :denominator="rowsByCode[code]?.denominator"
-          />
+      <div class="proc-grid">
+        <div class="proc-tiles">
+          <div v-for="t in processTiles" :key="t.code" class="metric-tile" @click="openDetail(rowsByCode[t.code])">
+            <div class="mt-top">
+              <span class="mt-name">{{ t.name }}</span>
+              <i class="dot" :class="t.status"></i>
+            </div>
+            <div class="mt-value tabular-nums">
+              {{ t.valueText }}<small>{{ t.unit }}</small>
+            </div>
+            <div class="mt-bar">
+              <i class="mt-fill" :class="t.status" :style="{ width: t.fill + '%' }"></i>
+              <i class="mt-tick" :style="{ left: t.tick + '%' }"></i>
+            </div>
+            <div class="mt-foot tabular-nums">目标 {{ t.targetText }} · {{ t.numerator ?? '/' }}/{{ t.denominator ?? '/' }}</div>
+          </div>
         </div>
-      </div>
-      <!-- 下方 hbar 排行 -->
-      <div class="zone-chart">
-        <HBarRankChart
-          :items="processHbarItems"
-          unit="%"
-          :height="220"
-          @click="handleChartClick"
-        />
+        <div class="proc-chart">
+          <div class="sub-head">达标排行（竖线为目标值）</div>
+          <HBarRankChart :items="processHbarItems" unit="%" :height="260" @click="handleChartClick" />
+        </div>
       </div>
     </section>
 
-    <!-- 结果指标区 -->
-    <section id="sec-outcome" class="zone-section">
-      <div class="zone-title-bar">
-        <h2 class="zone-title">
-          <svg class="zone-icon" viewBox="0 0 16 16" fill="none" stroke="currentColor" stroke-width="1.5"><polyline points="1,12 4,6 7,9 10,3 15,8"/><line x1="1" y1="14" x2="15" y2="14"/></svg>
-          结果质量
-        </h2>
-        <div class="zone-stats">
-          <span class="zone-stat good" v-if="zoneStats.outcome.good">{{ zoneStats.outcome.good }} 项达标</span>
-          <span class="zone-stat warn" v-if="zoneStats.outcome.warn">{{ zoneStats.outcome.warn }} 项预警</span>
-          <span class="zone-stat danger" v-if="zoneStats.outcome.danger">{{ zoneStats.outcome.danger }} 项异常</span>
+    <!-- Tab · 结果 -->
+    <section v-show="activeTab === 'outcome'" class="tab-panel">
+      <div class="panel-head">
+        <h2>结果质量</h2>
+        <span class="zone-stats-inline">
+          <em v-if="zoneStats.outcome.good" class="s-good">{{ zoneStats.outcome.good }} 项达标</em>
+          <em v-if="zoneStats.outcome.warn" class="s-warn">{{ zoneStats.outcome.warn }} 项预警</em>
+          <em v-if="zoneStats.outcome.danger" class="s-danger">{{ zoneStats.outcome.danger }} 项异常</em>
+        </span>
+      </div>
+      <div class="outcome-grid">
+        <div v-for="t in outcomeTiles" :key="t.code" class="metric-tile" @click="openDetail(rowsByCode[t.code])">
+          <div class="mt-top">
+            <span class="mt-name">{{ t.name }}</span>
+            <i class="dot" :class="t.status"></i>
+          </div>
+          <div class="mt-value tabular-nums">
+            {{ t.valueText }}<small>{{ t.unit }}</small>
+          </div>
+          <div class="mt-bar">
+            <i class="mt-fill" :class="t.status" :style="{ width: t.fill + '%' }"></i>
+            <i class="mt-tick" :style="{ left: t.tick + '%' }"></i>
+          </div>
+          <div class="mt-foot tabular-nums">目标 {{ t.targetText }} · {{ t.numerator ?? '/' }}/{{ t.denominator ?? '/' }}</div>
         </div>
       </div>
-      <div class="zone-chart">
-        <HBarRankChart
-          :items="outcomeHbarItems"
-          unit="%"
-          :height="260"
-          @click="handleChartClick"
-        />
-      </div>
-      <!-- SMR 专项 -->
       <div class="smr-row">
         <SmrChart :current="smrCurrent" :history="smrHistory" :months="months" />
       </div>
     </section>
 
-    <!-- 组合视图区：2 列栅格 -->
-    <section id="sec-combo" class="zone-section">
-      <div class="zone-title-bar">
-        <h2 class="zone-title">
-          <svg class="zone-icon" viewBox="0 0 16 16" fill="none" stroke="currentColor" stroke-width="1.5"><rect x="1" y="1" width="6" height="6" rx="1"/><rect x="9" y="1" width="6" height="6" rx="1"/><rect x="1" y="9" width="6" height="6" rx="1"/><rect x="9" y="9" width="6" height="6" rx="1"/></svg>
-          组合分析
-        </h2>
-      </div>
+    <!-- Tab · 组合分析 -->
+    <section v-show="activeTab === 'combo'" class="tab-panel">
+      <div class="panel-head"><h2>组合分析</h2></div>
       <div class="combo-grid">
-        <!-- 感染防控组 -->
+        <!-- 感染防控 -->
         <div class="panel combo-panel">
-          <div class="panel-title">
-            <svg class="panel-icon" viewBox="0 0 16 16" fill="none" stroke="currentColor" stroke-width="1.5"><path d="M8 1v14M1 8h14"/><circle cx="8" cy="8" r="3"/></svg>
-            感染防控
-          </div>
-          <GroupedBarChart
-            :categories="infectionCategories"
-            :series="infectionSeries"
-            unit="‰"
-            :height="260"
-          />
+          <div class="panel-title">感染防控</div>
+          <GroupedBarChart :categories="infectionCategories" :series="infectionSeries" unit="‰" :height="240" />
         </div>
-
-        <!-- Sepsis 漏斗 -->
+        <!-- Sepsis Bundle -->
         <div class="panel combo-panel">
-          <div class="panel-title">
-            <svg class="panel-icon" viewBox="0 0 16 16" fill="none" stroke="currentColor" stroke-width="1.5"><path d="M2 3h12L10 8H6L2 3zM4 8h8l-2 5H6L4 8z"/></svg>
-            Sepsis Bundle
-          </div>
-          <FunnelBundleChart :data="bundleFunnelData" :height="260" />
-          <!-- 候选引擎统计 -->
-          <div v-if="icu05CandidateStats" class="candidate-stats">
-            <div class="candidate-stats-title">
-              <span class="candidate-stats-icon">🎯</span>
-              候选引擎统计
-            </div>
-            <div class="candidate-stats-grid">
-              <div class="candidate-stat-item">
-                <span class="stat-label">原始候选</span>
-                <span class="stat-value">{{ icu05CandidateStats.raw_candidate_count }}</span>
-              </div>
-              <div class="candidate-stat-item high-prob">
-                <span class="stat-label">高概率</span>
-                <span class="stat-value">{{ icu05CandidateStats.high_probability_count }}</span>
-              </div>
-              <div class="candidate-stat-item probable">
-                <span class="stat-label">很可能</span>
-                <span class="stat-value">{{ icu05CandidateStats.probable_count }}</span>
-              </div>
-              <div class="candidate-stat-item pending">
-                <span class="stat-label">待复核</span>
-                <span class="stat-value">{{ icu05CandidateStats.pending_review_count }}</span>
-              </div>
-            </div>
-            <div class="candidate-stats-compare">
-              <span class="compare-label">新口径确诊: <strong>{{ icu05CandidateStats.new_shock_count }}</strong></span>
-              <span class="compare-divider">|</span>
-              <span class="compare-label">旧口径确诊: <strong>{{ icu05CandidateStats.old_shock_count }}</strong></span>
-              <span class="compare-divider">|</span>
-              <span class="compare-label" :class="{ 'diff-positive': icu05CandidateStats.shock_diff > 0, 'diff-negative': icu05CandidateStats.shock_diff < 0 }">
-                差异: <strong>{{ icu05CandidateStats.shock_diff > 0 ? '+' : '' }}{{ icu05CandidateStats.shock_diff }}</strong>
-              </span>
-            </div>
+          <div class="panel-title">Sepsis Bundle</div>
+          <FunnelBundleChart :data="bundleFunnelData" :height="240" />
+          <div v-if="icu05CandidateStats" class="cand-strip">
+            <span>原始候选 <b>{{ icu05CandidateStats.raw_candidate_count }}</b></span>
+            <span>高概率 <b>{{ icu05CandidateStats.high_probability_count }}</b></span>
+            <span>很可能 <b>{{ icu05CandidateStats.probable_count }}</b></span>
+            <span>待复核 <b>{{ icu05CandidateStats.pending_review_count }}</b></span>
+            <span class="cand-divider"></span>
+            <span>新口径确诊 <b>{{ icu05CandidateStats.new_shock_count }}</b></span>
+            <span>旧口径确诊 <b>{{ icu05CandidateStats.old_shock_count }}</b></span>
+            <span :class="icu05CandidateStats.shock_diff > 0 ? 'diff-positive' : (icu05CandidateStats.shock_diff < 0 ? 'diff-negative' : '')">
+              差异 <b>{{ icu05CandidateStats.shock_diff > 0 ? '+' : '' }}{{ icu05CandidateStats.shock_diff }}</b>
+            </span>
           </div>
         </div>
-
         <!-- 镇痛镇静雷达 -->
         <div class="panel combo-panel">
-          <div class="panel-title">
-            <svg class="panel-icon" viewBox="0 0 16 16" fill="none" stroke="currentColor" stroke-width="1.5"><polygon points="8,1 14,5 14,11 8,15 2,11 2,5"/></svg>
-            镇痛镇静意识评估
-          </div>
-          <RadarAssessChart :data="sedationRadarData" :height="260" />
+          <div class="panel-title">镇痛镇静意识评估</div>
+          <RadarAssessChart :data="sedationRadarData" :height="240" />
         </div>
-
         <!-- 人力与负荷 -->
         <div class="panel combo-panel">
-          <div class="panel-title">
-            <svg class="panel-icon" viewBox="0 0 16 16" fill="none" stroke="currentColor" stroke-width="1.5"><path d="M4 2v12M12 2v12M2 6h4M10 4h4M2 10h4M10 8h4"/></svg>
-            人力与负荷
-          </div>
+          <div class="panel-title">人力与负荷</div>
           <BarTargetChart :items="ratioItems" />
         </div>
-
         <!-- 患者流转 -->
         <div class="panel combo-panel">
-          <div class="panel-title">
-            <svg class="panel-icon" viewBox="0 0 16 16" fill="none" stroke="currentColor" stroke-width="1.5"><path d="M2 4h12M2 8h12M2 12h12"/></svg>
-            患者流转
-          </div>
+          <div class="panel-title">患者流转</div>
           <CensusStackChart :trend="censusTrend" />
         </div>
-
         <!-- 气道安全 -->
         <div class="panel combo-panel">
-          <div class="panel-title">
-            <svg class="panel-icon" viewBox="0 0 16 16" fill="none" stroke="currentColor" stroke-width="1.5"><path d="M8 1v4M5 5l3 4 3-4M4 13h8M6 9v4M10 9v4"/></svg>
-            气道安全
-          </div>
-          <GroupedBarChart
-            :categories="airwayCategories"
-            :series="airwaySeries"
-            unit="%"
-            :height="220"
-          />
+          <div class="panel-title">气道安全</div>
+          <GroupedBarChart :categories="airwayCategories" :series="airwaySeries" unit="%" :height="240" />
         </div>
       </div>
     </section>
 
-    <!-- 环比同比总表 -->
-    <section id="sec-compare" class="zone-section">
+    <!-- Tab · 环比同比表 -->
+    <section v-show="activeTab === 'compare'" class="tab-panel">
       <ComparisonTable
         :rows="rows"
         :trend="trendData"
@@ -340,27 +299,21 @@
       />
     </section>
 
-    <!-- 底部免责声明 -->
+    <!-- 底部 -->
     <footer class="db-footer">
-      <div class="footer-left">
-        <svg class="footer-icon" viewBox="0 0 16 16" fill="none" stroke="currentColor" stroke-width="1.5"><circle cx="8" cy="8" r="7"/><path d="M8 5v1M8 8v4"/></svg>
-        数据来源：医院信息系统（HIS）| ICU质量管理系统（ICU-QMS）
-      </div>
-      <div class="footer-right">
-        <svg class="footer-icon" viewBox="0 0 16 16" fill="none" stroke="currentColor" stroke-width="1.5"><circle cx="8" cy="8" r="7"/><path d="M8 5v1M8 8v4"/></svg>
-        本看板数据仅供医疗质量管理参考，不作为临床决策依据
-      </div>
+      <span>数据来源：医院信息系统（HIS）| ICU质量管理系统（ICU-QMS）</span>
+      <span>本看板数据仅供医疗质量管理参考，不作为临床决策依据</span>
     </footer>
 
     <!-- 弹窗 -->
-    <Modal v-if="guideVisible" title="指标口径说明" @close="guideVisible=false">
-      <IndicatorGuideModal />
+    <Modal v-if="aiVisible" title="质控提示" @close="aiVisible = false">
+      <AiPanel :analysis="ai" />
     </Modal>
-    <Modal v-if="detailVisible" :title="detailTitle" @close="detailVisible=false">
+    <Modal v-if="detailVisible" :title="detailTitle" @close="detailVisible = false">
       <DetailModal :data="detailData" :summary="detailData.summary" :parts="detailData.parts"
-             :funnel="detailData.funnel"
-             :period="ps" :end-period="endPeriodParam" :unit="detailUnit" :unit-name="detailUnitName"
-             @exclusion-changed="onDetailExclusionChanged" />
+                   :funnel="detailData.funnel"
+                   :period="ps" :end-period="endPeriodParam" :unit="detailUnit" :unit-name="detailUnitName"
+                   @exclusion-changed="onDetailExclusionChanged" />
     </Modal>
   </div>
 </template>
@@ -374,7 +327,6 @@ import { getMoM, getYoY, formatDelta, formatValue } from '../utils/compare.js';
 
 // 组件
 import DeltaBadge from '../components/DeltaBadge.vue';
-import Sparkline from '../components/Sparkline.vue';
 import RingProgress from '../components/RingProgress.vue';
 import HBarRankChart from '../components/HBarRankChart.vue';
 import GroupedBarChart from '../components/GroupedBarChart.vue';
@@ -386,8 +338,9 @@ import SmrChart from '../components/SmrChart.vue';
 import ComparisonTable from '../components/ComparisonTable.vue';
 import AiPanel from '../components/AiPanel.vue';
 import Modal from '../components/Modal.vue';
-import IndicatorGuideModal from '../components/IndicatorGuideModal.vue';
 import DetailModal from '../components/DetailModal.vue';
+
+const hospitalName = '重庆医科大学附属第二医院';
 
 // ---- 状态 ----
 const year = ref(new Date().getFullYear());
@@ -395,7 +348,6 @@ const sMonth = ref(new Date().getMonth() + 1);
 const eMonth = ref(new Date().getMonth() + 1);
 const hostDeptCode = inject('hostDeptCode', ref('all'));
 const dept = computed(() => hostDeptCode.value || 'all');
-// 动态年份：从2024到当前年+1
 const years = computed(() => {
   const arr = [];
   for (let y = 2024; y <= new Date().getFullYear() + 1; y++) arr.push(y);
@@ -415,8 +367,6 @@ const loading = ref(false);
 const error = ref('');
 const updatedAt = ref('');
 const statusConfig = ref(getStatusConfig());
-const guideVisible = ref(false);
-const censusData = ref(null);
 const censusTrend = ref([]);
 
 // 补算状态
@@ -436,12 +386,24 @@ const detailData = ref(null);
 const detailTitle = ref('');
 const detailUnit = ref('');
 const detailUnitName = ref('');
+const aiVisible = ref(false);
+
+// Tab
+const tabs = [
+  { key: 'abnormal', label: '异常清单' },
+  { key: 'structure', label: '结构' },
+  { key: 'process', label: '过程' },
+  { key: 'outcome', label: '结果' },
+  { key: 'combo', label: '组合分析' },
+  { key: 'compare', label: '环比同比表' },
+];
+const activeTab = ref('abnormal');
 
 const ps = computed(() => `${year.value}-${String(sMonth.value).padStart(2, '0')}`);
 const pe = computed(() => `${year.value}-${String(eMonth.value).padStart(2, '0')}`);
 const endPeriodParam = computed(() => sMonth.value === eMonth.value ? '' : pe.value);
 
-// ---- 工具函数 ----
+// ---- 工具 ----
 function displayCode(code) {
   return INDICATORS.find(i => i.code === code)?.displayCode || code;
 }
@@ -454,24 +416,22 @@ function fmtValue(v) {
 function getIndicatorProp(code, prop) {
   return INDICATORS.find(i => i.code === code)?.[prop] || '';
 }
+const scopeLabel = computed(() => (dept.value === 'all' ? '全部科室' : `科室 ${dept.value}`));
 
 // ---- 分组 ----
 const structureCodes = computed(() => {
   const group = INDICATOR_GROUPS.find(g => g.id === 'structure');
   return (group?.codes || []).filter(c => rowsByCode.value[c]);
 });
-
 const processCodes = computed(() => {
   const group = INDICATOR_GROUPS.find(g => g.id === 'process');
   return (group?.codes || []).filter(c => rowsByCode.value[c]);
 });
-
 const outcomeCodes = computed(() => {
   const group = INDICATOR_GROUPS.find(g => g.id === 'outcome');
   return (group?.codes || []).filter(c => rowsByCode.value[c]);
 });
 
-// 分区统计
 const zoneStats = computed(() => {
   const stats = {};
   for (const g of INDICATOR_GROUPS) {
@@ -482,25 +442,25 @@ const zoneStats = computed(() => {
   return stats;
 });
 
-// ---- KPI 卡片（6 张） ----
+// ---- KPI 六宫格 ----
 const kpiCardCodes = ['ICU-01', 'ICU-04', 'ICU-06', 'ICU-11', 'ICU-16', 'ICU-17'];
 const kpiCards = computed(() => {
   return kpiCardCodes.map(code => {
     const row = rowsByCode.value[code];
-    if (!row || row.value == null) return null;
-
+    if (!row) return null;
     const mom = getMoM(code, trendData.value, months.value, row.denominator);
     const yoy = getYoY(code, trendData.value, months.value, yoyTrend.value, yoyMonths.value, row.denominator);
     const momFmt = formatDelta(mom, 'mom');
     const yoyFmt = formatDelta(yoy, 'yoy');
-
     return {
       code,
       name: row.name,
       value: row.value,
-      valueText: formatValue(row.value, code),
-      unit: row.unit || '',
+      valueText: row.value == null ? '—' : formatValue(row.value, code),
+      unit: row.value == null ? '' : (row.unit || ''),
       status: row.status || 'unknown',
+      numerator: row.numerator,
+      denominator: row.denominator,
       momText: momFmt.text,
       momTooltip: momFmt.tooltip,
       momClass: momFmt.cssClass,
@@ -515,14 +475,96 @@ const kpiCards = computed(() => {
   }).filter(Boolean);
 });
 
-// ---- 异常列表 ----
+// ---- 异常清单 ----
 const abnormalList = computed(() => (abnormal.value || []).filter(i => {
   if (i.status === 'unknown') return false;
   const ind = INDICATORS.find(x => x.code === i.code);
   return !ind?.excludeFromAlert;
-}).slice(0, 8));
+}));
 
-// ---- 过程区 hbar ----
+// ---- 达标环 ----
+const riskCounts = computed(() => {
+  const c = risk.value.counts || {};
+  return {
+    good: c.good || 0,
+    warn: c.warn || 0,
+    danger: c.danger || 0,
+    unknown: c.unknown || 0,
+  };
+});
+const donutTotal = computed(() => {
+  const c = riskCounts.value;
+  return c.good + c.warn + c.danger + c.unknown;
+});
+const riskGood = computed(() => riskCounts.value.good);
+const donutSegs = computed(() => {
+  const c = riskCounts.value;
+  const total = donutTotal.value;
+  if (!total) return [];
+  const C = 188.5;
+  const colorMap = {
+    good: 'var(--good)',
+    warn: 'var(--warn)',
+    danger: 'var(--danger)',
+    unknown: 'var(--text-faint)',
+  };
+  let acc = 0;
+  return ['good', 'warn', 'danger', 'unknown'].filter(k => c[k] > 0).map(k => {
+    const len = (c[k] / total) * C;
+    const seg = { color: colorMap[k], len, offset: -acc };
+    acc += len;
+    return seg;
+  });
+});
+const headlineText = computed(() => {
+  const c = riskCounts.value;
+  if (c.danger || c.warn) return `${c.danger} 项异常 · ${c.warn} 项预警需关注`;
+  if (donutTotal.value) return '本期全部指标平稳';
+  return '暂无数据';
+});
+const headlineClass = computed(() => {
+  const c = riskCounts.value;
+  if (c.danger) return 'is-danger';
+  if (c.warn) return 'is-warn';
+  return 'is-good';
+});
+
+// ---- 指标格（过程 / 结果） ----
+function buildTile(code, better) {
+  const row = rowsByCode.value[code];
+  if (!row) return null;
+  const ind = INDICATORS.find(i => i.code === code);
+  const th = ind?.thresholds?.good || [];
+  const target = better === 'high' ? (th[0] ?? 80) : (th[1] ?? 5);
+  const val = Number(row.value) || 0;
+  let fill, tick;
+  if (better === 'high') {
+    // 越高越好：刻度 0-100，目标线在 target%
+    fill = Math.max(0, Math.min(val, 100));
+    tick = Math.max(0, Math.min(target, 100));
+  } else {
+    // 越低越好：量程 = max(2×目标, 当前值)
+    const scale = Math.max(target * 2, val, 1);
+    fill = Math.max(0, Math.min((val / scale) * 100, 100));
+    tick = Math.max(0, Math.min((target / scale) * 100, 100));
+  }
+  return {
+    code,
+    name: row.name,
+    status: row.status || 'unknown',
+    valueText: formatValue(row.value, code),
+    unit: row.value == null ? '' : (row.unit || ''),
+    fill,
+    tick,
+    targetText: `${target}${row.unit || '%'}`,
+    numerator: row.numerator,
+    denominator: row.denominator,
+  };
+}
+const processTiles = computed(() => processCodes.value.map(c => buildTile(c, 'high')).filter(Boolean));
+const outcomeTiles = computed(() => outcomeCodes.value.filter(c => c !== 'ICU-11').map(c => buildTile(c, 'low')).filter(Boolean));
+
+// ---- 过程 / 结果 hbar ----
 const processHbarItems = computed(() => {
   return processCodes.value.map(code => {
     const row = rowsByCode.value[code];
@@ -533,22 +575,11 @@ const processHbarItems = computed(() => {
   }).filter(Boolean);
 });
 
-// ---- 结果区 hbar ----
-const outcomeHbarItems = computed(() => {
-  return outcomeCodes.value.filter(c => c !== 'ICU-11').map(code => {
-    const row = rowsByCode.value[code];
-    if (!row) return null;
-    const ind = INDICATORS.find(i => i.code === code);
-    const target = ind?.thresholds?.good?.[1] || 5;
-    return { name: row.name, value: row.value, target, status: row.status };
-  }).filter(Boolean);
-});
-
 // ---- SMR ----
 const smrCurrent = computed(() => values.value['ICU-11'] ?? 1);
 const smrHistory = computed(() => trendData.value['ICU-11'] ?? []);
 
-// ---- 感染防控组 ----
+// ---- 感染防控 ----
 const infectionCategories = computed(() => {
   return ['VAP', 'CRBSI', 'CAUTI'].filter((_, i) => {
     const codes = ['ICU-16', 'ICU-17', 'CAUTI'];
@@ -576,8 +607,6 @@ const bundleFunnelData = computed(() => {
     };
   });
 });
-
-// ICU-05 候选引擎统计
 const icu05CandidateStats = computed(() => {
   const row = rowsByCode.value['ICU-05-1h'] || rowsByCode.value['ICU-05-3h'];
   if (!row) return null;
@@ -636,21 +665,21 @@ const overallText = computed(() => {
   if (risk.value.overall_status === 'good') return '平稳';
   return '待刷新';
 });
-const periodLabel = computed(() => {
-  if (sMonth.value === eMonth.value) return `${year.value}年${sMonth.value}月`;
-  return `${year.value}年${sMonth.value}月 至 ${eMonth.value}月`;
-});
 
 // ---- 交互 ----
+let detailSeq = 0; // 明细请求序号：快速切换指标时丢弃过期响应
+
 async function openDetail(row) {
+  // 加载中 rows 尚未切换到当前期间：禁止下钻，防止「公式条(旧行) ≠ 明细(新期间)」
+  if (loading.value || rebuilding.value) return;
   if (!row || !row.code) return;
+  const seq = ++detailSeq;
   detailTitle.value = `${displayCode(row.code)} ${row.name} — 患者明细`;
   detailUnit.value = row.unit || '';
   detailUnitName.value = row.name;
   detailVisible.value = true;
 
   const base = { name: row.name, code: row.code, part: 'numerator', loading: true, patients: [], source_desc: '加载中...', count: 0 };
-  // 公式条 + ICU-05 漏斗（加载期间即显示）
   const summary = { value: row.value, unit: row.unit || '' };
   if (row.numerator != null) summary.numerator = row.numerator;
   if (row.denominator != null) summary.denominator = row.denominator;
@@ -665,6 +694,7 @@ async function openDetail(row) {
       fetchDetail(row.code, ps.value, 'numerator', dept.value, endPeriodParam.value, { limit: 200, offset: 0 }),
       fetchDetail(row.code, ps.value, 'denominator', dept.value, endPeriodParam.value, { limit: 200, offset: 0 }),
     ]);
+    if (seq !== detailSeq) return;
     detailData.value = {
       ...numR,
       summary,
@@ -672,13 +702,14 @@ async function openDetail(row) {
       funnel,
     };
   } catch (e) {
+    if (seq !== detailSeq) return;
     detailData.value = { ...base, loading: false, error: e.message || '明细加载失败', source_desc: '明细加载失败', summary, funnel };
   }
 }
 
-// 排除变更后重载两份明细
 async function onDetailExclusionChanged() {
   if (!detailData.value) return;
+  const seq = ++detailSeq;
   const cur = detailData.value;
   const base = { ...cur, loading: true, patients: [], source_desc: '重新加载中...' };
   detailData.value = base;
@@ -687,12 +718,14 @@ async function onDetailExclusionChanged() {
       fetchDetail(cur.code, ps.value, 'numerator', dept.value, endPeriodParam.value, { limit: 200, offset: 0 }),
       fetchDetail(cur.code, ps.value, 'denominator', dept.value, endPeriodParam.value, { limit: 200, offset: 0 }),
     ]);
+    if (seq !== detailSeq) return;
     const summary = { ...(cur.summary || {}) };
     if (summary.numerator != null) summary.numerator = numR.count;
     if (summary.denominator != null) summary.denominator = denR.count;
     const funnel = cur.funnel ? { ...cur.funnel, candidate: denR.count, completed: numR.count } : null;
     detailData.value = { ...numR, summary, parts: { numerator: numR, denominator: denR }, funnel };
   } catch (e) {
+    if (seq !== detailSeq) return;
     detailData.value = { ...base, loading: false, error: e.message || '明细加载失败' };
   }
 }
@@ -706,13 +739,16 @@ function handleChartClick(params) {
 
 // ---- 数据加载 ----
 let yoyCache = {};
+let loadSeq = 0;   // 请求序号：期间快速切换时，丢弃过期响应，防止旧行覆盖新数据
 
 async function loadData(nocache = false) {
   if (eMonth.value < sMonth.value) eMonth.value = sMonth.value;
+  const seq = ++loadSeq;
   loading.value = true;
   error.value = '';
   try {
     const res = await fetchCommandCenter(ps.value, endPeriodParam.value, dept.value, nocache);
+    if (seq !== loadSeq) return; // 已有更新的请求，本响应作废
     rows.value = res.rows || [];
     rowsByCode.value = Object.fromEntries(rows.value.map(r => [r.code, r]));
     values.value = res.values || {};
@@ -722,10 +758,8 @@ async function loadData(nocache = false) {
     abnormal.value = res.abnormal || [];
     ai.value = res.ai || { summary: '', hints: [], todos: [] };
     updatedAt.value = res.updated_at ? res.updated_at.replace('T', ' ') : '';
-    censusData.value = res.census || null;
     censusTrend.value = res.census_trend || [];
 
-    // 检测数据完整性
     dataComplete.value = res.data_complete !== false;
     missingPeriods.value = res.missing_periods || [];
     if (res.rebuilding) {
@@ -736,9 +770,9 @@ async function loadData(nocache = false) {
       stopRebuildPolling();
     }
 
-    // 尝试获取去年同期数据
-    loadYoYData();
+    loadYoYData(seq);
   } catch (e) {
+    if (seq !== loadSeq) return;
     error.value = e.message || '大屏数据读取失败';
     rows.value = [];
     rowsByCode.value = {};
@@ -746,24 +780,27 @@ async function loadData(nocache = false) {
     trendData.value = {};
     abnormal.value = [];
   } finally {
-    loading.value = false;
+    if (seq === loadSeq) loading.value = false;
   }
 }
 
-async function loadYoYData() {
+async function loadYoYData(seq) {
   const yoyYear = year.value - 1;
   const yoyPeriod = `${yoyYear}-${String(sMonth.value).padStart(2, '0')}`;
   const yoyEnd = sMonth.value === eMonth.value ? '' : `${yoyYear}-${String(eMonth.value).padStart(2, '0')}`;
   const cacheKey = `${yoyPeriod}-${yoyEnd}-${dept.value}`;
 
   if (yoyCache[cacheKey]) {
-    yoyTrend.value = yoyCache[cacheKey].trend;
-    yoyMonths.value = yoyCache[cacheKey].months;
+    if (seq === loadSeq) {
+      yoyTrend.value = yoyCache[cacheKey].trend;
+      yoyMonths.value = yoyCache[cacheKey].months;
+    }
     return;
   }
 
   try {
     const res = await fetchCommandCenter(yoyPeriod, yoyEnd, dept.value);
+    if (seq !== loadSeq) return; // 期间又变了，丢弃
     if (res.trend && res.months) {
       yoyTrend.value = res.trend;
       yoyMonths.value = res.months;
@@ -773,14 +810,14 @@ async function loadYoYData() {
       yoyMonths.value = null;
     }
   } catch {
-    // 后端不支持跨年查询，显示「—」
+    if (seq !== loadSeq) return;
     yoyTrend.value = null;
     yoyMonths.value = null;
   }
 }
 
 // ---- 补算轮询 ----
-const MAX_POLL_FAILURES = 6; // 连续失败6次后停止轮询
+const MAX_POLL_FAILURES = 6;
 let pollFailureCount = 0;
 
 function startRebuildPolling() {
@@ -789,7 +826,7 @@ function startRebuildPolling() {
   rebuildPollTimer = setInterval(async () => {
     try {
       const status = await fetchRebuildStatus();
-      pollFailureCount = 0; // 重置失败计数
+      pollFailureCount = 0;
       if (!status.rebuilding) {
         rebuilding.value = false;
         rebuildError.value = null;
@@ -820,15 +857,18 @@ function syncFromURL() {
   const y = p.get('year'); if (y) year.value = +y;
   const sm = p.get('sMonth'); if (sm) sMonth.value = +sm;
   const em = p.get('eMonth'); if (em) eMonth.value = +em;
+  const tab = p.get('tab'); if (tab && tabs.some(t => t.key === tab)) activeTab.value = tab;
 }
 function syncToURL() {
   const u = new URL(window.location);
   u.searchParams.set('year', year.value);
   u.searchParams.set('sMonth', sMonth.value);
   u.searchParams.set('eMonth', eMonth.value);
+  u.searchParams.set('tab', activeTab.value);
   window.history.replaceState({}, '', u);
 }
 watch([year, sMonth, eMonth], syncToURL);
+watch(activeTab, syncToURL);
 watch(hostDeptCode, () => { loadData(true); });
 
 onMounted(() => {
@@ -839,282 +879,348 @@ onMounted(() => {
   loadData();
 });
 
-// 组件卸载时清理轮询
 onUnmounted(() => {
   stopRebuildPolling();
 });
 </script>
 
 <style scoped>
+/* ================= 基础 ================= */
 .dashboard {
-  padding: 18px 24px 0;
+  padding: 14px 24px 0;
   min-height: 100vh;
   background: var(--bg-app);
   color: var(--text-body);
 }
-.dashboard.compact {
-  padding: 10px 16px 0;
-}
-.dashboard.compact .kpi-stat-card { margin-bottom: 8px; }
-.dashboard.compact .zone-section { margin-bottom: 12px; }
-.dashboard.compact .panel { padding: 10px 12px; }
+.dashboard.compact { padding: 8px 16px 0; }
+.dashboard.compact .kpi-tile { padding: 9px 12px; }
+.dashboard.compact .focus-banner { padding: 12px 16px; }
+.dashboard.compact .tab-panel { padding-top: 10px; }
 
-/* ---- Header ---- */
-.db-header {
-  display: flex;
-  justify-content: space-between;
-  align-items: flex-end;
-  margin-bottom: 16px;
-  gap: 16px;
-  flex-wrap: wrap;
+.dot {
+  display: inline-block; width: 7px; height: 7px; border-radius: 50%;
+  background: var(--text-faint); flex-shrink: 0;
 }
-.db-header-left { display: flex; flex-direction: column; gap: 2px; }
-.db-title {
-  font-size: var(--fs-h1); font-weight: 600; color: var(--text-title);
-  line-height: 1.3; margin: 0;
-}
-.db-subtitle { font-size: var(--fs-caption); color: var(--text-sub); }
-.db-header-right { display: flex; align-items: center; gap: 10px; flex-wrap: wrap; justify-content: flex-end; }
+.dot.good { background: var(--good); }
+.dot.warn { background: var(--warn); }
+.dot.danger { background: var(--danger); }
+.dot.unknown { background: var(--text-faint); }
 
-/* Anchor nav */
-.anchor-nav { display: flex; gap: 2px; }
-.anchor-link {
-  padding: 4px 10px; border-radius: 6px; font-size: 12px; color: var(--text-sub);
-  text-decoration: none; transition: all .15s;
+/* ================= 顶栏 ================= */
+.db-topbar {
+  position: sticky; top: 0; z-index: 40;
+  display: flex; justify-content: space-between; align-items: center;
+  gap: 16px; flex-wrap: wrap;
+  padding: 4px 0 12px;
+  margin-bottom: 12px;
+  border-bottom: 1px solid var(--border);
+  background: var(--bg-app);
 }
-.anchor-link:hover { background: var(--brand-weak); color: var(--brand); }
+.tt-left { display: flex; align-items: baseline; gap: 12px; min-width: 0; }
+.tt-title {
+  font-size: 20px; font-weight: 700; color: var(--text-title);
+  line-height: 1.3; margin: 0; letter-spacing: 0.01em;
+}
+.tt-sub { font-size: 12px; color: var(--text-sub); white-space: nowrap; }
+.tt-right { display: flex; align-items: center; gap: 12px; flex-wrap: wrap; }
 
-/* Period selector */
-.period-selector { display: flex; align-items: center; gap: 6px; }
-.period-label { font-size: var(--fs-caption); color: var(--text-sub); white-space: nowrap; }
-.period-to { font-size: var(--fs-label); color: var(--text-sub); padding: 0 2px; }
+.period-selector { display: flex; align-items: center; gap: 5px; }
+.period-to { font-size: 12px; color: var(--text-sub); }
 .period-selector select {
   background: var(--bg-surface); color: var(--text-body);
-  border: 1px solid var(--border); border-radius: var(--radius-sm);
-  padding: 6px 10px; font-size: var(--fs-label); height: 32px;
-  transition: border-color .2s;
+  border: 1px solid var(--border); border-radius: 6px;
+  padding: 4px 8px; font-size: 12px; height: 28px;
+  transition: border-color .15s;
 }
-.period-selector select:focus { border-color: var(--brand); outline: none; box-shadow: 0 0 0 2px var(--brand-weak); }
+.period-selector select:focus { border-color: var(--brand); outline: none; }
 
-/* Density button */
+.status-text {
+  display: inline-flex; align-items: center; gap: 6px;
+  font-size: 12px; font-weight: 600; color: var(--text-sub);
+}
+.status-text.good { color: var(--good); }
+.status-text.warn { color: var(--warn); }
+.status-text.danger { color: var(--danger); }
+
+.meta-update { color: var(--text-faint); font-size: 12px; white-space: nowrap; }
+
 .density-btn {
   display: flex; align-items: center; justify-content: center;
-  width: 32px; height: 32px; border: 1px solid var(--border); border-radius: var(--radius-sm);
+  width: 28px; height: 28px; border: 1px solid var(--border); border-radius: 6px;
   background: var(--bg-surface); color: var(--text-sub); cursor: pointer; transition: all .15s;
 }
 .density-btn:hover { border-color: var(--brand); color: var(--brand); }
-.density-btn svg { width: 16px; height: 16px; }
+.density-btn svg { width: 14px; height: 14px; }
 
-/* Status pill */
-.status-pill {
-  display: inline-flex; align-items: center; gap: 6px;
-  padding: 5px 12px; border-radius: 20px;
-  font-size: var(--fs-caption); font-weight: 600;
-  background: var(--brand-weak); color: var(--brand);
-  border: 1px solid rgba(30,94,184,0.2);
-}
-.status-pill.danger { background: var(--danger-weak); color: var(--danger); border-color: rgba(198,40,40,0.2); }
-.status-pill.warn { background: var(--warn-weak); color: var(--warn); border-color: rgba(178,106,0,0.2); }
-.status-pill.good { background: var(--good-weak); color: var(--good); border-color: rgba(14,122,82,0.2); }
-.pill-icon { width: 14px; height: 14px; flex-shrink: 0; }
-.meta-update { color: var(--text-faint); font-size: var(--fs-caption); white-space: nowrap; }
-
-/* State messages */
+/* ================= 状态提示 ================= */
 .state {
-  margin-bottom: 12px; padding: 10px 14px; border-radius: var(--radius-sm);
-  background: var(--brand-weak); color: var(--text-sub); font-size: var(--fs-body);
+  margin-bottom: 10px; padding: 8px 12px; border-radius: 6px;
+  background: var(--brand-weak); color: var(--text-sub); font-size: 13px;
   border: 1px solid rgba(30,94,184,0.15); display: flex; align-items: center; gap: 8px;
 }
 .state.error { background: var(--danger-weak); color: var(--danger); border-color: rgba(198,40,40,0.15); }
-.state.rebuilding { background: var(--warn-weak); color: var(--warn); border-color: rgba(178,106,0,0.15); }
-.state.warning { background: var(--warn-weak); color: var(--warn); border-color: rgba(178,106,0,0.15); }
-.spin-icon { width: 16px; height: 16px; animation: spin 1s linear infinite; flex-shrink: 0; }
+.state.rebuilding, .state.warning { background: var(--warn-weak); color: var(--warn); border-color: rgba(178,106,0,0.15); }
+.spin-icon { width: 15px; height: 15px; animation: spin 1s linear infinite; flex-shrink: 0; }
 @keyframes spin { to { transform: rotate(360deg); } }
 
-/* KPI Stat Cards */
-.kpi-stats {
+/* ================= KPI 六宫格 ================= */
+.kpi-row {
   display: grid; grid-template-columns: repeat(6, 1fr);
-  gap: 12px; margin-bottom: 14px;
+  gap: 10px; margin-bottom: 10px;
 }
-.kpi-stat-card {
-  display: flex; background: var(--bg-surface);
-  border: 1px solid var(--border); border-radius: var(--radius-card);
-  overflow: hidden; transition: border-color .2s, box-shadow .2s;
-  box-shadow: var(--shadow-card); cursor: pointer;
+.kpi-tile {
+  background: var(--bg-surface); border: 1px solid var(--border);
+  border-radius: 8px; padding: 11px 13px; cursor: pointer;
+  transition: border-color .15s;
+  min-width: 0; display: flex; flex-direction: column; gap: 5px;
 }
-.kpi-stat-card:hover { border-color: var(--border-strong); box-shadow: 0 2px 8px rgba(16,24,40,.08); }
-.kpi-card-left { width: 4px; flex-shrink: 0; background: var(--text-faint); }
-.kpi-stat-card.good .kpi-card-left { background: var(--good); }
-.kpi-stat-card.warn .kpi-card-left { background: var(--warn); }
-.kpi-stat-card.danger .kpi-card-left { background: var(--danger); }
-.kpi-card-body { padding: 12px 14px; flex: 1; min-width: 0; display: flex; flex-direction: column; gap: 4px; }
-.kpi-card-top { display: flex; justify-content: space-between; align-items: center; }
-.kpi-card-label { font-size: var(--fs-caption); color: var(--text-sub); white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
-.kpi-card-code { font-size: 11px; color: var(--brand); font-weight: 700; }
-.kpi-card-main { display: flex; align-items: baseline; gap: 3px; }
-.kpi-card-big { font-size: var(--fs-metric); font-weight: 700; color: var(--text-title); line-height: 1.2; }
-.kpi-card-unit { font-size: var(--fs-body); color: var(--text-sub); }
-.kpi-card-deltas { display: flex; gap: 4px; flex-wrap: wrap; }
+.kpi-tile:hover { border-color: var(--border-strong); }
+.kpi-name { display: flex; align-items: center; gap: 6px; min-width: 0; }
+.kpi-label {
+  font-size: 12px; color: var(--text-sub); white-space: nowrap;
+  overflow: hidden; text-overflow: ellipsis; flex: 1; min-width: 0;
+}
+.kpi-code { font-size: 10px; font-style: normal; color: var(--text-faint); font-weight: 600; flex-shrink: 0; }
+.kpi-value { display: flex; align-items: baseline; gap: 4px; }
+.kpi-value strong { font-size: 25px; font-weight: 700; color: var(--text-title); line-height: 1.1; }
+.kpi-unit { font-size: 11px; color: var(--text-sub); }
+.kpi-deltas { display: flex; gap: 4px; flex-wrap: wrap; }
 
-/* Abnormal + AI strip */
-.abnormal-ai-strip {
-  display: grid; grid-template-columns: 1.2fr 1fr; gap: 12px; margin-bottom: 14px;
-}
-
-/* Panel base */
-.panel {
-  background: var(--bg-surface); border: 1px solid var(--border); border-radius: var(--radius-card);
-  padding: 14px 16px; box-shadow: var(--shadow-card); min-width: 0;
-}
-.panel-title {
-  font-size: var(--fs-h2); color: var(--text-title); font-weight: 600;
-  margin-bottom: 12px; padding-left: 10px; border-left: 3px solid var(--brand);
-  display: flex; align-items: center; gap: 8px;
-}
-.panel-icon { width: 16px; height: 16px; color: var(--text-sub); flex-shrink: 0; }
-
-/* Abnormal list */
-.abnormal-list { display: flex; flex-direction: column; gap: 8px; max-height: 360px; overflow: auto; padding-right: 2px; }
-.abnormal-item {
-  border: 1px solid var(--border); border-radius: var(--radius-sm); padding: 12px;
-  background: var(--bg-subtle); transition: border-color .15s; cursor: pointer;
-}
-.abnormal-item:hover { border-color: var(--border-strong); }
-.abnormal-item.danger { background: var(--danger-weak); border-left: 3px solid var(--danger); }
-.abnormal-item.warn { background: var(--warn-weak); border-left: 3px solid var(--warn); }
-.ab-main { display: flex; align-items: center; gap: 8px; min-width: 0; }
-.ab-code { color: var(--brand); font-weight: 700; font-size: var(--fs-caption); }
-.ab-main strong { flex: 1; min-width: 0; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; font-size: var(--fs-label); color: var(--text-title); }
-.ab-status { font-size: var(--fs-caption); color: var(--text-sub); }
-.ab-meta { margin-top: 6px; color: var(--text-faint); font-size: var(--fs-caption); line-height: 1.5; }
-.abnormal-count {
-  display: inline-flex; align-items: center; justify-content: center;
-  min-width: 20px; height: 20px; border-radius: 10px; font-size: 11px; font-weight: 700;
-  background: var(--danger); color: #fff; padding: 0 6px;
-}
-.empty {
-  color: var(--text-faint); font-size: var(--fs-body); padding: 24px; text-align: center;
-  background: var(--bg-subtle); border: 1px dashed var(--border-strong); border-radius: var(--radius-sm);
-  display: flex; flex-direction: column; align-items: center; gap: 8px;
-}
-.empty-icon { width: 24px; height: 24px; color: var(--text-faint); }
-
-/* Zone sections */
-.zone-section {
-  margin-bottom: 18px;
-}
-.zone-title-bar {
-  display: flex; justify-content: space-between; align-items: center;
-  margin-bottom: 12px; padding: 10px 14px;
-  background: var(--bg-surface); border: 1px solid var(--border); border-radius: var(--radius-card);
-  box-shadow: var(--shadow-card);
-}
-.zone-title {
-  font-size: var(--fs-h1); font-weight: 600; color: var(--text-title); margin: 0;
-  display: flex; align-items: center; gap: 8px;
-}
-.zone-icon { width: 18px; height: 18px; color: var(--brand); flex-shrink: 0; }
-.zone-stats { display: flex; gap: 8px; }
-.zone-stat {
-  font-size: 12px; font-weight: 600; padding: 3px 8px; border-radius: 4px;
-}
-.zone-stat.good { color: var(--good); background: var(--good-weak); }
-.zone-stat.warn { color: var(--warn); background: var(--warn-weak); }
-.zone-stat.danger { color: var(--danger); background: var(--danger-weak); }
-
-/* Zone grids */
-.zone-grid {
-  display: grid; gap: 12px;
-}
-.ring-grid {
-  grid-template-columns: repeat(4, 1fr);
-}
-.ring-grid-wrap {
-  grid-template-columns: repeat(auto-fill, minmax(120px, 1fr));
+/* ================= 焦点横幅 ================= */
+.focus-banner {
+  display: grid;
+  grid-template-columns: auto minmax(0, 1fr) minmax(220px, 290px);
+  gap: 20px; align-items: center;
+  background: var(--brand-weak);
+  border: 1px solid rgba(30,94,184,0.16);
+  border-radius: 8px;
+  padding: 14px 18px;
   margin-bottom: 12px;
 }
-.zone-cell {
-  background: var(--bg-surface); border: 1px solid var(--border); border-radius: var(--radius-card);
-  padding: 12px; box-shadow: var(--shadow-card); cursor: pointer;
-  transition: border-color .15s, box-shadow .15s;
-}
-.zone-cell:hover { border-color: var(--border-strong); box-shadow: 0 2px 8px rgba(16,24,40,.08); }
-.zone-chart {
-  background: var(--bg-surface); border: 1px solid var(--border); border-radius: var(--radius-card);
-  padding: 14px 16px; box-shadow: var(--shadow-card); margin-top: 12px;
-}
-.smr-row {
-  background: var(--bg-surface); border: 1px solid var(--border); border-radius: var(--radius-card);
-  padding: 14px 16px; box-shadow: var(--shadow-card); margin-top: 12px;
+.fb-donut { display: flex; align-items: center; gap: 14px; }
+.donut-svg { width: 84px; height: 84px; flex-shrink: 0; }
+.donut-num { font-size: 17px; font-weight: 700; fill: var(--text-title); text-anchor: middle; }
+.donut-cap { font-size: 8.5px; fill: var(--text-sub); text-anchor: middle; }
+.fb-legend { display: flex; flex-direction: column; gap: 5px; }
+.fb-legend span {
+  display: inline-flex; align-items: center; gap: 6px;
+  font-size: 11px; color: var(--text-sub); white-space: nowrap;
 }
 
-/* Combo grid */
-.combo-grid {
-  display: grid; grid-template-columns: 1fr 1fr; gap: 12px;
+.fb-main { display: flex; flex-direction: column; gap: 7px; min-width: 0; }
+.fb-headline { font-size: 16px; font-weight: 700; color: var(--text-title); }
+.fb-headline.is-danger { color: var(--danger); }
+.fb-headline.is-warn { color: var(--warn); }
+.fb-headline.is-good { color: var(--good); }
+.fb-chips { display: flex; flex-direction: column; gap: 4px; }
+.fb-chip {
+  display: inline-flex; align-items: center; gap: 8px;
+  background: none; border: none; padding: 2px 0; cursor: pointer;
+  font-size: 12px; color: var(--text-body); text-align: left;
+  max-width: 100%; min-width: 0;
+}
+.fb-chip:hover span { color: var(--brand); }
+.fb-chip em { font-style: normal; color: var(--brand); font-weight: 700; font-size: 11px; flex-shrink: 0; }
+.fb-chip span { white-space: nowrap; overflow: hidden; text-overflow: ellipsis; min-width: 0; }
+.fb-chip b { font-weight: 700; color: var(--text-title); flex-shrink: 0; }
+
+.link-btn {
+  align-self: flex-start;
+  background: none; border: none; padding: 0;
+  font-size: 12px; font-weight: 600; color: var(--brand);
+  cursor: pointer; text-decoration: underline; text-underline-offset: 3px;
+  text-decoration-color: rgba(30,94,184,0.35);
+}
+.link-btn:hover { text-decoration-color: var(--brand); }
+
+.fb-ai {
+  background: var(--bg-surface); border: 1px solid var(--border);
+  border-radius: 6px; padding: 10px 12px;
+  display: flex; flex-direction: column; gap: 6px; min-width: 0;
+}
+.fb-ai-label { font-size: 11px; font-weight: 700; color: var(--text-sub); letter-spacing: 0.04em; }
+.fb-ai-text {
+  font-size: 12px; line-height: 1.55; color: var(--text-body); margin: 0;
+  display: -webkit-box; -webkit-line-clamp: 3; -webkit-box-orient: vertical; overflow: hidden;
+}
+
+/* ================= Tab ================= */
+.tab-bar {
+  display: flex; gap: 2px;
+  border-bottom: 1px solid var(--border);
+  margin-bottom: 0;
+}
+.tab-btn {
+  background: none; border: none; cursor: pointer;
+  padding: 9px 14px; font-size: 13px; color: var(--text-sub);
+  border-bottom: 2px solid transparent; margin-bottom: -1px;
+  display: inline-flex; align-items: center; gap: 6px;
+  transition: color .15s;
+}
+.tab-btn:hover { color: var(--text-title); }
+.tab-btn.active { color: var(--brand); font-weight: 700; border-bottom-color: var(--brand); }
+.tab-badge {
+  min-width: 17px; height: 17px; padding: 0 5px; border-radius: 9px;
+  background: var(--danger-weak); color: var(--danger);
+  font-size: 10px; font-weight: 700;
+  display: inline-flex; align-items: center; justify-content: center;
+}
+
+.tab-panel { padding-top: 14px; padding-bottom: 8px; }
+.panel-head {
+  display: flex; align-items: baseline; gap: 12px;
+  margin-bottom: 10px;
+}
+.panel-head h2 { font-size: 14px; font-weight: 700; color: var(--text-title); margin: 0; }
+.head-note { font-size: 11px; color: var(--text-faint); }
+.zone-stats-inline { display: inline-flex; gap: 10px; font-size: 11px; font-style: normal; }
+.zone-stats-inline em { font-style: normal; font-weight: 600; }
+.s-good { color: var(--good); }
+.s-warn { color: var(--warn); }
+.s-danger { color: var(--danger); }
+
+/* ================= 异常清单表 ================= */
+.ab-table {
+  background: var(--bg-surface); border: 1px solid var(--border);
+  border-radius: 8px; overflow: hidden;
+}
+.ab-row {
+  display: grid;
+  grid-template-columns: 76px 88px minmax(140px, 1.3fr) 84px 110px 84px minmax(120px, 1fr);
+  gap: 10px; align-items: center;
+  padding: 9px 14px;
+  border-top: 1px solid var(--bg-subtle);
+  font-size: 12.5px;
+}
+.ab-row:not(.ab-head) { cursor: pointer; transition: background .12s; }
+.ab-row:not(.ab-head):hover { background: var(--bg-hover); }
+.ab-head {
+  border-top: none; background: var(--bg-subtle);
+  font-size: 11px; color: var(--text-faint); font-weight: 600;
+  padding-top: 7px; padding-bottom: 7px;
+}
+.c-status { display: inline-flex; align-items: center; gap: 6px; color: var(--text-sub); }
+.c-code { color: var(--brand); font-weight: 700; font-size: 11.5px; }
+.c-name { color: var(--text-title); font-weight: 600; white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
+.c-value { font-weight: 700; color: var(--text-title); }
+.c-nd, .c-delta { color: var(--text-sub); }
+.c-hint { color: var(--text-faint); font-size: 11.5px; white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
+
+.empty {
+  color: var(--text-faint); font-size: 13px; padding: 32px; text-align: center;
+  background: var(--bg-surface); border: 1px dashed var(--border-strong); border-radius: 8px;
+}
+
+/* ================= 结构（环形） ================= */
+.ring-grid {
+  display: grid; grid-template-columns: repeat(4, 1fr); gap: 10px;
+}
+.ring-cell {
+  background: var(--bg-surface); border: 1px solid var(--border); border-radius: 8px;
+  padding: 14px 12px; cursor: pointer; transition: border-color .15s;
+}
+.ring-cell:hover { border-color: var(--border-strong); }
+
+/* ================= 过程 / 结果 指标格 ================= */
+.proc-grid {
+  display: grid; grid-template-columns: minmax(0, 1.5fr) minmax(0, 1fr);
+  gap: 10px; align-items: start;
+}
+.proc-tiles, .outcome-grid {
+  display: grid; grid-template-columns: repeat(2, 1fr); gap: 10px;
+}
+.outcome-grid { grid-template-columns: repeat(3, 1fr); margin-bottom: 10px; }
+.metric-tile {
+  background: var(--bg-surface); border: 1px solid var(--border); border-radius: 8px;
+  padding: 10px 12px; cursor: pointer; transition: border-color .15s;
+  display: flex; flex-direction: column; gap: 6px; min-width: 0;
+}
+.metric-tile:hover { border-color: var(--border-strong); }
+.mt-top { display: flex; align-items: center; justify-content: space-between; gap: 8px; }
+.mt-name {
+  font-size: 12px; color: var(--text-sub); font-weight: 600;
+  white-space: nowrap; overflow: hidden; text-overflow: ellipsis;
+}
+.mt-value { font-size: 19px; font-weight: 700; color: var(--text-title); line-height: 1.1; }
+.mt-value small { font-size: 11px; font-weight: 400; color: var(--text-sub); margin-left: 3px; }
+.mt-bar {
+  position: relative; height: 5px; border-radius: 3px;
+  background: var(--bg-subtle); border: 1px solid var(--border); overflow: visible;
+}
+.mt-fill {
+  position: absolute; left: 0; top: 0; bottom: 0;
+  border-radius: 3px; background: var(--text-faint);
+}
+.mt-fill.good { background: var(--good); }
+.mt-fill.warn { background: var(--warn); }
+.mt-fill.danger { background: var(--danger); }
+.mt-tick {
+  position: absolute; top: -3px; bottom: -3px; width: 2px;
+  background: var(--text-title); opacity: 0.55; border-radius: 1px;
+}
+.mt-foot { font-size: 10.5px; color: var(--text-faint); }
+
+.proc-chart {
+  background: var(--bg-surface); border: 1px solid var(--border); border-radius: 8px;
+  padding: 12px 14px;
+}
+.sub-head { font-size: 11px; color: var(--text-faint); margin-bottom: 6px; }
+
+.smr-row {
+  background: var(--bg-surface); border: 1px solid var(--border); border-radius: 8px;
+  padding: 12px 14px;
+}
+
+/* ================= 组合分析 ================= */
+.combo-grid { display: grid; grid-template-columns: 1fr 1fr; gap: 10px; }
+.panel {
+  background: var(--bg-surface); border: 1px solid var(--border); border-radius: 8px;
+  padding: 13px 15px; min-width: 0;
+}
+.panel-title {
+  font-size: 13px; color: var(--text-title); font-weight: 700;
+  margin-bottom: 10px; padding-left: 9px; border-left: 3px solid var(--brand);
 }
 .combo-panel { min-height: 0; }
 
-/* Footer */
+.cand-strip {
+  display: flex; flex-wrap: wrap; align-items: center; gap: 4px 14px;
+  margin-top: 10px; padding: 9px 11px;
+  background: var(--bg-subtle); border: 1px solid var(--border); border-radius: 6px;
+  font-size: 11.5px; color: var(--text-sub);
+}
+.cand-strip b { color: var(--text-title); font-weight: 700; }
+.cand-divider { width: 1px; height: 14px; background: var(--border-strong); padding: 0; }
+.diff-positive b { color: var(--good); }
+.diff-negative b { color: var(--danger); }
+
+/* ================= 页脚 ================= */
 .db-footer {
   display: flex; justify-content: space-between; align-items: center;
-  margin-top: 16px; padding: 12px 16px; background: var(--bg-subtle);
-  border: 1px solid var(--border); border-radius: var(--radius-sm);
-  font-size: var(--fs-caption); color: var(--text-faint);
+  margin-top: 14px; padding: 11px 2px;
+  border-top: 1px solid var(--border);
+  font-size: 11.5px; color: var(--text-faint);
 }
-.footer-icon { width: 14px; height: 14px; margin-right: 4px; vertical-align: -2px; }
 
-/* Responsive */
+/* ================= 响应式 ================= */
 @media (max-width: 1400px) {
-  .kpi-stats { grid-template-columns: repeat(3, 1fr); }
-  .ring-grid { grid-template-columns: repeat(2, 1fr); }
+  .kpi-row { grid-template-columns: repeat(3, 1fr); }
+  .outcome-grid { grid-template-columns: repeat(2, 1fr); }
 }
 @media (max-width: 1200px) {
-  .abnormal-ai-strip { grid-template-columns: 1fr; }
+  .focus-banner { grid-template-columns: auto minmax(0, 1fr); }
+  .fb-ai { grid-column: 1 / -1; }
+  .proc-grid { grid-template-columns: 1fr; }
   .combo-grid { grid-template-columns: 1fr; }
+  .ab-row { grid-template-columns: 70px 80px minmax(120px, 1fr) 76px 96px; }
+  .c-delta, .c-hint { display: none; }
 }
 @media (max-width: 960px) {
-  .kpi-stats { grid-template-columns: repeat(2, 1fr); }
-  .db-header { flex-direction: column; align-items: flex-start; }
-  .db-header-right { width: 100%; }
-  .ring-grid { grid-template-columns: 1fr; }
+  .kpi-row { grid-template-columns: repeat(2, 1fr); }
+  .ring-grid { grid-template-columns: repeat(2, 1fr); }
+  .proc-tiles, .outcome-grid { grid-template-columns: 1fr; }
+  .db-topbar { flex-direction: column; align-items: flex-start; }
+  .ab-row { grid-template-columns: 64px 72px minmax(100px, 1fr) 70px; }
+  .c-nd { display: none; }
 }
-
-/* Candidate Stats */
-.candidate-stats {
-  margin-top: 12px; padding: 12px 14px;
-  background: var(--bg-subtle); border-radius: var(--radius-sm);
-  border: 1px solid var(--border);
-}
-.candidate-stats-title {
-  display: flex; align-items: center; gap: 6px;
-  font-size: var(--fs-caption); font-weight: 600; color: var(--text-title);
-  margin-bottom: 10px;
-}
-.candidate-stats-icon { font-size: 14px; }
-.candidate-stats-grid {
-  display: grid; grid-template-columns: repeat(4, 1fr); gap: 8px;
-  margin-bottom: 10px;
-}
-.candidate-stat-item {
-  display: flex; flex-direction: column; align-items: center;
-  padding: 8px 6px; border-radius: var(--radius-sm);
-  background: var(--bg-surface); border: 1px solid var(--border);
-}
-.candidate-stat-item .stat-label {
-  font-size: 11px; color: var(--text-sub); margin-bottom: 4px;
-}
-.candidate-stat-item .stat-value {
-  font-size: 18px; font-weight: 700; color: var(--text-title);
-  font-variant-numeric: tabular-nums;
-}
-.candidate-stat-item.high-prob { border-left: 3px solid var(--good); }
-.candidate-stat-item.probable { border-left: 3px solid var(--brand); }
-.candidate-stat-item.pending { border-left: 3px solid var(--warn); }
-.candidate-stats-compare {
-  display: flex; align-items: center; gap: 8px;
-  font-size: 11px; color: var(--text-sub);
-}
-.compare-divider { color: var(--border); }
-.diff-positive { color: var(--good); }
-.diff-negative { color: var(--danger); }
 </style>

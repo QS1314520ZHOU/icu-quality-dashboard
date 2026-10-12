@@ -51,6 +51,19 @@ export async function fetchTrend(code, year, icuUnit = 'all', sMonth = 1, eMonth
   return res.json();
 }
 
+// ---- 《重症质控指标上报（2024年版）》月度上报值（53 项） ----
+export async function fetchReportValues(period, unit = 'all') {
+  const url = new URL(`${BASE}/export/report-values`, window.location.origin);
+  url.searchParams.set('period', period);
+  url.searchParams.set('icu_unit', unit);
+  const res = await fetch(`${url.pathname}${url.search}`);
+  if (!res.ok) {
+    const err = await res.json().catch(() => ({}));
+    throw new Error(err.detail || `上报值获取失败 (${res.status})`);
+  }
+  return res.json();
+}
+
 // ---- 分子/分母下钻明细 ----
 export async function fetchDetail(code, period, part, icuUnit = 'all', endPeriod = '', options = {}) {
   let url = `${BASE}/indicators/${code}/detail?period=${period}&part=${part}&icu_unit=${encodeURIComponent(icuUnit)}`;

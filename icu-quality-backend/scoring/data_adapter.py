@@ -345,7 +345,8 @@ def _fetch_lab_observations(
 
         # Step 1: 查主表，获取 examID、reportID 和 collectTime
         exam_docs = list(dc.VI_ICU_EXAM.find(
-            {"pid": hp,
+            # #fix: VI_ICU_EXAM 字段为 hisPid（原查 "pid" 恒为空 → SOFA 检验分项静默缺失）
+            {"hisPid": hp,
              "collectTime": {"$gte": window_start, "$lte": eval_time}},
             {"examID": 1, "reportID": 1, "collectTime": 1},
         ).max_time_ms(10000).limit(200))
@@ -389,7 +390,8 @@ def _fetch_lab_observations(
             if exam_ids:
                 or_conditions.append({"examID": {"$in": exam_ids}})
             if report_ids:
-                or_conditions.append({"reportID": {"$in": report_ids}})
+                # #fix: ITEM 表无 reportID 字段 —— 其 examID 引用主表 reportID（原条件恒空）
+                or_conditions.append({"examID": {"$in": report_ids}})
 
             if not or_conditions:
                 continue
@@ -428,7 +430,11 @@ def _fetch_lab_observations(
                     continue
                 if not isinstance(ts, datetime):
                     continue
-                if ts < window_start or ts > eval_time:
+                # #fix: collectTime 与窗口边界可能一方 naive 一方 aware，
+                # 直接比较抛 TypeError → 整个检验查询被 except 吞成 query_error
+                # （此前日志大量 "lab fetch failed ... can't compare offset-naive
+                # and offset-aware datetimes"，SOFA 检验因子静默缺失）
+                if _aware(ts) < _aware(window_start) or _aware(ts) > _aware(eval_time):
                     continue
 
                 # 去重: 同一 examID + itemCode 只保留一条

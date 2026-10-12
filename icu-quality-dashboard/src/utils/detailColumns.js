@@ -359,6 +359,18 @@ function resolveIcu05Cols(part, forExport = false) {
  * ============================================================ */
 
 export function getDetailColumns(code, part, opts = {}) {
+  const cols = buildColumns(code, part, opts);
+  // 跨月明细按「统计月+患者」成行：首列标注归属月份，便于逐行核对公式条
+  if (opts.crossMonth) {
+    return [
+      { header: '统计月', get: (p) => fmtText(p.stat_month || '—') },
+      ...cols,
+    ];
+  }
+  return cols;
+}
+
+function buildColumns(code, part, opts = {}) {
   // ---- ICU-05 Bundle ----
   if (BUNDLE_CODES.includes(code)) {
     return resolveIcu05Cols(part, !!opts.forExport)

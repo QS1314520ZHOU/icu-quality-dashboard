@@ -4,10 +4,10 @@
     <div class="filter-bar">
       <span class="page-title">{{ deptName }}</span>
       <div class="filters">
-        <select v-model="year" @change="reload"><option v-for="y in years" :key="y" :value="y">{{ y }}年</option></select>
-        <select v-model="startMonth" @change="reload"><option v-for="m in 12" :key="m" :value="m">{{ m }}月</option></select>
+        <select v-model="year" @change="reload()"><option v-for="y in years" :key="y" :value="y">{{ y }}年</option></select>
+        <select v-model="startMonth" @change="reload()"><option v-for="m in 12" :key="m" :value="m">{{ m }}月</option></select>
         <span class="dash">—</span>
-        <select v-model="endMonth" @change="reload"><option v-for="m in 12" :key="m" :value="m">{{ m }}月</option></select>
+        <select v-model="endMonth" @change="reload()"><option v-for="m in 12" :key="m" :value="m">{{ m }}月</option></select>
 
         <button class="refresh-btn" :disabled="refreshing" @click="triggerRefresh">
           <span v-if="refreshing" class="spinner"></span>
@@ -15,6 +15,7 @@
         </button>
         <button class="guide-btn" @click="guideVisible=true">指标说明</button>
         <button class="export-btn" @click="exportCsv">导出CSV</button>
+        <button class="export-btn" :disabled="exporting" @click="exportReport">{{ exporting ? exportLabel : '导出上报表' }}</button>
       </div>
     </div>
 
@@ -137,7 +138,8 @@ import Modal from './components/Modal.vue';
 import TrendModal from './components/TrendModal.vue';
 import DetailModal from './components/DetailModal.vue';
 import IndicatorGuideModal from './components/IndicatorGuideModal.vue';
-import { fetchIndicatorList, fetchTrend as apiFetchTrend, fetchDetail as apiFetchDetail, triggerRefresh as apiTriggerRefresh, getRefreshStatus } from './api/index.js';
+import { fetchIndicatorList, fetchTrend as apiFetchTrend, fetchDetail as apiFetchDetail, triggerRefresh as apiTriggerRefresh, getRefreshStatus, fetchReportValues } from './api/index.js';
+import { downloadReportWorkbook } from './utils/reportXlsx.js';
 
 // 使用 Asia/Shanghai 当前年月作为默认值
 const _now = new Date();
@@ -155,6 +157,8 @@ const years = computed(() => {
   return arr;
 });
 const rows = ref([]); const trendData = ref(null); const detailData = ref(null);
+const rowsLoading = ref(false); // 期间切换加载中：禁止下钻，防止公式条(旧行)≠明细(新期间)
+let drillSeq = 0;               // 明细请求序号：快速切换指标时丢弃过期响应
 const census = ref(null); const selectedRow = ref(null);
 // 月份单元格下钻
 const monthDetailData = ref(null);
@@ -230,9 +234,14 @@ async function reload(nocache = false) {
   return reloadRange(period.value, isMultiMonth.value ? periodEnd.value : '', nocache);
 }
 
+let rangeSeq = 0; // 列表请求序号：期间快速切换时丢弃过期响应
+
 async function reloadRange(startPeriod, endPeriod = '', nocache = false) {
+  const seq = ++rangeSeq;
+  rowsLoading.value = true;
   try {
     const data = await fetchIndicatorList(startPeriod, unit.value, endPeriod, nocache);
+    if (seq !== rangeSeq) return; // 已有更新的请求，本响应作废
     // 后端返回 monthly 是数组，转换为 {月份: 值} 对象
     rows.value = data.sort((a, b) => codeOrder(a.code) - codeOrder(b.code)).map(r => {
       if (r.months && r.monthly) {
@@ -247,7 +256,8 @@ async function reloadRange(startPeriod, endPeriod = '', nocache = false) {
       return ind && r.value != null ? { ...r, status: evalStatus(ind, r.value, statusConfig.value) } : r;
     });
     const icu00 = data.find(r => r.code === 'ICU-00'); census.value = icu00?.census || null;
-  } catch { rows.value = []; census.value = null; }
+  } catch { if (seq === rangeSeq) { rows.value = []; census.value = null; } }
+  finally { if (seq === rangeSeq) rowsLoading.value = false; }
 }
 
 async function drillTrend(row) {
@@ -255,6 +265,7 @@ async function drillTrend(row) {
   try { trendData.value = await apiFetchTrend(row.code, year.value, unit.value, startMonth.value, endMonth.value); } catch { /* */ }
 }
 async function drillCensus(part, label) {
+  if (rowsLoading.value) return;
   const endP = isMultiMonth.value ? periodEnd.value : '';
   const base = { code: 'ICU-00', name: label, part, count: 0, source_desc: '明细加载中...', patients: [], loading: true };
   detailData.value = base;
@@ -265,7 +276,9 @@ async function drillCensus(part, label) {
   }
 }
 async function drillDetail(row, part) {
+  if (rowsLoading.value) return;
   if (row[part] == null) return;
+  const seq = ++drillSeq;
   const endP = isMultiMonth.value ? periodEnd.value : '';
   const base = { code: row.code, name: row.name, part, count: 0, source_desc: '明细加载中...', patients: [], loading: true };
   // 公式条/漏斗在加载期间即显示
@@ -275,6 +288,7 @@ async function drillDetail(row, part) {
       apiFetchDetail(row.code, period.value, 'numerator', unit.value, endP, { limit: 200, offset: 0 }),
       apiFetchDetail(row.code, period.value, 'denominator', unit.value, endP, { limit: 200, offset: 0 }),
     ]);
+    if (seq !== drillSeq) return;
     const clicked = part === 'numerator' ? numR : denR;
     detailData.value = {
       ...clicked,
@@ -283,6 +297,7 @@ async function drillDetail(row, part) {
       funnel: buildFunnel(row),
     };
   } catch (e) {
+    if (seq !== drillSeq) return;
     detailData.value = { ...base, loading: false, error: e.message || '明细加载失败', source_desc: '明细加载失败',
                          summary: buildSummary(row), funnel: buildFunnel(row) };
   }
@@ -315,6 +330,7 @@ function buildFunnel(row, opts = {}) {
 
 // 月份单元格下钻：查询被点击月份的分子和分母
 async function drillMonthDetail(row, m) {
+  if (rowsLoading.value) return;
   const monthPeriod = `${year.value}-${String(m).padStart(2, '0')}`;
   // 0 和 null 严格区分：0 可以下钻，null 显示空态
   const val = row.monthly?.[m];
@@ -558,6 +574,50 @@ function exportCsv() {
   a.download = `ICU质控_${period.value}.csv`; a.click();
 }
 
+// =====《重症质控指标上报（2024年版）》按月导出 =====
+const exporting = ref(false);
+const exportLabel = ref('');
+
+function reportFilename(p) {
+  const unitPart = unit.value && unit.value !== 'all' ? `_${deptName.value}` : '';
+  return `重症质控指标上报_${p}${unitPart}.xlsx`.replace(/[\\/:*?"<>|]/g, '_');
+}
+
+async function exportReport() {
+  if (exporting.value) return;
+  // 导出所选起止月份范围内的每一个月（每月一个独立文件）
+  const months = [];
+  for (let m = startMonth.value; m <= endMonth.value; m++) months.push(m);
+  exporting.value = true;
+  const exported = [], skipped = [], failed = [];
+  try {
+    for (let i = 0; i < months.length; i++) {
+      const p = `${year.value}-${String(months[i]).padStart(2, '0')}`;
+      exportLabel.value = months.length > 1 ? `导出中 ${i + 1}/${months.length}` : '导出中…';
+      try {
+        const data = await fetchReportValues(p, unit.value);
+        if (!data.has_data) { skipped.push(p); continue; }
+        downloadReportWorkbook(data.values, reportFilename(p));
+        exported.push(p);
+        // 多文件下载间隔，避免浏览器合并/拦截
+        if (i < months.length - 1) await new Promise(r => setTimeout(r, 350));
+      } catch (e) {
+        failed.push(`${p}（${e.message || e}）`);
+      }
+    }
+    const parts = [];
+    if (exported.length) parts.push(`已导出 ${exported.length} 个：${exported.join('、')}`);
+    if (skipped.length) parts.push(`无数据跳过：${skipped.join('、')}`);
+    if (failed.length) parts.push(`失败：${failed.join('、')}`);
+    if (parts.length) {
+      showToast(parts.join('；'), failed.length ? 'error' : (exported.length ? 'success' : 'info'), 6000);
+    }
+  } finally {
+    exporting.value = false;
+    exportLabel.value = '';
+  }
+}
+
 
 watch(hostDeptCode, () => { reload(true); });
 onMounted(async () => { await reload(true); });
@@ -588,6 +648,8 @@ window.addEventListener('status-config-updated', () => {
 @keyframes spin { to { transform:rotate(360deg); } }
 .export-btn { background:var(--brand); color:#fff; border:none; border-radius:7px;
   padding:7px 16px; cursor:pointer; font-size:13px; font-weight:500; }
+.export-btn:hover:not(:disabled) { opacity:.85; }
+.export-btn:disabled { opacity:.6; cursor:not-allowed; }
 .guide-btn { background:var(--bg-subtle); color:var(--brand); border:1px solid var(--border); border-radius:7px;
   padding:7px 14px; cursor:pointer; font-size:13px; font-weight:500; }
 .guide-btn:hover { background:#eff6ff; border-color:#93c5fd; color:var(--brand); }

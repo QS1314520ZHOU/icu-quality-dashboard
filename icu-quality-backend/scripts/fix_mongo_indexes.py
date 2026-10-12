@@ -65,24 +65,24 @@ def create_indexes(db):
     exam_coll = db["VI_ICU_EXAM"]
     print("\n[VI_ICU_EXAM]")
 
-    # 检查是否已存在 {pid: 1, collectTime: -1} 索引
+    # 检查是否已存在 {hisPid: 1, collectTime: -1} 索引（#fix: 字段实为 hisPid，原 pid 为推测）
     existing_indexes = list(exam_coll.list_indexes())
     has_pid_collect_index = False
     for idx in existing_indexes:
         key = idx.get("key", {})
-        if key == {"pid": 1, "collectTime": -1}:
+        if key == {"hisPid": 1, "collectTime": -1}:
             has_pid_collect_index = True
-            print("  [OK] 索引 {pid: 1, collectTime: -1} 已存在")
+            print("  [OK] 索引 {hisPid: 1, collectTime: -1} 已存在")
             break
 
     if not has_pid_collect_index:
         try:
             exam_coll.create_index(
-                [("pid", 1), ("collectTime", -1)],
+                [("hisPid", 1), ("collectTime", -1)],
                 background=True,
-                name="pid_collectTime_idx"
+                name="hisPid_collectTime_idx"
             )
-            print("  [OK] 创建索引 {pid: 1, collectTime: -1}")
+            print("  [OK] 创建索引 {hisPid: 1, collectTime: -1}")
         except Exception as e:
             print(f"  [FAIL] 创建索引失败: {e}")
 
@@ -146,7 +146,7 @@ def verify_index_usage(db, his_pid="1752815"):
     print("\n[VI_ICU_EXAM] explain")
     try:
         plan = db.VI_ICU_EXAM.explain("executionStats").find({
-            "pid": his_pid,
+            "hisPid": his_pid,
             "collectTime": {"$gte": window_start, "$lte": eval_time}
         })
 
@@ -175,7 +175,7 @@ def verify_index_usage(db, his_pid="1752815"):
     try:
         # 先获取一个 examID
         exam_doc = db.VI_ICU_EXAM.find_one({
-            "pid": his_pid,
+            "hisPid": his_pid,
             "collectTime": {"$gte": window_start, "$lte": eval_time}
         })
 
@@ -234,7 +234,7 @@ def test_batch_query_performance(db):
     for pid in his_pids:
         try:
             exam_docs = list(db.VI_ICU_EXAM.find(
-                {"pid": pid,
+                {"hisPid": pid,
                  "collectTime": {"$gte": window_start, "$lte": eval_time}},
                 {"examID": 1, "reportID": 1, "collectTime": 1}
             ).max_time_ms(10000).limit(200))
@@ -262,9 +262,9 @@ def test_batch_query_performance(db):
 
     try:
         exam_docs = list(db.VI_ICU_EXAM.find(
-            {"pid": {"$in": his_pids},
+            {"hisPid": {"$in": his_pids},
              "collectTime": {"$gte": window_start, "$lte": eval_time}},
-            {"pid": 1, "examID": 1, "reportID": 1, "collectTime": 1}
+            {"hisPid": 1, "examID": 1, "reportID": 1, "collectTime": 1}
         ).max_time_ms(15000).limit(5000))
 
         exam_ids = [e.get("examID") for e in exam_docs if e.get("examID")]

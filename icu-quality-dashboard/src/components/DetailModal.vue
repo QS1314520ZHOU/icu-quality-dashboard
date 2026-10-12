@@ -421,7 +421,9 @@ function isExpanded(patientId) {
 }
 
 // ── 共享列定义 ──
-const columns = computed(() => getDetailColumns(activeData.value?.code, curPart.value));
+const columns = computed(() => getDetailColumns(activeData.value?.code, curPart.value, {
+  crossMonth: !!(props.endPeriod && props.endPeriod !== props.period),
+}));
 // ICU-05 窗口小时数（'1h'|'3h'|'6h'），传给 BundleDetail 显示判定窗口
 const windowHour = computed(() => {
   const code = activeData.value?.code || '';

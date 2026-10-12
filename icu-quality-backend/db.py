@@ -1,4 +1,7 @@
 # db.py - MongoDB 连接 & ICU-01 分母逻辑（从 .env 读取配置）
+# 打包兼容：注解延迟求值，避免 dict|None / list[str] 在 Python<3.10 导入即崩
+from __future__ import annotations
+
 import os
 from pathlib import Path
 from pymongo import MongoClient
@@ -3483,17 +3486,18 @@ def get_inflammation_signals(pat_pid: str, pat_hispid: str, first_dose,
 def _query_exam_inflammation(db_dc, hispid: str, window_start, window_end, result: dict):
     """
     从 DataCenter 查询炎症相关检验指标。
-    VI_ICU_EXAM (主表, pid=hisPid, collectTime) + VI_ICU_EXAM_ITEM (子表, itemCode/itemValue)。
+    VI_ICU_EXAM (主表, collectTime) + VI_ICU_EXAM_ITEM (子表, itemCode/itemValue)。
 
-    ⚠️ 字段名不确定项（按推测标注，如不匹配需调整）：
-      - VI_ICU_EXAM.pid ↔ hisPid
-      - VI_ICU_EXAM.examID 或 reportID ↔ VI_ICU_EXAM_ITEM.examID
+    ✅ 字段实测结论（2026-10-10，两库全量验证 0 文档含 pid）：
+      - 主表患者键 = hisPid（原查 "pid" 恒为空 → 检验链路曾整体静默失效）
+      - 主表只有 reportID（无 examID），ITEM.examID 实际引用主表 reportID
       - VI_ICU_EXAM.collectTime 为主检验时间
     """
     try:
         # Step 1: 查主表，获取窗口内的检验记录
         exam_docs = list(db_dc["VI_ICU_EXAM"].find(
-            {"pid": hispid,
+            # #fix: VI_ICU_EXAM 实际字段为 hisPid（原查 "pid" 恒为空）
+            {"hisPid": hispid,
              "collectTime": {"$gte": window_start, "$lte": window_end}},
             {"examID": 1, "reportID": 1, "collectTime": 1},
         ))
@@ -3827,9 +3831,10 @@ def _batch_query_exam_inflammation(db_dc, hispids: list,
     # Query 2: 批量查主表 — 超时保护 + 结果上限
     try:
         exam_docs = list(db_dc["VI_ICU_EXAM"].find(
-            {"pid": {"$in": hispids},
+            # #fix: VI_ICU_EXAM 实际字段为 hisPid（原查 "pid" 恒为空）
+            {"hisPid": {"$in": hispids},
              "collectTime": {"$gte": global_min, "$lte": global_max}},
-            {"pid": 1, "examID": 1, "reportID": 1, "collectTime": 1},
+            {"hisPid": 1, "examID": 1, "reportID": 1, "collectTime": 1},
         ).max_time_ms(8000).limit(20000))
     except Exception:
         return  # 检验数据不可用则降级，炎症指标只正向判治疗
@@ -3846,7 +3851,7 @@ def _batch_query_exam_inflammation(db_dc, hispids: list,
             exam_ids.append(eid)
             exam_info[eid_str] = {
                 "collectTime": e.get("collectTime"),
-                "hispid": e.get("pid", ""),
+                "hispid": e.get("hisPid", ""),  # #fix: VI_ICU_EXAM 字段为 hisPid
             }
 
     if not exam_ids:
@@ -4068,7 +4073,9 @@ def get_icu06_data(dept_codes: list, start_date: str, end_date: str) -> dict:
                 first_dose = info["first_time"]
                 total_doses = info["doses"]
                 total_hours = (info["last_time"] - info["first_time"]).total_seconds() / 3600.0
-                drug_names = list(info["drug_names"])[:10]
+                # #fix: drug_names 是 set，list() 顺序随进程哈希种子变化；
+                # >10 个药名时截断结果不同 → A7 特殊级判定/AI prompt 不稳定，排序保证确定性
+                drug_names = sorted(info["drug_names"])[:10]
                 abx_code_count = len(info.get("drug_codes", set()))
                 hispid = p.get("hisPid", "")
                 inflam = inflam_cache.get(pid, empty_inflam)
@@ -4126,17 +4133,21 @@ def get_icu06_data(dept_codes: list, start_date: str, end_date: str) -> dict:
 
             # ---- 6. 分子：病原学送检 (源A: VI_ICU_ZYYZ) ----
             # hisPid 映射
-            smart_pid_by_hispid = {}
-            for pid in den_pids:
+            # #fix: 同一住院号可能对应多条在科记录（2026-09 分母 97 条含 7 个重复 hisPid）。
+            # 原实现 dict 覆盖写 + den_pids(set) 迭代 → 跨进程哈希种子不同，
+            # 培养医嘱落到不同 pid 上，分子出现 60↔59 漂移。
+            # 改为 hisPid → [pid...]，该住院号的培养结果对所有在科记录生效。
+            smart_pids_by_hispid = {}
+            for pid in sorted(den_pids):
                 p = pat_by_pid.get(pid)
                 if p and p.get("hisPid"):
-                    smart_pid_by_hispid[p["hisPid"]] = pid
+                    smart_pids_by_hispid.setdefault(p["hisPid"], []).append(pid)
 
             test_time = {}   # pid → earliest test time
             test_detail = {} # pid → {time, source, name}
 
-            if dc_db is not None and smart_pid_by_hispid:
-                hispids = list(smart_pid_by_hispid.keys())
+            if dc_db is not None and smart_pids_by_hispid:
+                hispids = list(smart_pids_by_hispid.keys())
                 # 源A: VI_ICU_ZYYZ (培养类医嘱, yaoType='检验')
                 culture_orders = list(dc_db["VI_ICU_ZYYZ"].find(
                     {"pid": {"$in": hispids}, "status": {"$in": EXECUTED_ORDER_STATUSES},
@@ -4149,13 +4160,15 @@ def get_icu06_data(dept_codes: list, start_date: str, end_date: str) -> dict:
                 for o in culture_orders:
                     hp = o.get("pid", "")
                     t = o.get("orderTime")
-                    spid = smart_pid_by_hispid.get(hp)
-                    if spid and t and (spid not in test_time or t < test_time[spid]):
-                        test_time[spid] = t
-                        test_detail[spid] = {
-                            "time": t, "source": "检验医嘱",
-                            "name": o.get("orderName", "")[:80],
-                        }
+                    if not t:
+                        continue
+                    for spid in smart_pids_by_hispid.get(hp, []):
+                        if spid not in test_time or t < test_time[spid]:
+                            test_time[spid] = t
+                            test_detail[spid] = {
+                                "time": t, "source": "检验医嘱",
+                                "name": o.get("orderName", "")[:80],
+                            }
 
             # ---- 7. 计算分子：送检时间 ≤ 首剂时间 ----
             num_pids = set()
@@ -4178,7 +4191,8 @@ def get_icu06_data(dept_codes: list, start_date: str, end_date: str) -> dict:
                  "test_name": test_detail.get(pid, {}).get("name", ""),
                  "abx_time": abx_by_pid.get(pid, {}).get("first_time"),
                  }
-                for pid in num_pids
+                # #fix: set 迭代顺序不稳定 → 排序保证明细行序跨进程一致
+                for pid in sorted(num_pids)
             ]
 
             break  # 拿到数据即退出库名循环
@@ -6476,8 +6490,9 @@ def _sepsis_exam_values(db_dc, hispids: list, start_dt, end_dt_wide) -> dict:
         return result
     try:
         exams = list(db_dc["VI_ICU_EXAM"].find(
-            {"pid": {"$in": hispids}, "collectTime": {"$gte": start_dt, "$lte": end_dt_wide}},
-            {"pid": 1, "examID": 1, "reportID": 1, "collectTime": 1},
+            # #fix: VI_ICU_EXAM 实际字段为 hisPid（原查 "pid" 恒为空）
+            {"hisPid": {"$in": hispids}, "collectTime": {"$gte": start_dt, "$lte": end_dt_wide}},
+            {"hisPid": 1, "examID": 1, "reportID": 1, "collectTime": 1},
         ).max_time_ms(20000).limit(200000))
         exam_ids = []
         exam_info = {}
@@ -6486,7 +6501,7 @@ def _sepsis_exam_values(db_dc, hispids: list, start_dt, end_dt_wide) -> dict:
             if not eid:
                 continue
             exam_ids.append(eid)
-            exam_info[str(eid)] = {"hisPid": e.get("pid"), "time": e.get("collectTime")}
+            exam_info[str(eid)] = {"hisPid": e.get("hisPid"), "time": e.get("collectTime")}
         if not exam_ids:
             return result
         target_codes = set().union(*SEPSIS_EXAM_CODES.values())

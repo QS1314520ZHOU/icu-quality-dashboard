@@ -1,5 +1,7 @@
 # ai_analyzer.py
 # 规则引擎判定异常 + LLM 生成质控报告（LLM只做解读，不碰诊疗）
+# 打包兼容：注解延迟求值，避免 dict|None 在 Python<3.10 导入即崩
+from __future__ import annotations
 
 # ---- 指标元数据（与前端 indicators.js 保持同源，真实项目应抽到共享配置）----
 INDICATOR_META = {

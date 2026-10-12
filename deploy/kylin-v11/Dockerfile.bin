@@ -52,6 +52,8 @@ RUN set -eux; \
       --collect-submodules bson \
       --collect-all openai \
       --collect-submodules pydantic \
+      --collect-submodules config \
+      --collect-submodules scoring \
       main.py
 
 RUN mkdir -p /out && install -m 0755 /src/dist/icu-quality-dashboard /out/

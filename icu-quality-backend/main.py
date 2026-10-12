@@ -1,5 +1,8 @@
 # main.py
-from fastapi import FastAPI, BackgroundTasks
+# 打包兼容：注解延迟求值，避免 dict|None / list[str] 在 Python<3.10 导入即崩
+from __future__ import annotations
+
+from fastapi import FastAPI, BackgroundTasks, HTTPException
 from pydantic import BaseModel
 from datetime import date, datetime, timedelta
 from ai_analyzer import analyze, get_all_ai_decisions, override_ai_decision, ensure_ai_cache_collection as ensure_ai_cache
@@ -238,10 +241,18 @@ def _cache_clear():
 
 DETAIL_CACHE_COLLECTION = "icu_indicator_detail_cache"
 # 缓存版本号：修改口径时 +1，旧条目自然失效
-CACHE_VERSION = 13  # v11: ICU-07 口径修复(分母队列反查pid/剔假匹配/气压治疗)
+CACHE_VERSION = 16  # v11: ICU-07 口径修复(分母队列反查pid/剔假匹配/气压治疗)
                     # v12: ICU-07 明细统一住院号=mrn + detail_id=在科记录_id(分子分母可逐行对账)
                     # v13: ICU-04/07/09/10 统一**人数口径**(按 mrn 去重，
                     #      与 INDICATORS_CONFIG「患者数」定义一致；明细一人一行)
+                    # v14: 跨月明细按「统计月+患者」成行 —— 与汇总逐月相加口径对齐，
+                    #      tab 行数 == 公式条分子/分母（stat_month 字段供统计月列展示）
+                    # v15: ICU-06 分子 hisPid→多条在科记录映射修复（重复住院号培养医嘱
+                    #      不再随机丢映射），旧明细缓存作废按新口径重算
+                    # v16: 检验链路修复(VI_ICU_EXAM 患者键 pid→hisPid、ITEM join
+                    #      reportID→examID、窗口比较 naive/aware 时区) —— ICU-06 等
+                    #      依赖检验的明细按新数据重算（修复前 list 已重建但明细
+                    #      缓存仍是旧值，出现 list 313 vs detail 319 不一致）
 
 
 def _dept_cache_key(dept_codes: list) -> str:
@@ -978,14 +989,59 @@ def query_summary(period: str, icu_unit: str = "all"):
         })
     return rows
 
+_TREND_LIVE_CACHE = {}    # ck → (ts, vals)  ICU-05 实时趋势缓存
+_TREND_LIVE_TTL = 1800    # 30 分钟：实时逐月计算单科室约 0.6s/月、全院口径更重，
+                          # 月份已并行化，冷开启销可接受后拉长缓存减少重算
+
+
 def query_trend(code: str, year: int, icu_unit: str = "all"):
     """
     第二级：单指标全年 12 个月趋势数据。只读预聚合表，避免趋势弹窗触发实时重算。
+    ICU-05：预聚合与列表实时计算同源同值（同一 _compute_icu05、同一次重建），
+    常态直接读预聚合（毫秒级）；仅当该年预聚合完全缺失（新科室未重建）时，
+    才 4 路并行实时兜底（缓存 30 分钟）——避免全院口径实时 12 个月曾达 7 分钟。
     """
     periods = [f"{year}-{m:02d}" for m in range(1, 13)]
-    rows = summary_module.read_summary(_resolve_dept_codes(icu_unit), periods, [code])
+    dept_codes = _resolve_dept_codes(icu_unit)
+    rows = summary_module.read_summary(dept_codes, periods, [code])
     by_period = {r.get("period"): r.get("value") for r in rows}
-    return {m: by_period.get(f"{year}-{m:02d}") for m in range(1, 13)}
+    vals = {m: by_period.get(f"{year}-{m:02d}") for m in range(1, 13)}
+
+    if code in ("ICU-05-1h", "ICU-05-3h", "ICU-05-6h") and not any(
+            v is not None for v in vals.values()):
+        # 兜底：该年预聚合完全缺失（从未重建的新科室）时才实时并行计算。
+        # 常态（预聚合已重建，与实时同源同值）直接毫秒返回，
+        # 避免全院口径 12 个月实时计算曾达 7 分钟的打开延迟。
+        hour = code.rsplit("-", 1)[1]
+        ck = f"trend_icu05:{code}:{year}:{icu_unit}"
+        entry = _TREND_LIVE_CACHE.get(ck)
+        if entry and time_module.time() - entry[0] < _TREND_LIVE_TTL:
+            vals = entry[1]
+        else:
+            # 12 个月 4 路并行（各月互不共享可变状态：vaso 标签只读、mongo 线程安全）
+            import calendar as _calendar
+            from concurrent.futures import ThreadPoolExecutor
+            from summary import _compute_icu05
+
+            def _month_val(m: int):
+                end_day = _calendar.monthrange(year, m)[1]
+                d = _compute_icu05(dept_codes, f"{year}-{m:02d}-01",
+                                   f"{year}-{m:02d}-{end_day:02d}", hour)
+                return m, (d.get("val") if d else None)
+
+            with ThreadPoolExecutor(max_workers=4) as pool:
+                futures = [pool.submit(_month_val, m) for m in range(1, 13)]
+                for fut in futures:
+                    try:
+                        m, v = fut.result()
+                        if v is not None:
+                            vals[m] = v
+                    except Exception as e:
+                        logger.warning("ICU-05 trend live compute failed %s %04d: %s",
+                                       code, year, e)
+            _TREND_LIVE_CACHE[ck] = (time_module.time(), vals)
+
+    return vals
 
 
 def _enrich_admission_discharge(items, dept_codes):
@@ -2617,47 +2673,61 @@ def indicator_list(period: str, icu_unit: str = "all", end_period: str = "", noc
                         agg[code]["num"] = r.get("numerator", 0)
                         agg[code]["den"] = r.get("denominator", 0)
 
-        # ICU-05 跨月实时计算
-        try:
-            from scoring.bundle_engine import set_vaso_wide_labels
-            sc = get_client("SmartCare")["SmartCare"]
-            vaso_drugs = list(sc.configDrug.find(
-                {"classification": {"$regex": "血管活性", "$options": "i"}},
-                {"name": 1, "_id": 0}
-            ))
-            labels = {d["name"].strip() for d in vaso_drugs if d.get("name")}
-            if labels:
-                set_vaso_wide_labels(labels)
-        except Exception:
-            pass
-
+        # ICU-05 跨月：预聚合优先（与单月/趋势同策略）。
+        # 预聚合行由上方聚合循环累加进 agg（monthly 逐月记录）；
+        # 仅对预聚合缺失的月份实时补算 —— 全覆盖时零实时开销。
         dept_codes = _resolve_dept_codes(icu_unit)
+        icu05_missing = {}
         for hour in ("1h", "3h", "6h"):
             code = f"ICU-05-{hour}"
-            # #修复: 单位原硬编码 "‰"，ICU-05 配置为 "%"（跨月值被误算成千分比）
-            agg[code] = {"num": 0, "den": 0, "unit": UNIT_MAP.get(code, ""), "name": NAME_MAP.get(code, code),
-                         "monthly": {}, "diag_fields": {}}
-            for mon in month_labels:
-                try:
-                    from summary import _compute_icu05
-                    import calendar
-                    y, m = map(int, mon.split("-"))
-                    end_day = calendar.monthrange(y, m)[1]
-                    icu05_data = _compute_icu05(dept_codes, f"{mon}-01", f"{mon}-{end_day:02d}", hour)
-                    if icu05_data:
-                        # #修复: _compute_icu05 返回的键是 num/den/val（原读 numerator/denominator/value 恒为 None）
-                        agg[code]["num"] += icu05_data.get("num", 0)
-                        agg[code]["den"] += icu05_data.get("den", 0)
-                        agg[code]["monthly"][mon] = icu05_data.get("val", 0)
-                        for df in ("candidate_den", "high_probability_count", "probable_count",
-                                   "pending_review_count", "not_candidate_count", "raw_candidate_count",
-                                   "old_shock_count", "new_shock_count"):
-                            if icu05_data.get(df) is not None:
-                                agg[code]["diag_fields"][df] = agg[code]["diag_fields"].get(df, 0) + icu05_data[df]
-                        if icu05_data.get("candidate_mode"):
-                            agg[code]["diag_fields"]["candidate_mode"] = icu05_data["candidate_mode"]
-                except Exception as e:
-                    logger.warning("ICU-05-%s realtime failed for %s: %s", hour, mon, e)
+            pre = agg.get(code)
+            miss = [mon for mon in month_labels
+                    if not pre or mon not in pre.get("monthly", {})]
+            if miss:
+                icu05_missing[code] = miss
+
+        if icu05_missing:
+            try:
+                from scoring.bundle_engine import set_vaso_wide_labels
+                sc = get_client("SmartCare")["SmartCare"]
+                vaso_drugs = list(sc.configDrug.find(
+                    {"classification": {"$regex": "血管活性", "$options": "i"}},
+                    {"name": 1, "_id": 0}
+                ))
+                labels = {d["name"].strip() for d in vaso_drugs if d.get("name")}
+                if labels:
+                    set_vaso_wide_labels(labels)
+            except Exception:
+                pass
+
+            for code, missing_mons in icu05_missing.items():
+                hour = code.rsplit("-", 1)[1]
+                # #修复: 单位原硬编码 "‰"，ICU-05 配置为 "%"（跨月值被误算成千分比）
+                if code not in agg:
+                    agg[code] = {"num": 0, "den": 0, "unit": UNIT_MAP.get(code, ""),
+                                 "name": NAME_MAP.get(code, code),
+                                 "monthly": {}, "diag_fields": {}}
+                for mon in missing_mons:
+                    try:
+                        from summary import _compute_icu05
+                        import calendar
+                        y, m = map(int, mon.split("-"))
+                        end_day = calendar.monthrange(y, m)[1]
+                        icu05_data = _compute_icu05(dept_codes, f"{mon}-01", f"{mon}-{end_day:02d}", hour)
+                        if icu05_data:
+                            # #修复: _compute_icu05 返回的键是 num/den/val（原读 numerator/denominator/value 恒为 None）
+                            agg[code]["num"] += icu05_data.get("num", 0)
+                            agg[code]["den"] += icu05_data.get("den", 0)
+                            agg[code]["monthly"][mon] = icu05_data.get("val", 0)
+                            for df in ("candidate_den", "high_probability_count", "probable_count",
+                                       "pending_review_count", "not_candidate_count", "raw_candidate_count",
+                                       "old_shock_count", "new_shock_count"):
+                                if icu05_data.get(df) is not None:
+                                    agg[code]["diag_fields"][df] = agg[code]["diag_fields"].get(df, 0) + icu05_data[df]
+                            if icu05_data.get("candidate_mode"):
+                                agg[code]["diag_fields"]["candidate_mode"] = icu05_data["candidate_mode"]
+                    except Exception as e:
+                        logger.warning("ICU-05-%s realtime failed for %s: %s", hour, mon, e)
 
         result = []
         for code in UNIT_MAP:
@@ -2712,61 +2782,48 @@ def indicator_list(period: str, icu_unit: str = "all", end_period: str = "", noc
     else:
         result = []
 
-    # ICU-05 实时计算 (覆盖预聚合数据)
-    try:
-        from scoring.bundle_engine import set_vaso_wide_labels
-        sc = get_client("SmartCare")["SmartCare"]
-        vaso_drugs = list(sc.configDrug.find(
-            {"classification": {"$regex": "血管活性", "$options": "i"}},
-            {"name": 1, "_id": 0}
-        ))
-        labels = {d["name"].strip() for d in vaso_drugs if d.get("name")}
-        if labels:
-            set_vaso_wide_labels(labels)
-    except Exception:
-        pass
-
-    start_date = f"{period}-01"
-    import calendar
-    y, m = map(int, period.split("-"))
-    end_day = calendar.monthrange(y, m)[1]
-    end_date = f"{period}-{end_day:02d}"
-
-    for hour in ("1h", "3h", "6h"):
+    # ICU-05 预聚合优先（性能关键路径）：
+    # 预聚合与实时是同一 _compute_icu05、同一次重建，同源同值；
+    # 原「恒实时覆盖」使列表每次冷启动多付 3×全量 V3 判定
+    # （单科室 ~2s、全院 60s+，是列表打开慢的最大头）。
+    # 仅当预聚合缺失（新科室未重建）才实时兜底。
+    icu05_missing = [h for h in ("1h", "3h", "6h")
+                     if not any(r.get("code") == f"ICU-05-{h}" for r in result)]
+    if icu05_missing:
         try:
-            from summary import _compute_icu05
-            icu05_data = _compute_icu05(dept_codes, start_date, end_date, hour)
-            if icu05_data:
-                code = f"ICU-05-{hour}"
-                # 查找并替换或追加
-                found = False
-                for i, r in enumerate(result):
-                    if r.get("code") == code:
-                        result[i] = _summary_row_to_api({
-                            "indicator": code,
-                            # #修复: 键名对齐 _compute_icu05 的 num/den/val（原 numerator/denominator/value 恒 None）
-                            "denominator": icu05_data.get("den"),
-                            "numerator": icu05_data.get("num"),
-                            "value": icu05_data.get("val"),
-                            "old_shock_count": icu05_data.get("old_shock_count"),
-                            "new_shock_count": icu05_data.get("new_shock_count"),
-                            "candidate_den": icu05_data.get("candidate_den"),
-                            "candidate_mode": icu05_data.get("candidate_mode"),
-                            "high_probability_count": icu05_data.get("high_probability_count"),
-                            "probable_count": icu05_data.get("probable_count"),
-                            "pending_review_count": icu05_data.get("pending_review_count"),
-                            "not_candidate_count": icu05_data.get("not_candidate_count"),
-                            "raw_candidate_count": icu05_data.get("raw_candidate_count"),
-                            "diagnosis_based_count": icu05_data.get("diagnosis_based_count"),
-                        })
-                        found = True
-                        break
-                if not found:
+            from scoring.bundle_engine import set_vaso_wide_labels
+            sc = get_client("SmartCare")["SmartCare"]
+            vaso_drugs = list(sc.configDrug.find(
+                {"classification": {"$regex": "血管活性", "$options": "i"}},
+                {"name": 1, "_id": 0}
+            ))
+            labels = {d["name"].strip() for d in vaso_drugs if d.get("name")}
+            if labels:
+                set_vaso_wide_labels(labels)
+        except Exception:
+            pass
+
+        start_date = f"{period}-01"
+        import calendar
+        y, m = map(int, period.split("-"))
+        end_day = calendar.monthrange(y, m)[1]
+        end_date = f"{period}-{end_day:02d}"
+
+        for hour in icu05_missing:
+            try:
+                from summary import _compute_icu05
+                icu05_data = _compute_icu05(dept_codes, start_date, end_date, hour)
+                if icu05_data:
+                    # icu05_missing 保证 result 中无此 code，直接追加
+                    code = f"ICU-05-{hour}"
                     result.append(_summary_row_to_api({
                         "indicator": code,
-                        "denominator": icu05_data.get("denominator"),
-                        "numerator": icu05_data.get("numerator"),
-                        "value": icu05_data.get("value"),
+                        # #修复: 键名对齐 _compute_icu05 的 num/den/val（原 numerator/denominator/value 恒 None）
+                        "denominator": icu05_data.get("den"),
+                        "numerator": icu05_data.get("num"),
+                        "value": icu05_data.get("val"),
+                        "old_shock_count": icu05_data.get("old_shock_count"),
+                        "new_shock_count": icu05_data.get("new_shock_count"),
                         "candidate_den": icu05_data.get("candidate_den"),
                         "candidate_mode": icu05_data.get("candidate_mode"),
                         "high_probability_count": icu05_data.get("high_probability_count"),
@@ -2776,8 +2833,8 @@ def indicator_list(period: str, icu_unit: str = "all", end_period: str = "", noc
                         "raw_candidate_count": icu05_data.get("raw_candidate_count"),
                         "diagnosis_based_count": icu05_data.get("diagnosis_based_count"),
                     }))
-        except Exception as e:
-            logger.warning("ICU-05-%s realtime compute failed: %s", hour, e)
+            except Exception as e:
+                logger.warning("ICU-05-%s realtime compute failed: %s", hour, e)
 
     existing_codes = {r.get("code") for r in result}
     for code in UNIT_MAP:
@@ -2800,6 +2857,24 @@ def indicator_trend(code: str, year: int, icu_unit: str = "all",
         "months": months,
         "values": values,
     }
+
+
+@app.get("/api/export/report-values")
+def export_report_values(period: str, icu_unit: str = "all", nocache: bool = False):
+    """
+    《重症质控指标上报（2024年版）》月度上报值（53 项）。
+
+    period=YYYY-MM；values[key]=null 表示无系统数据（导出时留空，人工填报）。
+    计算逻辑见 report_export.py，口径与看板指标一致。
+    """
+    import re as _re
+    if not _re.fullmatch(r"\d{4}-(0[1-9]|1[0-2])", period or ""):
+        raise HTTPException(status_code=400, detail="period 须为 YYYY-MM 格式")
+    from report_export import compute_report_values, _VALUES_CACHE
+    if nocache:
+        _VALUES_CACHE.pop((period, icu_unit), None)
+    return compute_report_values(period, icu_unit)
+
 
 @app.get("/api/indicators/{code}/detail")
 def indicator_detail(code: str, period: str, part: str, icu_unit: str = "all", end_period: str = "",
@@ -2835,10 +2910,13 @@ def indicator_detail(code: str, period: str, part: str, icu_unit: str = "all", e
             if m > 12:
                 m = 1
                 y += 1
-        # 聚合：患者类指标按 patient_id 去重；例次类指标优先按 detail_id 去重。
+        # 聚合口径与汇总「逐月相加」对齐：
+        # - 汇总行（pid=="—"）与 ICU-01 床日累计：跨月合并为一行（保持原语义）
+        # - 患者类行：按「统计月 + 患者」成行，同一患者跨月各占一行，
+        #   行数恒等于公式条分子/分母（stat_month 供前端「统计月」列展示）
         merged = {}
         for mon in months:
-            for p in _detail_cache_payload(code, mon, part, icu_unit, nocache=nocache):
+            for idx, p in enumerate(_detail_cache_payload(code, mon, part, icu_unit, nocache=nocache)):
                 pid = p.get("detail_id") or p.get("patient_id", "")
                 if pid == "—" or (code == "ICU-01" and part == "numerator"):
                     # 累加数值
@@ -2847,7 +2925,10 @@ def indicator_detail(code: str, period: str, part: str, icu_unit: str = "all", e
                     else:
                         merged[pid] = dict(p)
                 else:
-                    merged[pid] = dict(p)
+                    key = f"{mon}||{pid}" if pid else f"{mon}||#{idx}"
+                    row = dict(p)
+                    row["stat_month"] = mon
+                    merged[key] = row
         items = list(merged.values())
 
         # 跨月分母：重算总天数和名称
@@ -3528,6 +3609,19 @@ def admin_rebuild(dept: str = "all", start_period: str = "", end_period: str = "
     stats = summary_module.rebuild_summary(dept_codes, periods, ind_list)
     stats["dept_codes"] = dept_codes
     stats["periods"] = periods
+    # #fix: 同步失效明细缓存 —— 本端点此前只重建预聚合、不碰明细缓存，
+    # 口径变更后出现 list(新值) vs detail(旧缓存) 不一致（ICU-06 313 vs 319）。
+    # 删除而非重算：明细在下次下钻时按当前代码惰性重算，保持端点快速返回。
+    try:
+        coll = _get_detail_cache_collection()
+        if coll is not None:
+            deleted = coll.delete_many({
+                "dept_code": _dept_cache_key(dept_codes),
+                "period": {"$in": periods},
+            }).deleted_count
+            stats["detail_cache_invalidated"] = deleted
+    except Exception as e:
+        logger.warning("Failed to invalidate detail cache after admin rebuild: %s", e)
     return stats
 
 

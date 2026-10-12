@@ -115,10 +115,12 @@ def batch_fetch_lab_observations(
         try:
             exam_docs = list(dc.VI_ICU_EXAM.find(
                 {
-                    "pid": {"$in": chunk},
+                    # #fix: 原查 "pid" —— VI_ICU_EXAM 实际字段为 hisPid（0 文档含 pid），
+                    # 恒返回空 → 检验链路静默 no_data → SOFA 肝/肾/凝血分项全缺
+                    "hisPid": {"$in": chunk},
                     "collectTime": {"$gte": window_start, "$lte": eval_time}
                 },
-                {"pid": 1, "examID": 1, "reportID": 1, "collectTime": 1}
+                {"hisPid": 1, "examID": 1, "reportID": 1, "collectTime": 1}
             ).max_time_ms(15000).limit(5000))
 
             # 检测 limit 截断
@@ -127,7 +129,7 @@ def batch_fetch_lab_observations(
                              i, i + CHUNK_SIZE)
 
             for doc in exam_docs:
-                pid = doc.get("pid")
+                pid = doc.get("hisPid")  # #fix: VI_ICU_EXAM 字段为 hisPid（原读 pid 恒 None）
                 if pid not in exam_by_pid:
                     exam_by_pid[pid] = []
                 exam_by_pid[pid].append({
@@ -255,10 +257,12 @@ def batch_fetch_lab_observations(
         try:
             items = list(dc.VI_ICU_EXAM_ITEM.find(
                 {
-                    "reportID": {"$in": chunk},
+                    # #fix: ITEM 表无 reportID 字段 —— 其 examID 实际引用主表 reportID
+                    # （原查 reportID 恒 0 条 → reportID 型检验永远丢失）
+                    "examID": {"$in": chunk},
                     "itemCode": {"$in": target_item_codes}
                 },
-                {"reportID": 1, "itemCode": 1, "itemValue": 1, "result": 1,
+                {"examID": 1, "itemCode": 1, "itemValue": 1, "result": 1,
                  "unit": 1, "itemName": 1}
             ).max_time_ms(15000).limit(10000))
 
@@ -365,7 +369,11 @@ def _process_exam_items(
 
         # 时间窗口校验
         collect_time_aware = _aware(collect_time)
-        if collect_time_aware < window_start or collect_time_aware > eval_time:
+        # #fix: window_start/eval_time 是 naive(本地)，collect_time_aware 是 UTC-aware，
+        # 直接比较抛 TypeError（此前子表恒空未触发）
+        ws_aware = _aware(window_start)
+        ev_aware = _aware(eval_time)
+        if collect_time_aware < ws_aware or collect_time_aware > ev_aware:
             continue
 
         # 去重
@@ -439,14 +447,16 @@ def batch_fetch_lab_observations_with_status(
         try:
             exam_docs = list(dc.VI_ICU_EXAM.find(
                 {
-                    "pid": {"$in": chunk},
+                    # #fix: 原查 "pid" —— VI_ICU_EXAM 实际字段为 hisPid（0 文档含 pid），
+                    # 恒返回空 → 检验链路静默 no_data → SOFA 肝/肾/凝血分项全缺
+                    "hisPid": {"$in": chunk},
                     "collectTime": {"$gte": window_start, "$lte": eval_time}
                 },
-                {"pid": 1, "examID": 1, "reportID": 1, "collectTime": 1}
+                {"hisPid": 1, "examID": 1, "reportID": 1, "collectTime": 1}
             ).max_time_ms(15000).limit(5000))
 
             for doc in exam_docs:
-                pid = doc.get("pid")
+                pid = doc.get("hisPid")  # #fix: VI_ICU_EXAM 字段为 hisPid（原读 pid 恒 None）
                 if pid not in exam_by_pid:
                     exam_by_pid[pid] = []
                 exam_by_pid[pid].append({
@@ -562,10 +572,12 @@ def batch_fetch_lab_observations_with_status(
         try:
             items = list(dc.VI_ICU_EXAM_ITEM.find(
                 {
-                    "reportID": {"$in": chunk},
+                    # #fix: ITEM 表无 reportID 字段 —— 其 examID 实际引用主表 reportID
+                    # （原查 reportID 恒 0 条 → reportID 型检验永远丢失）
+                    "examID": {"$in": chunk},
                     "itemCode": {"$in": target_item_codes}
                 },
-                {"reportID": 1, "itemCode": 1, "itemValue": 1, "result": 1,
+                {"examID": 1, "itemCode": 1, "itemValue": 1, "result": 1,
                  "unit": 1, "itemName": 1}
             ).max_time_ms(15000).limit(10000))
 

@@ -14,6 +14,8 @@
   pending_review: 存在明确诊断或强组合信号，但数据不足
   not_candidate: 数据充分且不满足任何候选通道
 """
+# 打包兼容：注解延迟求值，避免 bool|None / float|None 在 Python<3.10 导入即崩
+from __future__ import annotations
 
 # 规则版本 (修改规则时 +1)
 CANDIDATE_RULE_VERSION = "1.1.0"

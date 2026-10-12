@@ -1,5 +1,10 @@
 fastapi
 uvicorn
-openai
+# openai>=1.0: 代码使用 OpenAI() 客户端与 chat.completions（1.x+ API），0.x 会 ImportError
+openai>=1.0
 pymongo
 python-dotenv
+# 时区数据兜底：目标机若为最小化安装（无 /usr/share/zoneinfo），zoneinfo 仍可用
+tzdata
+# 仅 Python<3.9 需要（zoneinfo 标准库 3.9+ 才有）；新版本 pip 自动跳过
+backports.zoneinfo; python_version < "3.9"

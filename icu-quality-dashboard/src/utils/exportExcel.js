@@ -90,7 +90,10 @@ export async function exportDetailExcel(opts) {
   }
 
   // ── 3. 共享列定义（导出用全列；界面展示用精简列）──
-  const cols = getDetailColumns(code, part, { forExport: true });
+  const cols = getDetailColumns(code, part, {
+    forExport: true,
+    crossMonth: !!(endPeriod && endPeriod !== period),
+  });
 
   // ── 4. 构建 worksheet ──
   const partLabel = part === 'numerator' ? '分子' : '分母';
