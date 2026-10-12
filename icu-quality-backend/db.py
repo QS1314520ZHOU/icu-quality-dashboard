@@ -502,8 +502,11 @@ def _keyword_regex(keywords: list[str]) -> str:
 
 # 不同院区/接口的医嘱状态编码不完全一致：
 # - 旧接口常见 "3"
-# 取消/撤销不纳入。
-EXECUTED_ORDER_STATUSES = ["已执行", "已审核", "停止", "3"]
+# - 换医院时把对方 HIS 的状态枚举配到 .env 的 EXECUTED_ORDER_STATUSES
+#   （逗号分隔多个值，中英文逗号都行），重启后端生效；取消/作废类不纳入。
+EXECUTED_ORDER_STATUSES = [s.strip() for s in _env(
+    "EXECUTED_ORDER_STATUSES", "已执行,已审核,停止,3"
+).replace("，", ",").split(",") if s.strip()] or ["已执行", "已审核", "停止", "3"]
 LAB_ORDER_TYPES = ["检验"]
 
 
