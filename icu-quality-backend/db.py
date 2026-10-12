@@ -507,7 +507,11 @@ def _keyword_regex(keywords: list[str]) -> str:
 EXECUTED_ORDER_STATUSES = [s.strip() for s in _env(
     "EXECUTED_ORDER_STATUSES", "已执行,已审核,停止,3"
 ).replace("，", ",").split(",") if s.strip()] or ["已执行", "已审核", "停止", "3"]
-LAB_ORDER_TYPES = ["检验"]
+# 不同院区 yaoType 编码不一致：标准医院检验类="检验"，部分医院用编码（如 "C"）。
+# 可在 .env 配 LAB_ORDER_TYPES（逗号分隔多个值），影响 ICU-06 病原学送检。
+LAB_ORDER_TYPES = [s.strip() for s in _env(
+    "LAB_ORDER_TYPES", "检验"
+).replace("，", ",").split(",") if s.strip()] or ["检验"]
 
 
 # ============================================================
