@@ -20,6 +20,7 @@ from config.bundle_rules import (  # noqa: E402
     BUNDLE_HOSPITAL_VARIANT,
     CG_ORDER_KEYWORDS,
     CG_CONFIRM_DIAG_KEYWORDS,
+    septic_shock_confirmed as _septic_shock_confirmed,
 )
 
 # 加载 .env 文件。打包成二进制后，优先读取可执行文件同目录的 .env。
@@ -1367,11 +1368,11 @@ def get_bundle_data_v2(dept_codes: list, start_date: str, end_date: str) -> dict
                                             batch_lab_cache=batch_lab_cache)
             pat["v3"] = v3
             # 分母判定: 使用候选引擎 (高召回四通道)
-            # 旧口径: K1 AND K2 → 仅用于影子比对
+            # 休克确认: bundle_rules.SHOCK_RULE 口径 → _septic_shock_confirmed
             # 新口径: candidate_info 由 judge_bundle_v3_for_patient 唯一计算，此处直接复用
             cl = v3.get("clinical_layer") or {}
             shock_layer = cl.get("layer4_shock", {})
-            old_shock_confirmed = v3.get("k1") == True and v3.get("k2") == True
+            old_shock_confirmed = _septic_shock_confirmed(v3)
             # 候选引擎集成: 复用 v3["candidate_info"]，不重复调用 extract_candidate
             candidate_info = v3.get("candidate_info")
             if candidate_info and candidate_info.get("candidate_status"):
@@ -1435,10 +1436,10 @@ def get_bundle_data_v2(dept_codes: list, start_date: str, end_date: str) -> dict
     # 重新计算分母
     from config.candidate_rules import CANDIDATE_ENGINE_MODE
 
-    # 旧口径: K1 AND K2 → 正式分母 (shadow 模式下不改变)
+    # 旧口径 → 现行 SHOCK_RULE 确认口径
     # #fix: .get(key, {}) returns None when key exists with None value
     old_shock_count = sum(1 for p in result["den_patients"]
-                          if (p.get("v3") or {}).get("k1") == True and (p.get("v3") or {}).get("k2") == True)
+                          if _septic_shock_confirmed(p.get("v3")))
 
     # 新口径: 候选引擎结果 → 影子分母
     candidate_count = sum(1 for p in result["den_patients"]

@@ -238,6 +238,54 @@ def test_lactate_2_0_boundary_in_denominator():
     assert new_shock is False  # new口径下不计入
 
 
+# ============================================================
+# 测试: SHOCK_RULE=s3 休克确认口径
+# ============================================================
+
+class TestSepticShockConfirmedS3:
+    """K2(升压药) 或 [K1(乳酸≥2) 且 map_min<70]"""
+
+    def _confirm(self, **kw):
+        from config.bundle_rules import septic_shock_confirmed
+        return septic_shock_confirmed(kw)
+
+    def test_pressor_alone_regardless_of_map(self):
+        """在用升压药即确认，MAP 被维持在 75 也入组"""
+        assert self._confirm(k1=False, k2=True, map_min=75) is True
+        assert self._confirm(k1=True, k2=True, map_min=80) is True
+
+    def test_lactate_with_hypotension(self):
+        """未用药但乳酸≥2 且 MAP<70 → 确认"""
+        assert self._confirm(k1=True, k2=False, map_min=60) is True
+
+    def test_lactate_without_hypotension_not_confirmed(self):
+        """单纯乳酸升高、无低血压、未用药 → 不确认"""
+        assert self._confirm(k1=True, k2=False, map_min=75) is False
+
+    def test_lactate_map_unknown_not_confirmed(self):
+        """未用药且无 MAP 数据 → 非用药分支不成立"""
+        assert self._confirm(k1=True, k2=False, map_min=None) is False
+        assert self._confirm(k1=True, k2=False) is False
+
+    def test_map_70_boundary(self):
+        """MAP=70 不算低血压（与 S3 的 <70 一致）"""
+        assert self._confirm(k1=True, k2=False, map_min=70) is False
+        assert self._confirm(k1=True, k2=False, map_min=69.9) is True
+
+    def test_no_signals_not_confirmed(self):
+        assert self._confirm(k1=False, k2=False, map_min=60) is False
+        assert self._confirm(k1=None, k2=None, map_min=None) is False
+        assert self._confirm() is False
+
+    def test_none_v3(self):
+        from config.bundle_rules import septic_shock_confirmed
+        assert septic_shock_confirmed(None) is False
+
+    def test_missing_lactate_on_pressor_still_confirms(self):
+        """乳酸未测但在用升压药 → K2 单独成立"""
+        assert self._confirm(k1=None, k2=True, map_min=72) is True
+
+
 if __name__ == "__main__":
     import pytest
     pytest.main([__file__, "-v"])

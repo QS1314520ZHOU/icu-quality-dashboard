@@ -458,12 +458,10 @@ def judge_bundle_v3(patient_data: Dict[str, Any]) -> Dict[str, Any]:
         gate["reason"] = "NO_INFECTION_EVIDENCE"
         return {"bundle_1h": None, "bundle_3h": None, "gate": gate}
 
-    # 脓毒性休克确认: K1 AND K2
-    # #5: SHOCK_RULE 配置
-    if _br.SHOCK_RULE == "or":
-        has_septic_shock = (k1 is True) or (k2 is True)
-    else:
-        has_septic_shock = (k1 is True) and (k2 is True)
+    # 脓毒性休克确认: bundle_rules.SHOCK_RULE（默认 s3 = K2 或 K1∧map_min<70）
+    # #5: SHOCK_RULE 配置 —— 口径单点收敛在 septic_shock_confirmed
+    has_septic_shock = _br.septic_shock_confirmed(
+        {"k1": k1, "k2": k2, "map_min": patient_data.get("map_min")})
     gate["is_septic_shock"] = has_septic_shock
     if not has_septic_shock:
         gate["reason"] = "NOT_SEPTIC_SHOCK"

@@ -74,9 +74,14 @@ AB_PICK = "latest_in_window"
 FLUID_SCOPE = "crystalloid_colloid_only"
 
 # ---- 休克确认规则 ----
-# and = K1 AND K2 必须同时成立；or = K1 OR K2 任一成立
-# 影响: 脓毒性休克确认的严格程度
-SHOCK_RULE = "and"
+# s3 = K2(升压药) 或 [K1(乳酸≥2) 且 map_min<70] —— Sepsis-3 口径（当前默认）：
+#      · 在用升压药即确认休克，MAP/乳酸数值不得否决（"用药把 MAP 维持住"的病人入组）；
+#      · 未用升压药者必须乳酸≥2 且确有低血压，单纯乳酸升高不入组；
+#      · MAP>65/70 且未用升压药者不入组（是脓毒症不是休克）。
+# or / and = 旧 K1/K2 二值组合口径（兼容保留）
+# 影响: ICU-05 休克确认/Bundle 门控/正式分母(shadow 口径)/排除原因码；
+#       术后常规升压药虚高靠人工排除码 candidate_exclusion.postop_routine_vasopressor 处理
+SHOCK_RULE = "s3"
 
 # ---- 感染部位确认 ----
 # True = 必须确认感染部位才进分母；False = 不要求
@@ -97,3 +102,21 @@ BUNDLE_6H_STEP2_ITEMS = [
     "fluid_1500",       # 液体量≥1500ml
     "lactate_recheck",  # 复测乳酸
 ]
+
+
+def septic_shock_confirmed(v3) -> bool:
+    """按 SHOCK_RULE 判断 v3 结果是否确认脓毒性休克（summary/引擎门控/原因码共用）。
+
+    - "s3": K2(升压药) 或 [K1(乳酸≥2) 且 map_min<70]
+    - "or"/"and": 旧 K1/K2 二值组合
+    """
+    v3 = v3 or {}
+    k1 = v3.get("k1") is True
+    k2 = v3.get("k2") is True
+    if SHOCK_RULE == "s3":
+        map_min = v3.get("map_min")
+        hypotension = map_min is not None and map_min < 70
+        return k2 or (k1 and hypotension)
+    if SHOCK_RULE == "or":
+        return k1 or k2
+    return k1 and k2

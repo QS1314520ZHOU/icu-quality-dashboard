@@ -71,11 +71,7 @@ VASO_DOSE_UNKNOWN_POLICY = "min_band_2"
 NE_LABEL_BASIS = "base"
 
 # ---- ICU-05 感染性休克 ----
-
-# 休克判定: "and"=低血压+升压药同时;"or"=任一即可
-# ⚠️ 改 or 会导致循环论证，分母虚高
-# 影响: ICU-05 分母
-SHOCK_RULE = "and"
+# （SHOCK_RULE 已收敛到 config/bundle_rules.py，此处不再重复定义）
 
 # 感染部位是否必填。
 # False = 不阻塞分母，未确认只标黄 + SITE_UNCONFIRMED 原因码

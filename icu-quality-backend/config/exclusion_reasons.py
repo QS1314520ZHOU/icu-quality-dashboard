@@ -136,8 +136,9 @@ def get_v3_reason_codes(v3_result: dict) -> List[str]:
     """
     reasons = []
 
-    # 检查脓毒性休克确认
-    if v3_result.get("k1") != True or v3_result.get("k2") != True:
+    # 检查脓毒性休克确认（口径跟随 bundle_rules.SHOCK_RULE）
+    from config.bundle_rules import septic_shock_confirmed
+    if not septic_shock_confirmed(v3_result):
         reasons.append("bundle_judgment.not_septic_shock")
 
     # 检查感染证据
