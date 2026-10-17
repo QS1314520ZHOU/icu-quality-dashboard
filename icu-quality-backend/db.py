@@ -322,6 +322,8 @@ class DBConfig:
         self.user = _env(f"{prefix}_DB_USER")
         self.password = _env(f"{prefix}_DB_PASSWORD")
         self.auth_db = _env(f"{prefix}_DB_AUTH")
+        # 业务库名：优先 *_DB_NAME；未配置时回退 *_DB_AUTH（本项目历来把 AUTH 当库名用）
+        self.db_name = _env(f"{prefix}_DB_NAME") or self.auth_db or ""
 
 
 # SmartCare（ICU 临床业务库）
@@ -329,28 +331,29 @@ SMARTCARE_CFG = DBConfig("SMARTCARE")
 # DataCenter（数据中心 / 指标汇总库）
 DATACENTER_CFG = DBConfig("DATACENTER")
 
-# ---- 医院变体库名映射（BUNDLE_HOSPITAL_VARIANT）----
-# cg: get_client("SmartCare")["SmartCare"] 经 _VariantClient 重定向到 *_cg
-VARIANT_DB_MAP = {
-    "default": ("SmartCare", "DataCenter"),
-    "cg": ("SmartCare_cg", "DataCenter_cg"),
-}
-
 
 def _variant_db_names() -> tuple[str, str]:
-    """当前变体的 (SmartCare库名, DataCenter库名)。"""
-    return VARIANT_DB_MAP.get(BUNDLE_HOSPITAL_VARIANT, VARIANT_DB_MAP["default"])
+    """当前实际使用的 (SmartCare库名, DataCenter库名)。
+
+    解析顺序（改 .env 后重启后端生效）:
+      1. SMARTCARE_DB_NAME / DATACENTER_DB_NAME
+      2. SMARTCARE_DB_AUTH / DATACENTER_DB_AUTH（与默认库同名时可省略 NAME）
+      3. 按 BUNDLE_HOSPITAL_VARIANT 回退：default → SmartCare/DataCenter，cg → *_cg
+    """
+    sc_default = "SmartCare_cg" if BUNDLE_HOSPITAL_VARIANT == "cg" else "SmartCare"
+    dc_default = "DataCenter_cg" if BUNDLE_HOSPITAL_VARIANT == "cg" else "DataCenter"
+    sc_name = SMARTCARE_CFG.db_name or sc_default
+    dc_name = DATACENTER_CFG.db_name or dc_default
+    return sc_name, dc_name
 
 
-# bedRecord / configBed / patient 所在的数据库
-_smartcare_auth = SMARTCARE_CFG.auth_db or "SmartCare"
-if BUNDLE_HOSPITAL_VARIANT == "cg":
-    # 变体医院: bed 库固定为 SmartCare_cg（开关优先于 .env）
-    BED_DB_NAMES = ["SmartCare_cg"]
-else:
-    BED_DB_NAMES = [_smartcare_auth]
+# bedRecord / configBed / patient 所在的数据库（来自 .env，不再被 cg 开关硬编码覆盖）
+_bed_sc_name, _ = _variant_db_names()
+BED_DB_NAMES = [_bed_sc_name]
 if not BED_DB_NAMES or not BED_DB_NAMES[0]:
-    raise RuntimeError("BED_DB_NAMES is empty — check SMARTCARE_DB_AUTH in .env")
+    raise RuntimeError(
+        "BED_DB_NAMES is empty — set SMARTCARE_DB_NAME or SMARTCARE_DB_AUTH in .env"
+    )
 
 def iter_bed_dbs():
     """Yield (db_name, db) for each valid bed database, skipping empty names.
@@ -388,7 +391,7 @@ def assert_db_ready():
     if not available:
         raise RuntimeError(
             "assert_db_ready: none of the configured BED_DB_NAMES are reachable. "
-            "Check SMARTCARE_DB_AUTH and network in .env."
+            "Check SMARTCARE_DB_NAME / SMARTCARE_DB_AUTH and network in .env."
         )
     logger.info("assert_db_ready: available DBs = %s", available)
     return available
@@ -430,10 +433,10 @@ def _make_client(cfg: DBConfig, db_name: str) -> MongoClient:
 
 
 class _VariantClient:
-    """按医院变体重定向库名的 MongoClient 薄代理。
+    """按 .env 库名重定向 MongoClient 薄代理。
 
-    变体为 default 时下标解析结果与原生 MongoClient 完全一致；
-    cg 变体下 client["SmartCare"] / client["DataCenter"] 落到 *_cg 库。
+    逻辑名 client["SmartCare"] / client["DataCenter"] 会落到 .env 配置的实际库名
+    （*_DB_NAME 或 *_DB_AUTH，未配置时按变体回退 SmartCare/DataCenter 或 *_cg）。
     仅重载 __getitem__，其余属性全部透传给真实 client。
     """
 
@@ -458,13 +461,14 @@ def get_client(db_name: str = "SmartCare") -> MongoClient:
     """
     懒加载 MongoDB 连接。
     优先匹配 DataCenter / SmartCare 配置，按 db_name 归属选择合适的凭证。
-    返回带医院变体重定向的代理（default 行为与原生 client 一致）。
+    返回带医院变体重定向的代理（逻辑名 SmartCare/DataCenter → .env 实际库名）。
     """
     if db_name in _clients:
         return _clients[db_name]
 
     # 根据库名猜测所属配置
-    if db_name.startswith("SmartCare") or db_name == "SmartCare":
+    sc_name, dc_name = _variant_db_names()
+    if db_name.startswith("SmartCare") or db_name in ("SmartCare", sc_name):
         cfg = SMARTCARE_CFG
     else:
         cfg = DATACENTER_CFG
@@ -481,13 +485,13 @@ def get_smartcare_client() -> MongoClient:
 
 def get_datacenter_client() -> MongoClient:
     """获取 DataCenter 库的连接"""
-    dc_name = DATACENTER_CFG.auth_db or "DataCenter"
+    _, dc_name = _variant_db_names()
     return get_client(dc_name)
 
 
 def get_datacenter_db():
     """获取 .env 指定的 DataCenter 数据库句柄。"""
-    db_name = DATACENTER_CFG.auth_db or "DataCenter"
+    _, db_name = _variant_db_names()
     return get_datacenter_client()[db_name]
 
 

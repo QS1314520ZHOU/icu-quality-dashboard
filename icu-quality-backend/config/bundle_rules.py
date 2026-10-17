@@ -23,13 +23,14 @@ except Exception:
 # 影响: get_bundle_data vs get_bundle_data_v2 走哪个
 BUNDLE_ENGINE = "compare"
 
-# ---- 医院变体开关（改 .env 的 BUNDLE_HOSPITAL_VARIANT，重启生效） ----
-# "default" = 标准医院：读 SmartCare / DataCenter，标准提取
-# "cg"     = 变体医院：读 SmartCare_cg / DataCenter_cg；
-#            血气 / 痰培养 / 血培养按 DataCenter.VI_ICU_ZYYZ 医嘱名识别；
-#            抗生素沿用系统 drugExe 关键词逻辑（不变）；
-#            分母确诊时间取 patient.diagnosisHistoryList 中最早含
-#            脓毒血症 / 败血症 / 感染性休克 的 time
+# ---- 医院变体开关（改 .env 的 BUNDLE_HOSPITAL_VARIANT，重启生效）----
+# "default" = 标准医院：库名默认 SmartCare / DataCenter，标准提取
+# "cg"      = 变体医院：库名默认 SmartCare_cg / DataCenter_cg（可用
+#             SMARTCARE_DB_NAME / DATACENTER_DB_NAME 覆盖，见 db.py）；
+#             血气 / 痰培养 / 血培养按 DataCenter.VI_ICU_ZYYZ 医嘱名识别；
+#             抗生素沿用系统 drugExe 关键词逻辑（不变）；
+#             分母确诊时间取 patient.diagnosisHistoryList 中最早含
+#             脓毒血症 / 败血症 / 感染性休克 的 time
 # 影响: ICU-05 bundle 全链路（分母确诊时间、血气/培养识别、跨库路由）
 BUNDLE_HOSPITAL_VARIANT = (os.getenv("BUNDLE_HOSPITAL_VARIANT", "default")
                            or "default").strip().lower()
