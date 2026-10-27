@@ -99,10 +99,17 @@ BUNDLE_6H_IMPLEMENTED = True
 # 影响: 6h 达标判定的完整性
 BUNDLE_6H_STEP2_ITEMS = [
     "antibiotic",       # 抗菌药物执行
-    "blood_culture",    # 血培养执行
+    "culture",          # 病原学培养（痰/尿/血任一）
     "fluid_1500",       # 液体量≥1500ml
     "lactate_recheck",  # 复测乳酸
 ]
+
+# ---- B2 培养口径 ----
+# B2 由「仅血培养」放宽为：痰培养 / 尿培养 / 血培养 任一即可
+# 影响: ICU-05 第二步 B2/B3 达标率（放宽会抬高）
+B2_CULTURE_KEYWORDS = ("痰培养", "尿培养", "血培养")
+# 兼容旧变量名
+BLOOD_CULTURE_KEYWORDS = B2_CULTURE_KEYWORDS
 
 
 def septic_shock_confirmed(v3) -> bool:

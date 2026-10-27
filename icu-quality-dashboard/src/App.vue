@@ -46,27 +46,62 @@
 <script setup>
 import { ref, provide, onMounted, onUnmounted } from 'vue';
 import Dashboard from './views/Dashboard.vue';
+import Cockpit from './views/Cockpit.vue';
 import StatusConfig from './views/StatusConfig.vue';
 import IndicatorTable from './IndicatorTable.vue';
 import Modal from './components/Modal.vue';
 import IndicatorGuideModal from './components/IndicatorGuideModal.vue';
+import { fetchDepartments } from './api/index.js';
 
 const currentView = ref('table');
 const guideVisible = ref(false);
 const hostDeptCode = ref('');
+const hostDeptName = ref('');
 const hostPatient = ref(null);
+/** code → { name, shortName } 缓存 */
+const deptNameMap = ref({});
 
 provide('hostDeptCode', hostDeptCode);
+provide('hostDeptName', hostDeptName);
 provide('hostPatient', hostPatient);
+
+async function loadDeptMap() {
+  try {
+    const list = await fetchDepartments();
+    const map = {};
+    for (const d of list || []) {
+      const code = String(d.code ?? d.deptCode ?? '');
+      if (!code) continue;
+      map[code] = {
+        name: d.name || d.shortName || code,
+        shortName: d.shortName || d.name || code,
+      };
+    }
+    deptNameMap.value = map;
+    resolveDeptName();
+  } catch { /* 科室接口失败时仅显示编码 */ }
+}
+
+function resolveDeptName() {
+  const code = hostDeptCode.value;
+  if (!code || code === 'all') {
+    hostDeptName.value = '';
+    return;
+  }
+  const hit = deptNameMap.value[code];
+  hostDeptName.value = hit?.shortName || hit?.name || '';
+}
 
 const navItems = [
   { key: 'dashboard', label: '大屏总览' },
+  { key: 'cockpit',   label: '驾驶舱' },
   { key: 'table',     label: '指标管理' },
   { key: 'statusConfig', label: '状态配置' },
 ];
 
 const views = {
   dashboard: Dashboard,
+  cockpit: Cockpit,
   statusConfig: StatusConfig,
   table: IndicatorTable,
 };
@@ -100,11 +135,33 @@ function onSmartCareReady(e) {
   }, printOrigin.value);
 }
 
+function applyDeptCode(code, nameFromHost = '') {
+  if (code) {
+    hostDeptCode.value = String(code);
+    try {
+      const u = new URL(window.location.href);
+      if (u.searchParams.get('deptCode') !== hostDeptCode.value) {
+        u.searchParams.set('deptCode', hostDeptCode.value);
+        window.history.replaceState({}, '', u);
+      }
+    } catch { /* ignore */ }
+  }
+  // 宿主优先带科室名；否则查 department 表映射
+  if (nameFromHost) {
+    hostDeptName.value = String(nameFromHost);
+  } else {
+    resolveDeptName();
+  }
+}
+
 function onSmartCare(e) {
   if (e.data?.type !== 'SmartCare') return;
   const patient = e.data.patient || {};
   hostPatient.value = patient;
-  hostDeptCode.value = patient.deptCode || patient.deptCode2 || '';
+  applyDeptCode(
+    patient.deptCode || patient.deptCode2 || '',
+    patient.deptName || patient.deptName2 || patient.dept || '',
+  );
 }
 
 function onHostMessage(e) {
@@ -115,6 +172,14 @@ function onHostMessage(e) {
 onMounted(() => {
   window.addEventListener('message', onHostMessage);
   window.addEventListener('navigate-view', navigateView);
+  loadDeptMap();
+  // 本地/无宿主时：从 URL 读 deptCode（如 ?deptCode=3439），与地址栏一致
+  if (!hostDeptCode.value) {
+    try {
+      const fromUrl = new URLSearchParams(window.location.search).get('deptCode');
+      if (fromUrl) applyDeptCode(fromUrl);
+    } catch { /* ignore */ }
+  }
   // 通知宿主：打印程序已就绪
   window.parent.postMessage({ type: 'SmartCareReady' }, printOrigin.value);
 });

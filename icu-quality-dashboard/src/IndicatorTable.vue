@@ -1,42 +1,64 @@
 <template>
   <div class="table-page">
-    <!-- 顶部筛选条 -->
-    <div class="filter-bar">
-      <span class="page-title">{{ deptName }}</span>
-      <div class="filters">
-        <select v-model="year" @change="reload()"><option v-for="y in years" :key="y" :value="y">{{ y }}年</option></select>
-        <select v-model="startMonth" @change="reload()"><option v-for="m in 12" :key="m" :value="m">{{ m }}月</option></select>
-        <span class="dash">—</span>
-        <select v-model="endMonth" @change="reload()"><option v-for="m in 12" :key="m" :value="m">{{ m }}月</option></select>
-
-        <button class="refresh-btn" :disabled="refreshing" @click="triggerRefresh">
+    <!-- 顶部工具条：期间 + 操作（科室由宿主/URL 决定） -->
+    <div class="toolbar-card">
+      <div class="toolbar-left">
+        <span class="toolbar-label">统计期间</span>
+        <div class="period-group">
+          <select v-model="year" @change="reload()" aria-label="年份">
+            <option v-for="y in years" :key="y" :value="y">{{ y }}</option>
+          </select>
+          <select v-model="startMonth" @change="reload()" aria-label="起始月">
+            <option v-for="m in 12" :key="m" :value="m">{{ m }}月</option>
+          </select>
+          <span class="period-sep">—</span>
+          <select v-model="endMonth" @change="reload()" aria-label="结束月">
+            <option v-for="m in 12" :key="m" :value="m">{{ m }}月</option>
+          </select>
+        </div>
+        <button class="btn ghost" :disabled="refreshing" @click="triggerRefresh">
           <span v-if="refreshing" class="spinner"></span>
-          {{ refreshing ? '后台刷新中' : '刷新数据' }}
+          {{ refreshing ? '刷新中' : '刷新数据' }}
         </button>
-        <button class="guide-btn" @click="guideVisible=true">指标说明</button>
-        <button class="export-btn" @click="exportCsv">导出CSV</button>
-        <button class="export-btn" :disabled="exporting" @click="exportReport">{{ exporting ? exportLabel : '导出上报表' }}</button>
+      </div>
+      <div class="toolbar-right">
+        <button class="btn ghost" @click="guideVisible=true">指标说明</button>
+        <button class="btn primary" @click="exportCsv">导出 CSV</button>
+        <button class="btn primary" :disabled="exporting" @click="exportReport">
+          {{ exporting ? exportLabel : '导出上报表' }}
+        </button>
       </div>
     </div>
 
-    <!-- 患者动态摘要条 -->
+    <!-- 患者动态摘要 -->
     <div v-if="census" class="census-bar">
-      <span class="census-label">患者动态</span>
-      <span class="census-item clickable" @click="drillCensus('carry_in', '原有患者')">
-        <small>原有</small> <b>{{ census.carry_in }}</b>
-      </span>
-      <span class="census-item clickable" @click="drillCensus('new_admit', '新入患者')">
-        <small>新入</small> <b>{{ census.new_admit }}</b>
-      </span>
-      <span class="census-item clickable" @click="drillCensus('discharge', '出科患者')">
-        <small>出科</small> <b>{{ census.discharge }}</b>
-      </span>
-      <span class="census-item clickable" @click="drillCensus('carry_out', '期末在科')">
-        <small>期末在科</small> <b>{{ census.carry_out }}</b>
-      </span>
-      <span class="census-item total">
-        <small>同期总数</small> <b>{{ census.total }}</b>
-      </span>
+      <div class="census-chip clickable" role="button" tabindex="0"
+           @click="drillCensus('carry_in', '原有患者')" @keyup.enter="drillCensus('carry_in', '原有患者')">
+        <span class="chip-label">原有</span>
+        <span class="chip-value tabular-nums">{{ census.carry_in }}</span>
+      </div>
+      <div class="census-chip clickable" role="button" tabindex="0"
+           @click="drillCensus('new_admit', '新入患者')" @keyup.enter="drillCensus('new_admit', '新入患者')">
+        <span class="chip-label">新入</span>
+        <span class="chip-value tabular-nums">{{ census.new_admit }}</span>
+      </div>
+      <div class="census-divider" aria-hidden="true"></div>
+      <div class="census-chip clickable" role="button" tabindex="0"
+           @click="drillCensus('discharge', '出科患者')" @keyup.enter="drillCensus('discharge', '出科患者')">
+        <span class="chip-label">出科</span>
+        <span class="chip-value tabular-nums">{{ census.discharge }}</span>
+      </div>
+      <div class="census-chip clickable" role="button" tabindex="0"
+           @click="drillCensus('carry_out', '期末在科')" @keyup.enter="drillCensus('carry_out', '期末在科')">
+        <span class="chip-label">期末在科</span>
+        <span class="chip-value tabular-nums">{{ census.carry_out }}</span>
+      </div>
+      <div class="census-divider" aria-hidden="true"></div>
+      <div class="census-chip total">
+        <span class="chip-label">同期总数</span>
+        <span class="chip-value tabular-nums accent">{{ census.total }}</span>
+      </div>
+      <span class="census-hint">点击数字可下钻患者明细</span>
     </div>
 
     <div class="table-wrap" :class="{ 'multi-month': isMultiMonth }">
@@ -108,7 +130,19 @@
       <div class="tip-meaning">{{ tip.data.meaning }}</div>
     </div>
 
-    <Modal v-if="trendData" :title="`${trendData.name} · ${year}年趋势`" @close="trendData=null"><TrendModal :data="trendData" /></Modal>
+    <Modal v-if="trendData" :title="`${trendData.name} · ${year}年趋势`" @close="trendData=null">
+      <div class="trend-modal-body">
+        <DualTrend
+          :code="trendData.code"
+          :name="trendData.name"
+          :monthly="{ months: trendData.months, values: trendData.values }"
+          :year="year"
+          :icu-unit="unit || 'all'"
+          :status="rowStatus(trendData.code)"
+          :kind="indicatorKind(trendData.code)"
+        />
+      </div>
+    </Modal>
     <Modal v-if="detailData" :title="detailTitle" @close="detailData=null">
       <DetailModal :data="detailData" :summary="detailData.summary" :parts="detailData.parts"
                    :funnel="detailData.funnel"
@@ -134,8 +168,9 @@
 <script setup>
 import { ref, computed, inject, onMounted, watch } from 'vue';
 import { INDICATORS, evalStatus, getStatusConfig, statusText as getStatusText } from './config/indicators.js';
+import { INDICATOR_GROUPS } from './config/indicatorGroups.js';
 import Modal from './components/Modal.vue';
-import TrendModal from './components/TrendModal.vue';
+import DualTrend from './components/DualTrend.vue';
 import DetailModal from './components/DetailModal.vue';
 import IndicatorGuideModal from './components/IndicatorGuideModal.vue';
 import { fetchIndicatorList, fetchTrend as apiFetchTrend, fetchDetail as apiFetchDetail, triggerRefresh as apiTriggerRefresh, getRefreshStatus, fetchReportValues } from './api/index.js';
@@ -149,6 +184,7 @@ const _curMonth = _shanghaiNow.getMonth() + 1;
 
 const year = ref(_curYear), startMonth = ref(_curMonth), endMonth = ref(_curMonth);
 const hostDeptCode = inject('hostDeptCode', ref('all'));
+const hostDeptName = inject('hostDeptName', ref(''));
 const unit = computed(() => hostDeptCode.value || 'all');
 // 动态年份：从2024到当前年+1
 const years = computed(() => {
@@ -167,7 +203,10 @@ const monthDetailNumerator = ref(null);   // 分子数据缓存
 const monthDetailDenominator = ref(null); // 分母数据缓存
 const monthDetailAbort = ref(null); // 用于取消过期请求
 const guideVisible = ref(false);
-const deptName = computed(() => { if (!hostDeptCode.value || hostDeptCode.value === 'all') return '全部ICU'; return hostDeptCode.value; });
+const deptName = computed(() => {
+  if (!hostDeptCode.value || hostDeptCode.value === 'all') return '全部ICU';
+  return hostDeptName.value || hostDeptCode.value;
+});
 const refreshing = ref(false);
 const toast = ref({ show: false, message: '', type: 'success' });
 const statusConfig = ref(getStatusConfig());
@@ -565,6 +604,24 @@ async function finishRefreshTask(task) {
 
 function statusText(s){ return getStatusText(s, statusConfig.value); }
 
+/** 趋势弹窗徽标用：当前行状态 */
+function rowStatus(code) {
+  const r = rows.value.find(x => x.code === code);
+  if (!r || r.value == null) return '';
+  const ind = INDICATORS.find(i => i.code === code);
+  return ind ? evalStatus(ind, r.value, statusConfig.value) : '';
+}
+/** 指标三分类（结构/过程/结果） */
+function indicatorKind(code) {
+  let fallback = '';
+  for (const g of INDICATOR_GROUPS) {
+    if (!g.codes?.includes(code)) continue;
+    if (['structure', 'process', 'outcome'].includes(g.id)) return g.id === 'structure' ? 'structure' : g.id === 'process' ? 'process' : 'outcome';
+    if (g.kind && !fallback) fallback = g.kind;
+  }
+  return fallback;
+}
+
 function exportCsv() {
   const header = '编码,指标名称,分子,分母,比值,状态\n';
   const body = rows.value.map(r =>
@@ -632,6 +689,162 @@ window.addEventListener('status-config-updated', () => {
 
 <style scoped>
 .table-page { padding: 20px 28px; }
+.trend-modal-body { min-width: 520px; }
+.trend-tabs { display: flex; gap: 0; margin-bottom: 12px; border-bottom: 1px solid var(--border); }
+.trend-tabs button {
+  background: none; border: none; padding: 8px 16px;
+  font-size: 13px; color: var(--text-sub); cursor: pointer;
+  border-bottom: 2px solid transparent; margin-bottom: -1px;
+}
+.trend-tabs button.active { color: var(--brand); border-bottom-color: var(--brand); font-weight: 600; }
+
+/* ---- 顶部工具条 ---- */
+.toolbar-card {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: center;
+  justify-content: space-between;
+  gap: 12px 16px;
+  padding: 12px 16px;
+  margin-bottom: 12px;
+  background: #fff;
+  border: 1px solid #e6ebf2;
+  border-radius: 12px;
+  box-shadow: 0 1px 2px rgba(17, 24, 39, 0.03);
+}
+.toolbar-left, .toolbar-right {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  flex-wrap: wrap;
+}
+.toolbar-label {
+  font-size: 12px;
+  color: var(--text-sub, #64748b);
+  font-weight: 500;
+  margin-right: 2px;
+  white-space: nowrap;
+}
+.period-group {
+  display: inline-flex;
+  align-items: center;
+  gap: 6px;
+  padding: 4px 8px 4px 10px;
+  background: #f8fafc;
+  border: 1px solid #e2e8f0;
+  border-radius: 8px;
+}
+.period-group select {
+  background: #fff;
+  color: var(--text-main, #0f172a);
+  border: 1px solid #e2e8f0;
+  border-radius: 6px;
+  padding: 5px 8px;
+  font-size: 13px;
+  cursor: pointer;
+  min-width: 72px;
+}
+.period-group select:focus { outline: none; border-color: var(--brand, #2c7be5); }
+.period-sep { color: #94a3b8; font-size: 12px; }
+
+.btn {
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  gap: 6px;
+  border-radius: 8px;
+  padding: 7px 14px;
+  font-size: 13px;
+  font-weight: 500;
+  cursor: pointer;
+  transition: background 0.15s, border-color 0.15s, opacity 0.15s;
+  white-space: nowrap;
+  line-height: 1.2;
+}
+.btn.ghost {
+  background: #fff;
+  color: var(--text-main, #0f172a);
+  border: 1px solid #dbe3ee;
+}
+.btn.ghost:hover:not(:disabled) { background: #f8fafc; border-color: #c5d0e0; }
+.btn.primary {
+  background: var(--brand, #2c7be5);
+  color: #fff;
+  border: 1px solid transparent;
+}
+.btn.primary:hover:not(:disabled) { filter: brightness(1.05); }
+.btn:disabled { opacity: 0.55; cursor: not-allowed; }
+
+.spinner {
+  display: inline-block;
+  width: 12px; height: 12px;
+  border: 2px solid var(--brand, #2c7be5);
+  border-top-color: transparent;
+  border-radius: 50%;
+  animation: spin 0.7s linear infinite;
+}
+@keyframes spin { to { transform: rotate(360deg); } }
+
+/* ---- 患者动态 chips ---- */
+.census-bar {
+  display: flex;
+  align-items: center;
+  flex-wrap: wrap;
+  gap: 8px;
+  padding: 10px 14px;
+  margin-bottom: 14px;
+  background: #f8fafc;
+  border: 1px solid #e6ebf2;
+  border-radius: 12px;
+}
+.census-chip {
+  display: inline-flex;
+  align-items: baseline;
+  gap: 8px;
+  padding: 6px 12px;
+  background: #fff;
+  border: 1px solid #e8eef6;
+  border-radius: 8px;
+  min-width: 88px;
+  transition: border-color 0.15s, box-shadow 0.15s;
+}
+.census-chip.clickable { cursor: pointer; }
+.census-chip.clickable:hover {
+  border-color: #b6d0f5;
+  box-shadow: 0 1px 4px rgba(44, 123, 229, 0.12);
+}
+.census-chip.total {
+  background: #eff6ff;
+  border-color: #bfdbfe;
+}
+.chip-label {
+  font-size: 12px;
+  color: #64748b;
+  font-weight: 500;
+  white-space: nowrap;
+}
+.chip-value {
+  font-size: 16px;
+  font-weight: 700;
+  color: #0f172a;
+  font-variant-numeric: tabular-nums;
+}
+.chip-value.accent { color: var(--brand, #2c7be5); }
+.census-divider {
+  width: 1px;
+  height: 22px;
+  background: #e2e8f0;
+  margin: 0 4px;
+  flex-shrink: 0;
+}
+.census-hint {
+  margin-left: auto;
+  font-size: 11px;
+  color: #94a3b8;
+  white-space: nowrap;
+}
+
+/* 旧类保留以免其他片段报错（可删） */
 .filter-bar { display:flex; justify-content:space-between; align-items:center; margin-bottom:16px; }
 .page-title { font-size:15px; font-weight:600; color:var(--text-main); }
 .filters { display:flex; gap:8px; align-items:center; }
@@ -643,9 +856,6 @@ window.addEventListener('status-config-updated', () => {
   display:inline-flex; align-items:center; gap:6px; transition:all .2s; }
 .refresh-btn:hover:not(:disabled) { background:rgba(44,123,229,0.06); }
 .refresh-btn:disabled { opacity:.65; cursor:not-allowed; }
-.spinner { display:inline-block; width:14px; height:14px; border:2px solid var(--brand);
-  border-top-color:transparent; border-radius:50%; animation:spin .7s linear infinite; }
-@keyframes spin { to { transform:rotate(360deg); } }
 .export-btn { background:var(--brand); color:#fff; border:none; border-radius:7px;
   padding:7px 16px; cursor:pointer; font-size:13px; font-weight:500; }
 .export-btn:hover:not(:disabled) { opacity:.85; }
@@ -827,16 +1037,6 @@ window.addEventListener('status-config-updated', () => {
 .tip-special .special-line { font-size:12px; line-height:1.8; color:var(--text-main); }
 .tip-note { font-size:12px; line-height:1.6; color:var(--text-main); margin-bottom:8px; }
 .tip-meaning { font-size:var(--fs-caption); color:var(--text-sub); padding-top:8px; border-top:1px dashed var(--border); }
-.census-bar { display:flex; align-items:center; gap:18px; padding:10px 16px; margin-bottom:10px;
-  background:var(--bg-subtle); border:1px solid var(--border); border-radius:8px; }
-.census-label { font-size:12px; font-weight:700; color:var(--brand); white-space:nowrap;
-  padding-right:12px; border-right:1px solid var(--border); }
-.census-item { display:flex; flex-direction:column; align-items:center; gap:2px; }
-.census-item.clickable { cursor:pointer; padding:4px 8px; border-radius:6px; transition:background .15s; }
-.census-item.clickable:hover { background:rgba(44,142,137,0.1); }
-.census-item small { font-size:var(--fs-caption); color:var(--text-sub); }
-.census-item b { font-size:15px; color:#0f172a; font-family:'Cascadia Code','Consolas',monospace; }
-.census-item.total b { color:var(--brand); }
 .excl-badge { display: inline-block; margin-left: 6px; font-size: 10px; color: #E8A53D; background: rgba(232,165,61,0.1); border: 1px solid rgba(232,165,61,0.3); border-radius: 4px; padding: 1px 6px; font-weight: 600; vertical-align: middle; }
 
 /* 分子/分母切换标签 */

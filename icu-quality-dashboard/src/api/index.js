@@ -2,6 +2,26 @@
 
 const BASE = '/api';
 
+// ---- 阈值配置（落库） ----
+export async function fetchThresholdConfig() {
+  const res = await fetch(`${BASE}/threshold-config`);
+  if (!res.ok) throw new Error(`阈值配置读取失败 (${res.status})`);
+  return res.json();
+}
+
+export async function saveThresholdConfig(thresholds) {
+  const res = await fetch(`${BASE}/threshold-config`, {
+    method: 'POST',
+    headers: { 'Content-Type': 'application/json' },
+    body: JSON.stringify({ thresholds }),
+  });
+  if (!res.ok) {
+    const err = await res.json().catch(() => ({}));
+    throw new Error(err.detail || `阈值配置保存失败 (${res.status})`);
+  }
+  return res.json();
+}
+
 // ---- 科室列表 ----
 export async function fetchDepartments() {
   const res = await fetch(`${BASE}/departments`);
@@ -48,6 +68,17 @@ export async function fetchTrend(code, year, icuUnit = 'all', sMonth = 1, eMonth
   let url = `${BASE}/indicators/${code}/trend?year=${year}&icu_unit=${encodeURIComponent(icuUnit)}`;
   if (sMonth > 1 || eMonth < 12) url += `&start_month=${sMonth}&end_month=${eMonth}`;
   const res = await fetch(url);
+  return res.json();
+}
+
+// ---- 单指标年度趋势（按年聚合分子/分母） ----
+export async function fetchYearlyTrend(code, startYear, endYear, icuUnit = 'all') {
+  const url = `${BASE}/indicators/${code}/trend-yearly?start_year=${startYear}&end_year=${endYear}&icu_unit=${encodeURIComponent(icuUnit)}`;
+  const res = await fetch(url);
+  if (!res.ok) {
+    const err = await res.json().catch(() => ({}));
+    throw new Error(err.detail || `年度趋势获取失败 (${res.status})`);
+  }
   return res.json();
 }
 

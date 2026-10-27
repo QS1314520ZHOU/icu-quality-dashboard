@@ -48,6 +48,10 @@
       <svg viewBox="0 0 16 16" fill="none" stroke="currentColor" stroke-width="1.5"><path d="M8 1L15 14H1L8 1zM8 6v4M8 12h.01"/></svg>
       部分月份数据缺失 ({{ missingPeriods.join(', ') }})，显示为「/」。点击刷新可触发补算。
     </div>
+    <div v-else-if="highUnknown" class="state warning">
+      <svg viewBox="0 0 16 16" fill="none" stroke="currentColor" stroke-width="1.5"><path d="M8 1L15 14H1L8 1zM8 6v4M8 12h.01"/></svg>
+      当前区间 {{ riskCounts.unknown }} 项指标尚无预聚合结果（多显示为「/」）。若刚部署或换库，请到「指标管理」点「刷新数据」补算；HIS 无业务数据时补算后仍可能为空。
+    </div>
 
     <!-- KPI 六宫格 -->
     <section class="kpi-row">
@@ -68,6 +72,11 @@
                       :arrow="kpi.yoyArrow" label="同比" :small-sample="kpi.yoySmall" />
         </div>
       </div>
+    </section>
+
+    <!-- 达标率总览（结构/过程/结果/总体） -->
+    <section class="compliance-row">
+      <ComplianceRatePanel :zone-stats="zoneStats" :overall-counts="riskCounts" />
     </section>
 
     <!-- 焦点横幅：达标环 + 异常摘要 + 质控提示 -->
@@ -336,6 +345,7 @@ import BarTargetChart from '../components/BarTargetChart.vue';
 import CensusStackChart from '../components/CensusStackChart.vue';
 import SmrChart from '../components/SmrChart.vue';
 import ComparisonTable from '../components/ComparisonTable.vue';
+import ComplianceRatePanel from '../components/ComplianceRatePanel.vue';
 import AiPanel from '../components/AiPanel.vue';
 import Modal from '../components/Modal.vue';
 import DetailModal from '../components/DetailModal.vue';
@@ -347,6 +357,7 @@ const year = ref(new Date().getFullYear());
 const sMonth = ref(new Date().getMonth() + 1);
 const eMonth = ref(new Date().getMonth() + 1);
 const hostDeptCode = inject('hostDeptCode', ref('all'));
+const hostDeptName = inject('hostDeptName', ref(''));
 const dept = computed(() => hostDeptCode.value || 'all');
 const years = computed(() => {
   const arr = [];
@@ -416,7 +427,10 @@ function fmtValue(v) {
 function getIndicatorProp(code, prop) {
   return INDICATORS.find(i => i.code === code)?.[prop] || '';
 }
-const scopeLabel = computed(() => (dept.value === 'all' ? '全部科室' : `科室 ${dept.value}`));
+const scopeLabel = computed(() => {
+  if (dept.value === 'all') return '全部科室';
+  return hostDeptName.value || `科室 ${dept.value}`;
+});
 
 // ---- 分组 ----
 const structureCodes = computed(() => {
@@ -497,6 +511,7 @@ const donutTotal = computed(() => {
   return c.good + c.warn + c.danger + c.unknown;
 });
 const riskGood = computed(() => riskCounts.value.good);
+const highUnknown = computed(() => riskCounts.value.unknown >= 8 && (riskCounts.value.good + riskCounts.value.warn + riskCounts.value.danger) <= 3);
 const donutSegs = computed(() => {
   const c = riskCounts.value;
   const total = donutTotal.value;
@@ -985,6 +1000,9 @@ onUnmounted(() => {
 .kpi-value strong { font-size: 25px; font-weight: 700; color: var(--text-title); line-height: 1.1; }
 .kpi-unit { font-size: 11px; color: var(--text-sub); }
 .kpi-deltas { display: flex; gap: 4px; flex-wrap: wrap; }
+
+/* ================= 达标率总览 ================= */
+.compliance-row { margin-bottom: 12px; }
 
 /* ================= 焦点横幅 ================= */
 .focus-banner {

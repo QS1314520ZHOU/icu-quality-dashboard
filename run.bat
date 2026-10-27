@@ -5,7 +5,7 @@ echo         ICU Quality Dashboard - Startup Script
 echo ==================================================
 
 set "BACKEND_PORT=8091"
-set "FRONTEND_PORT=5173"
+set "FRONTEND_PORT=5174"
 if exist ".env" (
     for /f "usebackq eol=# tokens=1,* delims==" %%A in (".env") do (
         if not "%%A"=="" set "%%A=%%B"

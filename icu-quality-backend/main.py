@@ -270,6 +270,52 @@ def _get_detail_cache_collection():
 
 
 EXCLUSION_COLLECTION = "icu_indicator_exclusion"
+THRESHOLD_CONFIG_COLLECTION = "icu_threshold_config"
+
+# 阈值配置内存缓存：TTL 内复用，保存时主动失效
+_threshold_cfg_cache: dict = {"ts": 0.0, "data": None}
+_THRESHOLD_CFG_TTL = 60.0
+
+
+def _get_threshold_collection():
+    for db_name in BED_DB_NAMES:
+        try:
+            db = get_client(db_name)[db_name]
+            return db[THRESHOLD_CONFIG_COLLECTION]
+        except Exception:
+            continue
+    return None
+
+
+def _load_threshold_overrides(force: bool = False) -> dict:
+    """读取落库阈值覆盖 {code: {good: [lo,hi], warn: [lo,hi], direction: str}}；失败返回 {}"""
+    import time as _time
+    now = _time.time()
+    if not force and _threshold_cfg_cache["data"] is not None and now - _threshold_cfg_cache["ts"] < _THRESHOLD_CFG_TTL:
+        return _threshold_cfg_cache["data"] or {}
+    overrides = {}
+    coll = _get_threshold_collection()
+    if coll is not None:
+        try:
+            doc = coll.find_one({"_id": "global"}) or {}
+            raw = doc.get("thresholds") or {}
+            for code, item in raw.items():
+                if not isinstance(item, dict):
+                    continue
+                entry = {}
+                if isinstance(item.get("good"), (list, tuple)) and len(item["good"]) == 2:
+                    entry["good"] = [float(item["good"][0]), float(item["good"][1])]
+                if isinstance(item.get("warn"), (list, tuple)) and len(item["warn"]) == 2:
+                    entry["warn"] = [float(item["warn"][0]), float(item["warn"][1])]
+                if item.get("direction") in ("higher", "lower", "range", "higher_better", "lower_better"):
+                    entry["direction"] = item["direction"]
+                if entry:
+                    overrides[code] = entry
+        except Exception as e:
+            logger.warning("threshold config load failed: %s", e)
+    _threshold_cfg_cache["data"] = overrides
+    _threshold_cfg_cache["ts"] = now
+    return overrides
 
 
 def _get_exclusion_collection():
@@ -454,6 +500,9 @@ def _write_detail_cache(dept_codes: list, period: str, code: str, part: str, ite
 
 def _detail_cache_payload(code: str, period: str, part: str, icu_unit: str, nocache: bool = False):
     dept_codes = _resolve_dept_codes(icu_unit)
+    # ICU-00 患者动态明细查询很快，且曾缓存过错误的 ObjectId 住院号——始终实时算，不读缓存
+    if code == "ICU-00":
+        return query_detail(code, period, part, icu_unit)
     if _is_historical_period(period) and not nocache:
         cached = _read_detail_cache(dept_codes, period, code, part)
         if cached is not None:
@@ -617,9 +666,11 @@ def eval_status(code, val) -> str:
         return "unknown"
     if isinstance(val, dict):
         val = val.get("3h", 75.0)
-    
-    g_lo, g_hi = cfg["good"]
-    w_lo, w_hi = cfg["warn"]
+
+    # 库内核定阈值优先于硬编码默认（状态配置页保存后全端生效）
+    override = _load_threshold_overrides().get(code) or {}
+    g_lo, g_hi = override.get("good") or cfg["good"]
+    w_lo, w_hi = override.get("warn") or cfg["warn"]
     if g_lo <= val <= g_hi:
         return "good"
     if w_lo <= val <= w_hi:
@@ -1130,7 +1181,8 @@ def query_detail(code: str, period: str, part: str, icu_unit: str = "all"):
         from db import get_patient_census_detail as _census_detail
         items = _census_detail(dept_codes, start_date, end_date, part)
         items = [{
-            "patient_id": p.get("patient_id", ""),
+            # 住院号 = mrn（patient 表），禁止使用 Mongo _id
+            "patient_id": p.get("mrn") or p.get("patient_id", ""),
             "name": p.get("name", ""),
             "gender": "",
             "age": "",
@@ -1140,7 +1192,7 @@ def query_detail(code: str, period: str, part: str, icu_unit: str = "all"):
             "discharge_time": str(p.get("icuDischargeTime", ""))[:16],
             "admission_source": "",
             "value": 1,
-            "detail_id": p.get("patient_id", ""),
+            "detail_id": p.get("pid") or p.get("patient_id", ""),
             "mrn": p.get("mrn", ""),
             "patient_type": p.get("patient_type", ""),
             "los_days": p.get("los_days"),
@@ -2859,6 +2911,76 @@ def indicator_trend(code: str, year: int, icu_unit: str = "all",
     }
 
 
+@app.get("/api/indicators/{code}/trend-yearly")
+def indicator_trend_yearly(code: str, start_year: int, end_year: int, icu_unit: str = "all"):
+    """
+    年度趋势：按年聚合月度预聚合表的分子/分母后重算比值。
+    - percent / permille：Σ分子 ÷ Σ分母 × 倍率（沿用 value_type）
+    - ratio（医/护床比等）：取该年最后一个非空月值（快照口径）
+    - index（SMR 等）：取该年有效月值均值
+    """
+    if end_year < start_year:
+        start_year, end_year = end_year, start_year
+    end_year = min(end_year, start_year + 20)  # 防护：最多 21 年
+    dept_codes = _resolve_dept_codes(icu_unit)
+    periods = [f"{y}-{m:02d}" for y in range(start_year, end_year + 1) for m in range(1, 13)]
+    raw = summary_module.read_summary(dept_codes, periods, [code])
+
+    by_year: dict[int, list] = {}
+    for r in raw:
+        try:
+            y = int(str(r.get("period", ""))[:4])
+        except ValueError:
+            continue
+        by_year.setdefault(y, []).append(r)
+
+    years_out, values_out, num_out, den_out = [], [], [], []
+    for y in range(start_year, end_year + 1):
+        months_rows = sorted(by_year.get(y, []), key=lambda x: x.get("period") or "")
+        if not months_rows:
+            years_out.append(str(y))
+            values_out.append(None)
+            num_out.append(None)
+            den_out.append(None)
+            continue
+        vtype = months_rows[0].get("value_type") or "percent"
+        nums = [r.get("numerator") for r in months_rows if r.get("numerator") is not None]
+        dens = [r.get("denominator") for r in months_rows if r.get("denominator") is not None]
+        vals = [r.get("value") for r in months_rows if r.get("value") is not None]
+
+        if vtype in ("percent", "permille") and nums and dens:
+            den_sum = sum(float(d) for d in dens)
+            num_sum = sum(float(n) for n in nums)
+            mult = 100 if vtype == "percent" else 1000
+            val = round(num_sum / den_sum * mult, 4) if den_sum else None
+            years_out.append(str(y))
+            values_out.append(val)
+            num_out.append(num_sum)
+            den_out.append(den_sum)
+        elif vtype == "ratio":
+            # 快照型：取最后一个非空
+            years_out.append(str(y))
+            values_out.append(vals[-1] if vals else None)
+            num_out.append(nums[-1] if nums else None)
+            den_out.append(dens[-1] if dens else None)
+        else:
+            # index / 其他：有效月均值
+            years_out.append(str(y))
+            values_out.append(round(sum(vals) / len(vals), 4) if vals else None)
+            num_out.append(None)
+            den_out.append(None)
+
+    return {
+        "code": code,
+        "name": NAME_MAP.get(code, code),
+        "unit": UNIT_MAP.get(code, ""),
+        "years": years_out,
+        "values": values_out,
+        "numerator": num_out,
+        "denominator": den_out,
+    }
+
+
 @app.get("/api/export/report-values")
 def export_report_values(period: str, icu_unit: str = "all", nocache: bool = False):
     """
@@ -3005,7 +3127,7 @@ def indicator_detail(code: str, period: str, part: str, icu_unit: str = "all", e
         # 人话文案（#设计: 替换原 V3/K1/A1/B3 技术黑话）
         if part == "numerator":
             source_desc = (f"分子：{h} 内完成 Bundle 三步的患者 — "
-                           "①乳酸测定 ②先做血培养、再用抗生素 ③液体复苏达标（1h窗有液体即可，3h/6h窗≥1500ml）")
+                           "①乳酸测定 ②先做培养（痰/尿/血任一）、再用抗生素 ③液体复苏达标（1h窗有液体即可，3h/6h窗≥1500ml）")
         else:
             source_desc = ("分母：入院 24h 内进 ICU、且确诊脓毒性休克的患者 — "
                            "同时满足 ①器官障碍（氧合/GCS/MAP/升压药任一）②感染证据（诊断/抗感染/病原学送检任一）"
@@ -3065,6 +3187,82 @@ def indicator_detail(code: str, period: str, part: str, icu_unit: str = "all", e
     paged["patients"] = items[offset:offset + limit]
     paged.pop("all_patients", None)
     return paged
+
+
+# ============================================================
+# 阈值配置（状态配置页落库，大屏/驾驶舱统一生效）
+# ============================================================
+
+@app.get("/api/threshold-config")
+def get_threshold_config():
+    """返回库内阈值覆盖 + 各指标默认值，供前端合并展示。"""
+    overrides = _load_threshold_overrides(force=True)
+    defaults = {}
+    for code, cfg in INDICATORS_CONFIG.items():
+        defaults[code] = {
+            "name": cfg.get("name", code),
+            "unit": cfg.get("unit", ""),
+            "good": list(cfg.get("good", ())),
+            "warn": list(cfg.get("warn", ())),
+            "direction": cfg.get("dir", ""),
+        }
+    return {
+        "defaults": defaults,
+        "overrides": overrides,
+        "updated_at": None,
+    }
+
+
+@app.post("/api/threshold-config")
+def save_threshold_config(payload: dict):
+    """
+    保存阈值核定结果。
+    body: { "thresholds": { "ICU-01": { "good": [75,90], "warn": [60,95], "direction": "range" }, ... } }
+    """
+    thresholds = payload.get("thresholds")
+    if not isinstance(thresholds, dict):
+        raise HTTPException(status_code=400, detail="thresholds 须为对象")
+    cleaned = {}
+    for code, item in thresholds.items():
+        if code not in INDICATORS_CONFIG:
+            continue  # 未知指标码忽略，避免脏数据
+        if not isinstance(item, dict):
+            continue
+        entry = {}
+        for band in ("good", "warn"):
+            pair = item.get(band)
+            if isinstance(pair, (list, tuple)) and len(pair) == 2:
+                try:
+                    entry[band] = [float(pair[0]), float(pair[1])]
+                except (TypeError, ValueError):
+                    raise HTTPException(status_code=400, detail=f"{code}.{band} 须为数值区间")
+        direction = item.get("direction")
+        if direction in ("higher", "lower", "range", "higher_better", "lower_better"):
+            entry["direction"] = direction
+        if entry:
+            cleaned[code] = entry
+
+    doc = {
+        "_id": "global",
+        "thresholds": cleaned,
+        "updated_at": datetime.utcnow(),
+    }
+    saved = False
+    for db_name in BED_DB_NAMES:
+        try:
+            db = get_client(db_name)[db_name]
+            coll = db[THRESHOLD_CONFIG_COLLECTION]
+            coll.replace_one({"_id": "global"}, doc, upsert=True)
+            saved = True
+            break
+        except Exception as e:
+            logger.warning("threshold save via %s failed: %s", db_name, e)
+            continue
+    if not saved:
+        raise HTTPException(status_code=503, detail="阈值配置写入失败：数据库不可用")
+    _threshold_cfg_cache["data"] = None  # 失效缓存
+    _threshold_cfg_cache["ts"] = 0.0
+    return {"status": "ok", "count": len(cleaned)}
 
 
 # ============================================================

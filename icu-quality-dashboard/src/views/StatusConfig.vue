@@ -9,6 +9,13 @@
           <svg viewBox="0 0 16 16" fill="none" stroke="currentColor" stroke-width="1.5" style="width:14px;height:14px;margin-right:4px;vertical-align:-2px"><path d="M2 2h5l1 2h6v10H2V2zM6 8h4M6 11h2"/></svg>
           指标明细表
         </button>
+        <button class="btn-ghost" @click="exportJson" title="导出阈值配置 JSON 便于备份交接">
+          导出 JSON
+        </button>
+        <button class="btn-ghost" @click="fileInput?.click()" title="从 JSON 导入阈值配置">
+          导入 JSON
+        </button>
+        <input ref="fileInput" type="file" accept="application/json,.json" style="display:none" @change="importJson" />
         <button class="btn-primary" @click="save">
           <svg viewBox="0 0 16 16" fill="none" stroke="currentColor" stroke-width="1.5" style="width:14px;height:14px;margin-right:4px;vertical-align:-2px"><path d="M12 14H4a1 1 0 0 1-1-1V3a1 1 0 0 1 1-1h5l3 3v8a1 1 0 0 1-1 1zM10 2v3h3M6 9h4"/></svg>
           保存配置
@@ -18,7 +25,7 @@
 
     <div class="info-banner">
       <span class="info-icon">ℹ</span>
-      <span>配置指标状态的颜色、告警级别及阈值范围，用于指标展示、告警触发和状态判断。</span>
+      <span>配置指标状态的颜色、告警级别及阈值范围。保存后同步落库，大屏总览/驾驶舱的状态判定一并生效；支持 JSON 导出/导入用于备份与交接。</span>
     </div>
 
     <section class="panel">
@@ -92,19 +99,20 @@
     </section>
 
     <transition name="fade">
-      <div v-if="saved" class="toast">✓ 配置已保存</div>
+      <div v-if="saved || toastMsg" class="toast" :class="{ warn: toastMsg && !saved }">{{ toastMsg || '✓ 配置已保存' }}</div>
     </transition>
   </div>
 </template>
 
 <script setup>
-import { ref, reactive } from 'vue';
+import { ref, reactive, onMounted } from 'vue';
 import {
   DEFAULT_STATUS_META,
   INDICATORS,
   getStatusConfig,
   saveStatusConfig,
 } from '../config/indicators.js';
+import { fetchThresholdConfig, saveThresholdConfig } from '../api/index.js';
 
 const statusKeys = ['good', 'warn', 'danger', 'unknown'];
 
@@ -133,6 +141,9 @@ function defaults() {
 
 const form = reactive(clone(getStatusConfig()));
 const saved = ref(false);
+const toastMsg = ref('');
+const fileInput = ref(null);
+let toastTimer = null;
 
 function displayCode(ind) { return ind.displayCode || ind.code; }
 
@@ -147,11 +158,135 @@ function resetRow(code) {
   form.thresholds[code].thresholds = clone(ind.thresholds);
 }
 
-function save() {
-  saveStatusConfig(clone(form));
-  saved.value = true;
-  setTimeout(() => { saved.value = false; }, 1600);
+function showToast(msg, ok = true) {
+  toastMsg.value = msg;
+  saved.value = ok;
+  clearTimeout(toastTimer);
+  toastTimer = setTimeout(() => { saved.value = false; toastMsg.value = ''; }, 2000);
 }
+
+/** 前端 direction → 后端 dir 编码 */
+function toBackendDirection(d) {
+  if (d === 'higher_better') return 'higher';
+  if (d === 'lower_better') return 'lower';
+  return d || 'range';
+}
+function fromBackendDirection(d) {
+  if (d === 'higher') return 'higher_better';
+  if (d === 'lower') return 'lower_better';
+  return d || 'range';
+}
+
+function buildBackendPayload() {
+  const out = {};
+  for (const ind of indicators) {
+    const t = form.thresholds[ind.code];
+    if (!t) continue;
+    out[ind.code] = {
+      good: clone(t.thresholds.good || []),
+      warn: clone(t.thresholds.warn || ind.thresholds?.warn || []),
+      direction: toBackendDirection(t.direction),
+    };
+  }
+  return out;
+}
+
+async function save() {
+  saveStatusConfig(clone(form));
+  try {
+    await saveThresholdConfig(buildBackendPayload());
+    showToast('✓ 配置已保存并同步至后端');
+  } catch (e) {
+    // 后端不可用时仍保留本地，但明确提示
+    showToast(`已存本机；后端同步失败：${e.message || '未知错误'}`, false);
+  }
+}
+
+function exportJson() {
+  const payload = {
+    schema: 'icu-threshold-config',
+    version: 1,
+    exported_at: new Date().toISOString(),
+    meta: clone(form.meta),
+    thresholds: clone(form.thresholds),
+  };
+  const blob = new Blob([JSON.stringify(payload, null, 2)], { type: 'application/json' });
+  const url = URL.createObjectURL(blob);
+  const a = document.createElement('a');
+  const ts = new Date().toISOString().slice(0, 10);
+  a.href = url;
+  a.download = `icu-threshold-config_${ts}.json`;
+  a.click();
+  URL.revokeObjectURL(url);
+  showToast('✓ 已导出 JSON');
+}
+
+function importJson(ev) {
+  const file = ev.target.files?.[0];
+  ev.target.value = '';
+  if (!file) return;
+  const reader = new FileReader();
+  reader.onload = () => {
+    try {
+      const data = JSON.parse(String(reader.result || ''));
+      if (data?.schema !== 'icu-threshold-config' || typeof data?.thresholds !== 'object') {
+        showToast('导入失败：文件格式不符', false);
+        return;
+      }
+      // 校验并合并：仅接受已知指标码
+      let n = 0;
+      for (const ind of indicators) {
+        const t = data.thresholds[ind.code];
+        if (!t?.thresholds) continue;
+        const good = t.thresholds.good;
+        const warn = t.thresholds.warn;
+        if (Array.isArray(good) && good.length === 2) {
+          form.thresholds[ind.code].thresholds.good = [Number(good[0]), Number(good[1])];
+          n++;
+        }
+        if (Array.isArray(warn) && warn.length === 2) {
+          form.thresholds[ind.code].thresholds.warn = [Number(warn[0]), Number(warn[1])];
+        }
+        if (t.direction) {
+          form.thresholds[ind.code].direction = fromBackendDirection(t.direction);
+        }
+      }
+      if (data.meta && typeof data.meta === 'object') {
+        for (const k of statusKeys) {
+          if (data.meta[k]?.color) form.meta[k].color = data.meta[k].color;
+          if (data.meta[k]?.background) form.meta[k].background = data.meta[k].background;
+          if (data.meta[k]?.label) form.meta[k].label = data.meta[k].label;
+        }
+      }
+      if (!n) {
+        showToast('导入失败：未匹配到有效阈值', false);
+        return;
+      }
+      showToast(`✓ 已导入 ${n} 项阈值，记得点「保存配置」`);
+    } catch {
+      showToast('导入失败：JSON 解析错误', false);
+    }
+  };
+  reader.readAsText(file);
+}
+
+async function loadFromBackend() {
+  try {
+    const res = await fetchThresholdConfig();
+    const overrides = res.overrides || {};
+    for (const ind of indicators) {
+      const o = overrides[ind.code];
+      if (!o) continue;
+      if (Array.isArray(o.good)) form.thresholds[ind.code].thresholds.good = clone(o.good);
+      if (Array.isArray(o.warn)) form.thresholds[ind.code].thresholds.warn = clone(o.warn);
+      if (o.direction) form.thresholds[ind.code].direction = fromBackendDirection(o.direction);
+    }
+  } catch {
+    // 后端不可用时静默使用本机配置
+  }
+}
+
+onMounted(() => { loadFromBackend(); });
 </script>
 
 <style scoped>

@@ -1132,22 +1132,116 @@ def _apply_cg_confirm_time(den_patients: list) -> None:
         logger.warning("cg confirm time resolution failed: %s", _exc)
 
 
+def _collect_icu_rule_candidates(dept_codes: list, start_dt, end_dt) -> list:
+    """
+    默认入池：ICU 入住 + 临床证据规则扫人（不依赖 diseaseDiagnosis 集合）。
+
+    对每个 ICU 入住患者：
+      - T0 = icuAdmissionTime（必要时用 VI_ICU_ZYYZ 首条医嘱覆盖）
+      - 诊断文本 = clinicalDiagnosis / admissionDiagnosis / diagnosisHistoryList
+      - 是否感染性休克由后续 judge_bundle_v3 + SHOCK_RULE / 候选引擎决定
+    """
+    from datetime import datetime as dt
+    end_of_day = dt(end_dt.year, end_dt.month, end_dt.day, 23, 59, 59)
+    query = {
+        "icuAdmissionTime": {"$gte": start_dt, "$lte": end_of_day},
+        "status": {"$ne": "invalid"},
+    }
+    if dept_codes:
+        query["deptCode"] = {"$in": [str(c) for c in dept_codes]}
+
+    candidates = []
+    for db_name, db in iter_bed_dbs():
+        try:
+            patients = list(db.patient.find(query, {
+                "mrn": 1, "hisPid": 1, "name": 1, "hisBed": 1, "deptCode": 1,
+                "icuAdmissionTime": 1, "icuDischargeTime": 1, "admissionTime": 1,
+                "clinicalDiagnosis": 1, "admissionDiagnosis": 1,
+                "diagnosisHistoryList": 1,
+            }))
+        except Exception as _exc:
+            logger.warning("ICU rule scan failed on %s: %s", db_name, _exc)
+            continue
+
+        for p in patients:
+            t0 = p.get("icuAdmissionTime")
+            if not isinstance(t0, dt):
+                continue
+            if t0.tzinfo is not None:
+                t0_naive = t0.replace(tzinfo=None)
+            else:
+                t0_naive = t0
+
+            diag_parts = []
+            for field in ("clinicalDiagnosis", "admissionDiagnosis"):
+                val = p.get(field)
+                if val:
+                    diag_parts.append(str(val))
+            for item in (p.get("diagnosisHistoryList") or []):
+                d = item.get("diagnosis")
+                if d:
+                    diag_parts.append(str(d))
+            diagnose = " | ".join(dict.fromkeys(diag_parts))
+
+            sc_pid = str(p["_id"])
+            his_pid = str(p.get("hisPid") or p.get("mrn") or "")
+            mrn = str(p.get("mrn") or his_pid or "")
+
+            # _id 用 hisPid：default 变体 resolve_bundle_dc_pid 返回 _id，
+            # VI_ICU_ZYYZ.pid = hisPid
+            candidates.append({
+                "_id": his_pid or sc_pid,
+                "sc_pid": sc_pid,
+                "hisPid": his_pid,
+                "mrn": mrn,
+                "name": p.get("name", ""),
+                "hisBed": p.get("hisBed", ""),
+                "deptCode": p.get("deptCode", ""),
+                "diagnosisTime": t0_naive,
+                "inPatientTime": p.get("admissionTime"),
+                "t0": t0_naive,
+                "t0_source": "icu_admission",
+                "diagnose": diagnose,
+                "source": "icu_rule",
+            })
+        break
+
+    # T0：仅允许用「入 ICU 及之后」的首条医嘱覆盖，避免被住院部医嘱抢走
+    for c in candidates:
+        pid = c.get("_id")
+        floor = c.get("t0")
+        if not pid or not floor:
+            continue
+        try:
+            dc = get_client("DataCenter")["DataCenter"]
+            od = dc.VI_ICU_ZYYZ.find_one(
+                {"pid": pid, "orderTime": {"$gte": floor}},
+                {"orderTime": 1, "orderName": 1},
+                sort=[("orderTime", 1)],
+            )
+            if od and od.get("orderTime"):
+                c["t0"] = od["orderTime"]
+                c["t0_source"] = "first_order_after_icu"
+                c["t0_first_order_name"] = od.get("orderName", "")
+                c["diagnosisTime"] = od["orderTime"]
+        except Exception as _exc:
+            logger.warning("ICU rule T0 resolve failed for %s: %s", pid, _exc)
+
+    return candidates
+
+
 def get_bundle_data_v2(dept_codes: list, start_date: str, end_date: str) -> dict:
     """
-    Bundle 判定 V3 — 双集合查询 + 完整分母逻辑。
+    Bundle 判定 V3 — 规则扫人 + 临床判定。
 
-    分母来源:
-      1. SmartCare diseaseDiagnosis (diseaseType 匹配)
-      2. DataCenter VI_ICU_ZYBR (diagnose 管道符分隔，扩展关键词)
-      3. SmartCare patient.clinicalDiagnosis / admissionDiagnosis (兜底)
-
-    分母过滤:
-      - 入院24h内进ICU (admitTime - inPatientTime <= 24h)
-      - 入科类型在 [入院, 手术入院, 外院] 内（可选，数据允许时启用）
+    分母来源（默认，不依赖 diseaseDiagnosis 集合）:
+      1. SmartCare patient ICU 入住（icuAdmissionTime + deptCode）
+         + 临床证据规则（SHOCK_RULE=s3 / 候选引擎）
+      2. DataCenter VI_ICU_ZYBR（若 diagnose/admitTime 齐全，作补充种子）
 
     T0 锚点:
-      - 从 DC VI_ICU_ZYYZ 取该患者第一条医嘱 orderTime
-      - 兜底：admitTime
+      - 优先 VI_ICU_ZYYZ 第一条医嘱 orderTime
+      - 兜底 icuAdmissionTime
 
     返回:
         {
@@ -1168,15 +1262,12 @@ def get_bundle_data_v2(dept_codes: list, start_date: str, end_date: str) -> dict
         "den_patients": [],
     }
 
-    # ---- 阶段 1: SmartCare diseaseDiagnosis (原有逻辑) ----
-    result_sc = get_bundle_data(dept_codes, start_date, end_date)
+    # ---- 阶段 1: ICU 入住 + 临床规则扫人（取消 diseaseDiagnosis 入池） ----
+    result["den_patients"].extend(
+        _collect_icu_rule_candidates(dept_codes, start_dt, end_dt)
+    )
 
-    # 合并 SmartCare 结果
-    # V2 owns the statistics.  Use the legacy query only as a source of
-    # candidate events; importing its accumulated numerators mixes contracts.
-    result["den_patients"].extend(result_sc["den_patients"])
-
-    # ---- 阶段 2: DataCenter VI_ICU_ZYBR (扩展关键词 + 24h 过滤) ----
+    # ---- 阶段 2: DataCenter VI_ICU_ZYBR 补充种子（有 diagnose+admitTime 才进） ----
     try:
         dc = get_client("DataCenter")["DataCenter"]
     except Exception as _exc:
@@ -1184,7 +1275,6 @@ def get_bundle_data_v2(dept_codes: list, start_date: str, end_date: str) -> dict
         return result
 
     try:
-        # 查询 VI_ICU_ZYBR：扩展关键词（脓毒血症/败血症/感染性休克/脓毒性休克等）
         dc_query = {
                 "diagnose": {"$regex": SEPSIS_DIAG_KEYWORDS, "$options": "i"},
                 "admitTime": {
@@ -1211,9 +1301,9 @@ def get_bundle_data_v2(dept_codes: list, start_date: str, end_date: str) -> dict
         ))
 
         if dc_diagnoses:
-            # 去重: 已在 SmartCare 中出现的患者不再重复计入
-            sc_pids = {p.get("_id") or p.get("pid") for p in result_sc["den_patients"]}
-            sc_mrns = {p.get("mrn") or p.get("hisPid") for p in result_sc["den_patients"]}
+            # 去重: 已在 ICU 规则扫人中出现的患者不再重复计入
+            sc_pids = {p.get("sc_pid") or p.get("_id") for p in result["den_patients"]}
+            sc_mrns = {p.get("mrn") or p.get("hisPid") for p in result["den_patients"]}
 
             # 收集 DC pid 用于批量查 T0
             dc_pids_for_t0 = []
@@ -1226,7 +1316,7 @@ def get_bundle_data_v2(dept_codes: list, start_date: str, end_date: str) -> dict
                 mrn = str(dx.get("mrn") or "").strip()
                 patient_id = str(dx.get("pid") or "").strip()
 
-                # 去重: 如果该患者已在 SmartCare 结果中，跳过
+                # 去重: 如果该患者已在规则扫人结果中，跳过
                 if patient_id in sc_pids or mrn in sc_mrns:
                     continue
 
@@ -1291,6 +1381,8 @@ def get_bundle_data_v2(dept_codes: list, start_date: str, end_date: str) -> dict
 
     # 回填 sc_pid 到 den_patients
     for pat in result["den_patients"]:
+        if pat.get("sc_pid"):
+            continue
         mrn = pat.get("mrn", "")
         if mrn and mrn in mrn_to_sc_pid:
             pat["sc_pid"] = mrn_to_sc_pid[mrn]
@@ -2495,12 +2587,12 @@ def get_bundle_components_from_dc(dc_pids, t0_map):
             if f['hours'] <= 6.0 and f.get('liquid_ml')
         )
 
-    # Step 4: 查 DC VI_ICU_ZYYZ 血培养
-    # 批量查所有 dc_pids 的血培养
+    # Step 4: 查 DC VI_ICU_ZYYZ 培养（痰/尿/血任一，B2 口径）
+    from config.bundle_rules import B2_CULTURE_KEYWORDS as _B2_KW
     culture_docs = list(dc.VI_ICU_ZYYZ.find(
         {
             'pid': {'$in': dc_pids},
-            'orderName': {'$regex': '血培养'}
+            'orderName': {'$regex': "|".join(_B2_KW)}
         },
         {'pid': 1, 'orderName': 1, 'orderTime': 1, 'status': 1, '_id': 0}
     ))
@@ -2718,7 +2810,7 @@ def judge_bundle_v3_for_patient(sc_pid: str, dc_pid: str, mrn: str, t0: datetime
     - I3: VI_ICU_ZYYZ 病原学送检
     - K1/A1: bGATemp param_bg_Lac — 按 mrn 查
     - B1: drugExe 抗生素时间
-    - B2: VI_ICU_ZYYZ 血培养时间
+    - B2: VI_ICU_ZYYZ 培养时间（痰/尿/血任一）
     - C1: 同 S3
     - C2: bGATemp param_bg_Lac (最高值)
     - C3-1h/C3-3h: drugExe 液体量
@@ -3022,19 +3114,24 @@ def judge_bundle_v3_for_patient(sc_pid: str, dc_pid: str, mrn: str, t0: datetime
     except Exception:
         pass
 
-    # ---- I3/B2: 病原学送检 / 血培养 ----
-    # #修复: I3和B2应该区分血培养和其他培养
-    # I3: 病原学送检（包括血培养、痰培养、尿培养等）
-    # B2: 血培养（仅血培养）
+    # ---- I3/B2: 病原学送检 / 培养 ----
+    # I3: 任意病原学送检（含更多培养类型）
+    # B2: 痰培养 / 尿培养 / 血培养 任一即可（B2_CULTURE_KEYWORDS）
     # cg 变体: 按 VI_ICU_ZYYZ 医嘱名识别 — 痰培养=含"细菌培养"、血培养=含"血培养鉴定"
+    from config.bundle_rules import B2_CULTURE_KEYWORDS as _B2_KW
     if BUNDLE_HOSPITAL_VARIANT == "cg":
         _cult_regex = (CG_ORDER_KEYWORDS["sputum_culture"] + "|"
-                       + CG_ORDER_KEYWORDS["blood_culture"])
-        _blood_kw = CG_ORDER_KEYWORDS["blood_culture"]
+                       + CG_ORDER_KEYWORDS["blood_culture"]
+                       + "|尿培养")
+        _b2_regex = ("|".join(_B2_KW)
+                     + "|" + CG_ORDER_KEYWORDS["sputum_culture"]
+                     + "|" + CG_ORDER_KEYWORDS["blood_culture"])
     else:
         _cult_regex = ('血培养|痰培养|尿培养|细菌培养|真菌培养|分泌物培养'
                        '|引流液培养|胸水培养|腹水培养|脑脊液培养|导管培养')
-        _blood_kw = '血培养'
+        _b2_regex = "|".join(_B2_KW)
+    import re as _re
+    _b2_pat = _re.compile(_b2_regex)
     has_culture = False
     culture_time = None
     culture_name = None
@@ -3057,8 +3154,8 @@ def judge_bundle_v3_for_patient(sc_pid: str, dc_pid: str, mrn: str, t0: datetime
                         has_culture = True
                         culture_time = ct
                         culture_name = order_name
-                    # B2: 只有血培养才算
-                    if _blood_kw in order_name and not has_blood_culture:
+                    # B2: 痰/尿/血培养任一
+                    if _b2_pat.search(order_name) and not has_blood_culture:
                         has_blood_culture = True
                         blood_culture_time = ct
                         blood_culture_name = order_name
@@ -6954,9 +7051,12 @@ def get_patient_census_detail(dept_codes: list, start_date: str, end_date: str,
                 if admit:
                     ref = discharge or datetime.utcnow()
                     los = (ref - admit).days
+                # 住院号 = patient.mrn；patient_id 不得使用 Mongo _id（那是 ObjectId 字符串）
+                mrn = d.get("mrn", "") or d.get("hisPid", "")
                 results.append({
-                    "patient_id": str(d.get("_id", "")),
-                    "mrn": d.get("mrn", ""),
+                    "patient_id": mrn,
+                    "mrn": mrn,
+                    "pid": str(d.get("_id", "")),  # 内部唯一键，不展示
                     "name": d.get("name", ""),
                     "hisBed": d.get("hisBed", ""),
                     "icuAdmissionTime": admit.isoformat() if admit else "",

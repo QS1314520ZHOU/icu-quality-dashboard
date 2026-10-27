@@ -10,7 +10,7 @@ v3 判定项:
   感染证据: I1(诊断关键词) I2(抗生素执行) I3(病原学送检)
   休克确认: K1(乳酸≥2) K2(需要升压)
   第一步:   A1(乳酸测定)
-  第二步:   B1(抗生素时间) B2(血培养时间) B3(B1∧B2∧B1晚于B2)
+  第二步:   B1(抗生素时间) B2(培养时间:痰/尿/血任一) B3(B1∧B2∧B1晚于B2)
   第三步:   C1(MAP<70触发) C2(乳酸≥4触发) C3(液体达标)
 """
 from __future__ import annotations
@@ -262,7 +262,7 @@ def judge_B1_antibiotic_time(antibiotic_time: Optional[datetime]) -> Optional[bo
 
 
 def judge_B2_culture_time(culture_time: Optional[datetime]) -> Optional[bool]:
-    """B2: 血培养执行时间 (窗口内倒序取第一条，有值即达标)"""
+    """B2: 培养执行时间（痰/尿/血任一），有值即达标"""
     if culture_time is None:
         return None
     return True

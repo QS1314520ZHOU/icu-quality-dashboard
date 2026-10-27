@@ -101,7 +101,17 @@ function fmtReason(code) {
 
 /* ---------------- 通用列片段 ---------------- */
 
-const COL_PATIENT_ID = { header: '住院号', get: (p) => fmtText(p.patient_id) }
+const COL_PATIENT_ID = {
+  header: '住院号',
+  // 优先 mrn（patient 表住院号）；兼容旧字段，避免把 Mongo ObjectId 展示成住院号
+  get: (p) => {
+    const v = p.mrn || p.patient_id || ''
+    const s = v == null ? '' : String(v)
+    // 24 位 hex 的 ObjectId 不是住院号
+    if (/^[0-9a-f]{24}$/i.test(s)) return p.hisPid || p.pid_ref || '—'
+    return s
+  },
+}
 const COL_NAME       = { header: '姓名',   get: (p) => fmtText(p.name) }
 
 /* ============================================================
