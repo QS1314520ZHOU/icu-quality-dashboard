@@ -769,7 +769,10 @@ def get_icu_denominator_stays(dept_codes: list, start_date: str, end_date: str) 
                     ],
                 },
                 {"_id": 1, "mrn": 1, "hisPid": 1, "patientId": 1, "name": 1,
-                 "hisBed": 1, "icuAdmissionTime": 1, "icuDischargeTime": 1, "deptCode": 1},
+                 "hisBed": 1, "icuAdmissionTime": 1, "icuDischargeTime": 1, "deptCode": 1,
+                 # 诊断字段：ICU-08 分母 AND 诊断过滤用
+                 "clinicalDiagnosis": 1, "diagnosis": 1, "admissionDiagnosis": 1,
+                 "dischargedDiagnosis": 1, "diagnosisHistoryList": 1},
             ))
         except Exception as _exc:
             logger.warning("DB %s failed in get_icu_denominator_stays: %s", _db_name, _exc)
@@ -1971,6 +1974,52 @@ def get_ards_prone_numerator(den_patients: list, dept_codes: list,
 
 
 # ============================================================
+def _cn_period_bounds(start_date: str, end_date: str) -> tuple[datetime, datetime]:
+    """统计期起止：按东八区日历日解释，返回与库内 naive 时间戳可比的 datetime。
+
+    fromisoformat 得到的是 naive 值；若调用方传了 aware，先落到 Asia/Shanghai 再去 tz，
+    避免 UTC 服务器上把中国日历日算成前一/后一天。
+    """
+    try:
+        from zoneinfo import ZoneInfo
+        cn = ZoneInfo("Asia/Shanghai")
+    except Exception:
+        cn = timezone(timedelta(hours=8))
+
+    def _wall(d: datetime) -> datetime:
+        if d.tzinfo is not None:
+            return d.astimezone(cn).replace(tzinfo=None)
+        # date-only naive：按东八区墙钟日历日使用（与业务库本地时间戳一致）
+        return d
+
+    s = _wall(datetime.fromisoformat(start_date))
+    e = _wall(datetime.fromisoformat(end_date))
+    start_b = datetime(s.year, s.month, s.day)
+    end_b = datetime(e.year, e.month, e.day, 23, 59, 59)
+    return start_b, end_b
+
+
+def _ards_diag_hit(diagnosis_text: str, require: bool = True) -> bool:
+    """ICU-08 诊断过滤：文本命中 ARDS/肺损伤/重症肺炎/创伤性湿肺 任一即通过（不区分大小写）。
+
+    require=False 时直接放行（配置关诊断闸门用）。
+    """
+    from config.indicator_windows import ARDS_DIAG_KEYWORDS
+    if not require:
+        return True
+    if not diagnosis_text:
+        return False
+    tl = diagnosis_text.lower()
+    return any(kw.lower() in tl for kw in ARDS_DIAG_KEYWORDS)
+
+
+def _mean_of(values) -> float | None:
+    nums = [v for v in values if isinstance(v, (int, float)) and not isinstance(v, bool)]
+    if not nums:
+        return None
+    return sum(nums) / len(nums)
+
+
 # ICU-08 组合：分母+分子一次返回
 # ============================================================
 
@@ -1981,105 +2030,180 @@ def get_icu08_data(dept_codes: list, start_date: str, end_date: str,
     """
     ICU-08（中重度ARDS俯卧位实施率）完整三套分母+分子。
 
-    分母三臂：
-      有创: 氧疗途径∈{管辅,切辅,管氧,切氧,管文,切文,管高,切高} 且 PEEP≥5 且 P/F<150
-      无创: 氧疗途径=无创 且 PEEP≥5 且 P/F≤200
-      高流量: 氧疗途径=高流量 且 吸氧流速≥30L/min 且 P/F≤200
-    三臂按 pid 去重取并集。
+    分母（2026-10 口径）:
+      队列 = 与 ICU-04/07 相同的同期在科队列（按人次，每行一次入科）
+      P/F  = 入科后 ARDS_PF_AVG_HOURS(默认24)h 内全部有效 P/F 的算术均值（非单条首条）
+      诊断 = AND：clinicalDiagnosis 等文本须命中
+             ARDS / 肺损伤 / 重症肺炎 / 创伤性湿肺 之一（可配 ARDS_REQUIRE_DIAG）
+      三臂（在入科后 24h 窗口内取最新氧疗/PEEP/流速，与 P/F 均值比较）:
+        有创:   氧疗途径∈有创 且 PEEP≥5 且 P/F均值<150
+        无创:   氧疗途径=无创 且 PEEP≥5 且 P/F均值≤200
+        高流量: 氧疗途径=高流量 且 流速≥30L/min 且 P/F均值≤200
 
     分子：分母患者统计月内有 param_TiWei 含"俯卧位"记录。
+          pf_time 取 24h 窗口内首条 P/F 时间（俯卧位须不早于该时刻）。
 
     返回: {den_count, num_count, den_patients, num_patients}
     """
     from datetime import datetime as dt, timedelta
     from bson import ObjectId
     from config.o2_route_map import classify_o2_route
-    from config.indicator_windows import ICU08_PAIR_MODE
+    from config.indicator_windows import (
+        ICU08_PAIR_MODE, ARDS_PF_AVG_HOURS, ARDS_REQUIRE_DIAG, ARDS_DIAG_KEYWORDS,
+    )
 
-    logger.info("[ICU-08] window=%s ~ %s dept=%s", start_date, end_date, dept_codes)
+    logger.info("[ICU-08] window=%s ~ %s dept=%s pf_avg_h=%s diag=%s",
+                start_date, end_date, dept_codes, ARDS_PF_AVG_HOURS,
+                "AND " + "/".join(ARDS_DIAG_KEYWORDS) if ARDS_REQUIRE_DIAG else "off")
 
-    # 接线 ICU08_PAIR_MODE
+    # 接线 ICU08_PAIR_MODE（旧单条配对窗口仍可用于向后兼容路径）
     if ICU08_PAIR_MODE == "locf_8h":
         time_tolerance_min = 480  # 8h LOCF 窗口
 
-    start_dt = dt.fromisoformat(start_date)
-    end_dt = dt.fromisoformat(end_date)
+    start_dt, end_of_day = _cn_period_bounds(start_date, end_date)  # 东八区日历日边界（与队列/展示一致）
+    pf_avg_h = ARDS_PF_AVG_HOURS if ARDS_PF_AVG_HOURS else 24
+
+    # 分母队列：同期在科（人次）—— 与 ICU-04/07 同源，含诊断字段
+    stays = get_icu_denominator_stays(dept_codes, start_date, end_date)
+    stays = [s for s in stays if isinstance(s.get("icuAdmissionTime"), dt)]
+    if not stays:
+        return {"den_count": 0, "num_count": 0, "den_patients": [], "num_patients": []}
+
+    # 诊断 AND 过滤（先滤人，再查血气，避免无效查询）
+    if ARDS_REQUIRE_DIAG:
+        kept = []
+        for s in stays:
+            diag_txt = _patient_diagnosis_text(s)
+            if _ards_diag_hit(diag_txt, require=True):
+                s["_ards_diag"] = diag_txt[:200]
+                kept.append(s)
+            # else: 不入分母
+        stays = kept
+        if not stays:
+            logger.info("[ICU-08] 诊断过滤后分母=0")
+            return {"den_count": 0, "num_count": 0, "den_patients": [], "num_patients": []}
+
+    # 入科后 24h 窗口整体范围，用于一次拉取血气
+    q_start = min(s["icuAdmissionTime"] for s in stays)
+    q_end = max(s["icuAdmissionTime"] + timedelta(hours=pf_avg_h) for s in stays)
+    # pid 键统一 str：eventExe.pid 可能是 str 或 ObjectId，与 patient._id 对齐
+    stay_pids = {str(s["_id"]) for s in stays}
+    pid_to_stays = defaultdict(list)
+    for s in stays:
+        pid_to_stays[str(s["_id"])].append(s)
+
     den_patients = []
-    seen_pids = set()
+    seen_stay_keys = set()  # (pid, pf_time) 防同一次入科重复
+
+    def _match_any_pid(raw_pid) -> bool:
+        return raw_pid is not None and str(raw_pid) in stay_pids
+
+    def _bedside_pid_clause(raw_pid):
+        """bedside.pid 存储类型与 eventExe.pid 一致，同时兼容 str/ObjectId。"""
+        try:
+            from bson import ObjectId as _OID
+            return {"$in": [raw_pid, str(raw_pid), _OID(str(raw_pid))] if str(raw_pid) else [raw_pid]}
+        except Exception:
+            return raw_pid
 
     for db_name, db in iter_bed_dbs():
         try:
-
-            # Step 1: 取血气 P/F
-            all_bga = []
+            # Step 1: 按科室+时间拉血气（与旧查询同路径），再按队列 pid 过滤
+            pf_by_pid = defaultdict(list)  # str(pid) -> [(time, value), ...]
             for coll_name in ["bGATemp", "bGATemp1"]:
                 try:
-                    bgas = list(db[coll_name].find(
-                        {"deptCode": {"$in": dept_codes},
-                         "eventExe.startTime": {"$gte": start_dt, "$lte": dt(end_dt.year, end_dt.month, end_dt.day, 23, 59, 59)},
-                         "bedsides": {"$elemMatch": {"code": {"$in": ["param_bg_P/Fratio", "param_bg_OI", "param_bg_po2"]}, "valid": "valid"}}},
+                    bgas = db[coll_name].find(
+                        {
+                            "deptCode": {"$in": dept_codes},
+                            "eventExe.startTime": {"$gte": q_start, "$lte": q_end},
+                            "bedsides": {
+                                "$elemMatch": {
+                                    "code": {"$in": ["param_bg_P/Fratio", "param_bg_OI", "param_bg_po2"]},
+                                    "valid": "valid",
+                                }
+                            },
+                        },
                         {"eventExe.pid": 1, "eventExe.startTime": 1, "bedsides": 1, "mrn": 1},
-                    ).sort("eventExe.startTime", 1))
-                    all_bga.extend(bgas)
+                    ).sort("eventExe.startTime", 1)
+                    for bga in bgas:
+                        pid = bga.get("eventExe", {}).get("pid")
+                        t = bga.get("eventExe", {}).get("startTime")
+                        if not pid or not isinstance(t, dt):
+                            continue
+                        if not _match_any_pid(pid):
+                            continue
+                        v = _pf_ratio_from_bedsides(bga.get("bedsides", []))
+                        if v is not None:
+                            pf_by_pid[str(pid)].append((t, v))
                 except Exception as _exc:
-                    logger.warning("DB %s failed in get_icu08_data: %s", db_name, _exc)
+                    logger.warning("DB %s failed in get_icu08_data P/F: %s", db_name, _exc)
                     continue
 
-            for bga in all_bga:
-                pid = bga["eventExe"]["pid"]
-                if pid in seen_pids:
+            if not pf_by_pid:
+                # 该库无血气 → 尝试下一个库
+                continue
+
+            # Step 2: 按次在科切 24h 窗口，算均值 + 三臂
+            for pid_key, stay_list in pid_to_stays.items():
+                samples = pf_by_pid.get(pid_key) or []
+                if not samples:
                     continue
-                pf_time = bga["eventExe"]["startTime"]
-                pf_ratio = None
-                pf_ratio = _pf_ratio_from_bedsides(bga.get("bedsides", []))
-                if pf_ratio is None:
+                stay = stay_list[0]  # 一行 = 一次入科（SmartCare patient 表）
+                admit = stay["icuAdmissionTime"]
+                win_end = admit + timedelta(hours=pf_avg_h)
+                in_win = [(t, v) for t, v in samples if admit <= t <= win_end]
+                if not in_win:
+                    continue
+                pf_avg = _mean_of([v for _, v in in_win])
+                if pf_avg is None:
+                    continue
+                pf_first_time = in_win[0][0]
+
+                win_key = (pid_key, pf_first_time)
+                if win_key in seen_stay_keys:
                     continue
 
-                win = pf_time - timedelta(minutes=time_tolerance_min)
+                raw_pid = stay["_id"]
+                # bedside 存的 pid 类型可能与 eventExe 一致：用 str + ObjectId 双查
+                pid_clause = _bedside_pid_clause(pid_key)
 
-                # 氧疗途径 → o2_route_map 分类
+                # 氧疗途径 / PEEP / 流速：取入科后 24h 窗口内最新一条
                 o2_doc = db.bedside.find_one(
-                    {"pid": pid, "code": "param_XiYangTuJing", "valid": True,
-                     "time": {"$gte": win, "$lte": pf_time}},
-                    {"strVal": 1}, sort=[("time", -1)])
+                    {"pid": pid_clause, "code": "param_XiYangTuJing", "valid": True,
+                     "time": {"$gte": admit, "$lte": win_end}},
+                    {"strVal": 1, "time": 1}, sort=[("time", -1)])
                 o2_raw = o2_doc.get("strVal", "") if o2_doc else ""
                 o2_cls = classify_o2_route(o2_raw)
-                icu08_arm = o2_cls["icu08_arm"]  # invasive/noninvasive/hfnc/none/unknown
+                icu08_arm = o2_cls["icu08_arm"]
 
-                # PEEP — 仅 invasive 和 noninvasive 臂需要
-                # 需求文档: 不因 PEEP 缺失而跳过整个患者
                 peep_val = None
                 peep_doc = None
                 if icu08_arm in ("invasive", "noninvasive"):
                     peep_doc = db.bedside.find_one(
-                        {"pid": pid, "code": "param_vent_peep", "valid": True,
-                         "time": {"$gte": win, "$lte": pf_time}},
-                        {"strVal": 1}, sort=[("time", -1)])
+                        {"pid": pid_clause, "code": "param_vent_peep", "valid": True,
+                         "time": {"$gte": admit, "$lte": win_end}},
+                        {"strVal": 1, "time": 1}, sort=[("time", -1)])
                     if peep_doc:
                         raw_peep = peep_doc.get("strVal", "")
                         if isinstance(raw_peep, str):
-                            # PEEP 单位清洗
-                            raw_peep = raw_peep.replace("cmH2O", "").replace("cmH₂O", "")
-                            raw_peep = raw_peep.replace("cmh2o", "").replace("cm", "")
-                            raw_peep = raw_peep.strip()
+                            raw_peep = (raw_peep.replace("cmH2O", "").replace("cmH₂O", "")
+                                        .replace("cmh2o", "").replace("cm", "").strip())
                         try:
                             peep_val = float(raw_peep) if raw_peep else None
                         except (ValueError, TypeError):
                             peep_val = None
 
-                # 判定三臂(使用 o2_route_map 映射结果)
                 arm = None
-                flow_val = 0  # 初始化，HFNC 臂使用
-                if icu08_arm == "invasive" and peep_val is not None and peep_val >= peep_min and pf_ratio < invasive_pf:
+                flow_val = 0
+                if icu08_arm == "invasive" and peep_val is not None and peep_val >= peep_min and pf_avg < invasive_pf:
                     arm = "有创"
-                elif icu08_arm == "noninvasive" and peep_val is not None and peep_val >= peep_min and pf_ratio <= noninvasive_pf:
+                elif icu08_arm == "noninvasive" and peep_val is not None and peep_val >= peep_min and pf_avg <= noninvasive_pf:
                     arm = "无创"
                 elif icu08_arm == "hfnc":
-                    # HFNC 臂:只检查流速门槛,不检查 PEEP
                     flow_doc = db.bedside.find_one(
-                        {"pid": pid, "code": "param_吸氧流速", "valid": True,
-                         "time": {"$gte": win, "$lte": pf_time}},
-                        {"strVal": 1}, sort=[("time", -1)])
+                        {"pid": pid_clause, "code": "param_吸氧流速", "valid": True,
+                         "time": {"$gte": admit, "$lte": win_end}},
+                        {"strVal": 1, "time": 1}, sort=[("time", -1)])
                     if flow_doc:
                         try:
                             fv = flow_doc.get("strVal", "0")
@@ -2087,43 +2211,52 @@ def get_icu08_data(dept_codes: list, start_date: str, end_date: str,
                             flow_val = float(fv)
                         except (ValueError, TypeError):
                             pass
-                    if flow_val >= hfnc_flow_min and pf_ratio <= noninvasive_pf:
+                    if flow_val >= hfnc_flow_min and pf_avg <= noninvasive_pf:
                         arm = "高流量"
 
                 if not arm:
-                    continue  # 不入任何分母
+                    continue
 
-                # 匹配！查患者信息
-                seen_pids.add(pid)
-                pat_name = ""
-                mrn = bga.get("mrn", "")
-                try:
-                    pat = db.patient.find_one({"_id": ObjectId(pid)}, {"name": 1, "mrn": 1, "hisPid": 1})
-                    if pat:
-                        pat_name = pat.get("name", "")
-                        if not mrn: mrn = pat.get("mrn", "") or pat.get("hisPid", "")
-                except Exception:
-                    pass
-                # PEEP 时间分级 (staleness grading)
+                seen_stay_keys.add(win_key)
+                pat_name = stay.get("name") or ""
+                mrn = stay.get("mrn") or stay.get("hisPid") or ""
+                if not pat_name:
+                    try:
+                        pat = db.patient.find_one({"_id": raw_pid}, {"name": 1, "mrn": 1, "hisPid": 1})
+                        if pat:
+                            pat_name = pat.get("name", "")
+                            mrn = mrn or pat.get("mrn", "") or pat.get("hisPid", "")
+                    except Exception:
+                        pass
+
                 peep_grade = None
                 if peep_val is not None and peep_doc:
-                    peep_ts = peep_doc.get("time") or peep_doc.get("eventExe", {}).get("startTime")
-                    if isinstance(peep_ts, datetime):
-                        delta_min = abs((pf_time - peep_ts).total_seconds()) / 60
+                    peep_ts = peep_doc.get("time")
+                    if isinstance(peep_ts, dt):
+                        delta_min = abs((pf_first_time - peep_ts).total_seconds()) / 60
                         if delta_min <= 60:
-                            peep_grade = "A"   # ≤1h
+                            peep_grade = "A"
                         elif delta_min <= 240:
-                            peep_grade = "B"   # ≤4h
+                            peep_grade = "B"
                         elif delta_min <= 480:
-                            peep_grade = "C"   # ≤8h
+                            peep_grade = "C"
 
                 den_patients.append({
-                    "pid": pid, "mrn": mrn, "name": pat_name,
-                    "pf_ratio": pf_ratio, "peep": peep_val,
+                    "pid": raw_pid,
+                    "mrn": mrn,
+                    "name": pat_name,
+                    "pf_ratio": round(pf_avg, 1),   # 入科后24h P/F 均值
+                    "pf_avg_raw": pf_avg,
+                    "pf_sample_count": len(in_win),
+                    "peep": peep_val,
                     "peep_grade": peep_grade,
-                    "o2_route": o2_raw, "arm": arm, "flow_val": flow_val if arm == "高流量" else None,
-                    "pf_time": pf_time,
-                    "exclusion_key": build_exclusion_key(pid, pf_time),
+                    "o2_route": o2_raw,
+                    "arm": arm,
+                    "flow_val": flow_val if arm == "高流量" else None,
+                    "pf_time": pf_first_time,
+                    "icu_admit": admit,
+                    "diag": stay.get("_ards_diag", ""),
+                    "exclusion_key": build_exclusion_key(str(raw_pid), pf_first_time),
                 })
 
             break
@@ -2139,6 +2272,10 @@ def get_icu08_data(dept_codes: list, start_date: str, end_date: str,
         logger.warning("[ICU-08] 分子(%d) 大于 分母(%d),窗口口径异常,已截断",
                        num_result["num_count"], len(den_patients))
         num_result["num_count"] = len(den_patients)
+
+    logger.info("[ICU-08] den=%d num=%d (24h P/F均值 + 诊断%s)",
+                len(den_patients), num_result["num_count"],
+                "AND" if ARDS_REQUIRE_DIAG else "off")
 
     return {
         "den_count": len(den_patients),
