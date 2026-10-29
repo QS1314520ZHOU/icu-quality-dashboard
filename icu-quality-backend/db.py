@@ -1969,6 +1969,10 @@ def get_ards_prone_numerator(den_patients: list, dept_codes: list,
                         "prone_times": [r["time"] for r in prone_records[:10]],
                         "prone_count": len(prone_records),
                         "exclusion_key": p.get("exclusion_key", ""),
+                        "diag": p.get("diag", ""),
+                        "diag_hits": p.get("diag_hits", []),
+                        "pf_ratio": p.get("pf_ratio"),
+                        "arm": p.get("arm"),
                     })
 
             break
@@ -2010,13 +2014,23 @@ def _ards_diag_hit(diagnosis_text: str, require: bool = True) -> bool:
 
     require=False 时直接放行（配置关诊断闸门用）。
     """
+    return bool(_ards_diag_hits(diagnosis_text)) if require else True
+
+
+def _ards_diag_hits(diagnosis_text: str) -> list[str]:
+    """返回诊断文本命中的 ARDS 关键词列表（按配置顺序，去重）。"""
     from config.indicator_windows import ARDS_DIAG_KEYWORDS
-    if not require:
-        return True
     if not diagnosis_text:
-        return False
+        return []
     tl = diagnosis_text.lower()
-    return any(kw.lower() in tl for kw in ARDS_DIAG_KEYWORDS)
+    hits = []
+    for kw in ARDS_DIAG_KEYWORDS:
+        if kw.lower() in tl and kw not in hits:
+            # 「急性呼吸窘迫」是全称子串，已有全称时不必重复展示
+            if kw == "急性呼吸窘迫" and any(h in hits for h in ("急性呼吸窘迫综合征", "ARDS")):
+                continue
+            hits.append(kw)
+    return hits
 
 
 def _mean_of(values) -> float | None:
@@ -2248,6 +2262,8 @@ def get_icu08_data(dept_codes: list, start_date: str, end_date: str,
                             peep_grade = "C"
 
                 # pid 必须是 str：ObjectId 进 FastAPI JSON 会 TypeError
+                diag_full = stay.get("_ards_diag", "") or ""
+                diag_hits = _ards_diag_hits(diag_full)
                 den_patients.append({
                     "pid": str(raw_pid),
                     "mrn": mrn,
@@ -2262,7 +2278,8 @@ def get_icu08_data(dept_codes: list, start_date: str, end_date: str,
                     "flow_val": flow_val if arm == "高流量" else None,
                     "pf_time": pf_first_time,
                     "icu_admit": admit,
-                    "diag": stay.get("_ards_diag", ""),
+                    "diag": diag_full[:200],
+                    "diag_hits": diag_hits,
                     "exclusion_key": build_exclusion_key(str(raw_pid), pf_first_time),
                 })
 

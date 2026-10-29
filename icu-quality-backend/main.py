@@ -1207,18 +1207,22 @@ def query_detail(code: str, period: str, part: str, icu_unit: str = "all"):
             _ek_map = {p.get("pid"): p.get("exclusion_key", "") for p in data.get("den_patients", [])}
             items = []
             for p in data.get("num_patients", []):
+                hits = p.get("diag_hits") or []
+                diag_s = "；".join(hits) if hits else (p.get("diag") or "")
                 items.append({
                     "patient_id": p.get("mrn", ""),
                     "name": p.get("name", ""),
                     "gender": "", "age": "",
-                    "bed_no": f"俯卧{p.get('prone_count',0)}次",
+                    "bed_no": f"俯卧{p.get('prone_count',0)}次" + (f"  |  {diag_s}" if diag_s else ""),
                     "dept": "",
                     "admit_time": str(p.get("prone_times", [""])[0])[:16] if p.get("prone_times") else "",
                     "discharge_time": "",
-                    "admission_source": "",
+                    "admission_source": f"命中诊断: {diag_s}" if diag_s else "",
                     "value": p.get("prone_count", 0),
                     "exclusion_key": p.get("exclusion_key", "") or _ek_map.get(p.get("pid", ""), ""),
                     "pid_ref": str(p.get("pid", "") or ""),
+                    "diag": p.get("diag", ""),
+                    "diag_hits": hits,
                 })
             excl_map = _get_exclusion_map(dept_codes, period, code)
             for item in items:
@@ -1239,18 +1243,23 @@ def query_detail(code: str, period: str, part: str, icu_unit: str = "all"):
             for p in data.get("den_patients", []):
                 flow_v = p.get('flow_val')
                 flow_s = f"  流速: {flow_v}L/min" if flow_v is not None else ""
+                hits = p.get("diag_hits") or []
+                diag_s = "；".join(hits) if hits else (p.get("diag") or "")
                 items.append({
                     "patient_id": p.get("mrn", ""),
                     "name": p.get("name", ""),
                     "gender": "", "age": "",
                     "bed_no": f"P/F均值={p.get('pf_ratio','?')}({p.get('pf_sample_count',1)}次)  PEEP={p.get('peep','?')}",
                     "dept": "",
-                    "admit_time": f"纳入: {p.get('arm','')}  |  氧疗途径: {p.get('o2_route','?')}{flow_s}",
+                    "admit_time": f"纳入: {p.get('arm','')}  |  氧疗途径: {p.get('o2_route','?')}{flow_s}"
+                                  + (f"  |  诊断: {diag_s}" if diag_s else ""),
                     "discharge_time": str(p.get("pf_time", ""))[:16] if p.get("pf_time") else "",
-                    "admission_source": "",
+                    "admission_source": f"命中诊断: {diag_s}" if diag_s else "",
                     "value": round(p.get('pf_ratio', 0), 1) if isinstance(p.get('pf_ratio'), (int, float)) else p.get('pf_ratio', 0),
                     "exclusion_key": p.get("exclusion_key", ""),
                     "pid_ref": str(p.get("pid", "") or ""),
+                    "diag": p.get("diag", ""),
+                    "diag_hits": hits,
                 })
             excl_map = _get_exclusion_map(dept_codes, period, code)
             for item in items:

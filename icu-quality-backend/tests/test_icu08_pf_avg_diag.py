@@ -5,7 +5,7 @@ sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 
 from datetime import datetime, timedelta, timezone
 
-from db import _ards_diag_hit, _mean_of, _cn_period_bounds
+from db import _ards_diag_hit, _ards_diag_hits, _mean_of, _cn_period_bounds
 from config.indicator_windows import ARDS_PF_AVG_HOURS, ARDS_DIAG_KEYWORDS
 
 
@@ -31,6 +31,14 @@ def test_diag_hit_keywords():
 def test_diag_hit_require_false_passthrough():
     assert _ards_diag_hit("", require=False) is True
     assert _ards_diag_hit("无相关诊断", require=False) is True
+
+
+def test_diag_hits_list():
+    assert _ards_diag_hits("重症肺炎|I型呼吸衰竭") == ["重症肺炎"]
+    # 中文全称命中时不重复报「急性呼吸窘迫」前缀
+    hits = _ards_diag_hits("急性呼吸窘迫综合征")
+    assert hits == ["急性呼吸窘迫综合征"]
+    assert _ards_diag_hits("") == []
 
 
 def test_period_bounds_are_wallclock_days():

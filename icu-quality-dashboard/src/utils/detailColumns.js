@@ -427,6 +427,36 @@ function buildColumns(code, part, opts = {}) {
     ]
   }
 
+  // ---- ICU-08 ARDS：分母/分子都展示命中诊断 ----
+  if (code === 'ICU-08') {
+    const denCols = [
+      { header: 'P/F均值(次数)', get: (p) => fmtText(p.bed_no) },
+      { header: '纳入路径',     get: (p) => fmtText(p.admit_time) },
+      { header: 'P/F时间',      get: (p) => fmtDate(p.discharge_time) },
+      { header: 'P/F值',        get: (p) => fmtText(p.value ?? '—') },
+    ]
+    const numCols = [
+      { header: '俯卧次数',     get: (p) => fmtText(p.bed_no) },
+      { header: '首次俯卧时间', get: (p) => fmtDate(p.admit_time) },
+      { header: '俯卧总次数',   get: (p) => fmtText(p.value ?? '—') },
+    ]
+    const diagCol = {
+      header: '命中诊断',
+      get: (p) => {
+        const hits = Array.isArray(p.diag_hits) && p.diag_hits.length
+          ? p.diag_hits.join('；')
+          : (p.diag_hits || p.admission_source || '')
+        return fmtText(hits || '/')
+      },
+    }
+    return [
+      COL_PATIENT_ID,
+      COL_NAME,
+      ...(part === 'numerator' ? numCols : denCols),
+      diagCol,
+    ]
+  }
+
   // ---- ICU-12/13：气道/管道 ----
   if (AIRWAY_CODES.includes(code)) {
     return [
