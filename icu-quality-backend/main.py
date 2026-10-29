@@ -1218,7 +1218,7 @@ def query_detail(code: str, period: str, part: str, icu_unit: str = "all"):
                     "admission_source": "",
                     "value": p.get("prone_count", 0),
                     "exclusion_key": p.get("exclusion_key", "") or _ek_map.get(p.get("pid", ""), ""),
-                    "pid_ref": p.get("pid", ""),
+                    "pid_ref": str(p.get("pid", "") or ""),
                 })
             excl_map = _get_exclusion_map(dept_codes, period, code)
             for item in items:
@@ -1250,7 +1250,7 @@ def query_detail(code: str, period: str, part: str, icu_unit: str = "all"):
                     "admission_source": "",
                     "value": round(p.get('pf_ratio', 0), 1) if isinstance(p.get('pf_ratio'), (int, float)) else p.get('pf_ratio', 0),
                     "exclusion_key": p.get("exclusion_key", ""),
-                    "pid_ref": p.get("pid", ""),
+                    "pid_ref": str(p.get("pid", "") or ""),
                 })
             excl_map = _get_exclusion_map(dept_codes, period, code)
             for item in items:

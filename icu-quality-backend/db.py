@@ -1918,11 +1918,17 @@ def get_ards_prone_numerator(den_patients: list, dept_codes: list,
                 pid = p.get("pid", "")
                 if not pid:
                     continue
+                pid_s = str(pid)
+                try:
+                    from bson import ObjectId as _OID
+                    pid_oid = _OID(pid_s)
+                except Exception:
+                    continue
 
-                # 查住院区间
+                # 查住院区间（patient._id 为 ObjectId；bedside.pid 可能是 str 或 ObjectId）
                 try:
                     pat = db.patient.find_one(
-                        {"_id": ObjectId(pid)},
+                        {"_id": pid_oid},
                         {"icuAdmissionTime": 1, "icuDischargeTime": 1},
                     )
                 except Exception as _exc:
@@ -1945,7 +1951,7 @@ def get_ards_prone_numerator(den_patients: list, dept_codes: list,
                 # 查俯卧位记录
                 prone_records = list(db.bedside.find(
                     {
-                        "pid": pid,
+                        "pid": {"$in": [pid_s, pid_oid]},
                         "code": "param_TiWei",
                         "valid": True,
                         "strVal": {"$regex": "俯卧位"},
@@ -1957,7 +1963,7 @@ def get_ards_prone_numerator(den_patients: list, dept_codes: list,
                 if prone_records:
                     result["num_count"] += 1
                     result["num_patients"].append({
-                        "pid": pid,
+                        "pid": pid_s,
                         "mrn": p.get("mrn", ""),
                         "name": p.get("name", ""),
                         "prone_times": [r["time"] for r in prone_records[:10]],
@@ -2241,8 +2247,9 @@ def get_icu08_data(dept_codes: list, start_date: str, end_date: str,
                         elif delta_min <= 480:
                             peep_grade = "C"
 
+                # pid 必须是 str：ObjectId 进 FastAPI JSON 会 TypeError
                 den_patients.append({
-                    "pid": raw_pid,
+                    "pid": str(raw_pid),
                     "mrn": mrn,
                     "name": pat_name,
                     "pf_ratio": round(pf_avg, 1),   # 入科后24h P/F 均值
