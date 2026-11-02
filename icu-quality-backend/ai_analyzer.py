@@ -113,25 +113,18 @@ def build_prompt(period: str, abnormal: list, hints: list, all_good_count: int) 
 请输出报告："""
 
 
-# ---- LLM 调用（以 OpenAI 兼容接口为例，可换成你自己的模型）----
+# ---- LLM 调用（OpenAI 兼容网关；解析/思考模式/重试逻辑见 llm_client.py）----
 def call_llm(prompt: str) -> str:
-    import os
-    from openai import OpenAI  # pip install openai
+    import llm_client
 
-    client = OpenAI(
-        api_key=os.getenv("LLM_API_KEY"),
-        base_url=os.getenv("LLM_BASE_URL", "https://api.openai.com/v1"),
-    )
-    resp = client.chat.completions.create(
-        model=os.getenv("LLM_MODEL", "gpt-4o-mini"),
-        messages=[
+    return llm_client.chat(
+        [
             {"role": "system", "content": "你是严谨的医疗质控数据分析助手，绝不提供临床诊疗建议。"},
             {"role": "user", "content": prompt},
         ],
         temperature=0.3,  # 低温度，减少发挥
         max_tokens=400,
     )
-    return resp.choices[0].message.content.strip()
 
 
 def analyze(period: str, values: dict) -> dict:
@@ -147,6 +140,7 @@ def analyze(period: str, values: dict) -> dict:
         summary = call_llm(prompt)
     except Exception as e:
         # LLM 挂了也不能让看板崩，降级成规则文本
+        logging.getLogger("ai_analyzer").warning("AI 质控报告失败，使用规则兜底：%s", e)
         summary = _fallback_summary(abnormal, good_count)
 
     return {"summary": summary, "abnormal": abnormal, "hints": hints}
@@ -167,11 +161,15 @@ def _fallback_summary(abnormal: list, good_count: int) -> str:
 import json
 import hashlib
 import re
+import logging
+import os
 import threading
 from datetime import datetime as _dt
 
+_log = logging.getLogger("ai_analyzer")
+
 # AI 并发控制
-_AI_SEMAPHORE = threading.Semaphore(5)
+_AI_SEMAPHORE = threading.Semaphore(max(1, int(os.getenv("LLM_MAX_CONCURRENT", "5") or 5)))
 
 # AI 提示词模板 — 强制 JSON 输出
 ABX_PURPOSE_SYSTEM_PROMPT = """你是ICU临床药师，辅助判断住院患者使用抗菌药物的真实目的（治疗性 vs 预防性）。
@@ -229,9 +227,27 @@ def parse_llm_json(text: str) -> dict | None:
     容错 JSON 解析：剥 markdown 代码块、正则提取首个 {...}、归一中文标点。
     返回解析后的 dict，失败返回 None。
     """
+    if isinstance(text, dict):
+        return text
     if not text:
         return None
     text = text.strip()
+
+    # 0. 先按原文解析：中文引号/逗号常出现在 reason 文本里，先归一会把合法 JSON 弄坏
+    try:
+        obj = json.loads(re.sub(r"^```(?:json)?\s*|\s*```$", "", text))
+        if isinstance(obj, dict):
+            return obj
+    except ValueError:
+        pass
+    m0 = re.search(r"\{.*\}", text, re.DOTALL)
+    if m0:
+        try:
+            obj = json.loads(m0.group(0))
+            if isinstance(obj, dict):
+                return obj
+        except ValueError:
+            pass
 
     # 1. 剥除 ```json / ``` 代码块标记
     text = re.sub(r"```(?:json)?\s*", "", text)
@@ -255,30 +271,24 @@ def parse_llm_json(text: str) -> dict | None:
 AI_MAX_RETRY = 1
 
 
-def call_llm_json_with_system(system_prompt: str, prompt: str, max_tokens: int = 200) -> dict | None:
+def call_llm_json_with_system(system_prompt: str, prompt: str, max_tokens: int = 200,
+                              role: str = "fast") -> dict | None:
     """
-    调用 LLM 返回结构化 JSON。
-    复用现有 OpenAI client 配置，强制 JSON 输出。
-    返回解析后的 dict，失败返回 None。
+    调用 LLM 返回结构化 JSON（response_format=json_object，网关不支持时设 LLM_JSON_MODE=false）。
+    返回解析后的 dict，失败返回 None；网关/网络异常照常抛出，由调用方降级。
     """
-    import os
-    from openai import OpenAI
+    import llm_client
 
-    client = OpenAI(
-        api_key=os.getenv("LLM_API_KEY"),
-        base_url=os.getenv("LLM_BASE_URL", "https://api.openai.com/v1"),
-    )
-    resp = client.chat.completions.create(
-        model=os.getenv("LLM_MODEL", "gpt-4o-mini"),
-        messages=[
+    raw = llm_client.chat(
+        [
             {"role": "system", "content": system_prompt},
             {"role": "user", "content": prompt},
         ],
         temperature=0.1,       # 极低温度，保证判定一致
         max_tokens=max_tokens,
-        response_format={"type": "json_object"},  # 强制 JSON
+        json_mode=True,
+        role=role,
     )
-    raw = resp.choices[0].message.content.strip()
     return parse_llm_json(raw)
 
 
@@ -303,15 +313,20 @@ def ensure_ai_cache_collection():
         try:
             db = get_client(db_name)[db_name]
             coll = db[AI_CACHE_COLLECTION]
-            # 唯一索引: 同一患者同一任务只判一次
+            # 唯一索引: 同一患者同一任务同一实体(key)只判一次。
+            # 旧索引 (hisPid, task) 不含 key：同一患者第二次脓毒性休克事件写缓存/人工覆盖会撞唯一键，
+            # 被吞掉后还会落到下一个床位库。这里迁移为 (hisPid, task, key)。
             try:
+                info = coll.index_information().get("idx_hispid_task")
+                if info and [k for k, _ in info.get("key", [])] != ["hisPid", "task", "key"]:
+                    coll.drop_index("idx_hispid_task")
                 coll.create_index(
-                    [("hisPid", 1), ("task", 1)],
+                    [("hisPid", 1), ("task", 1), ("key", 1)],
                     unique=True, background=True,
                     name="idx_hispid_task",
                 )
-            except Exception:
-                pass
+            except Exception as e:
+                _log.warning("ai_decision_cache 索引创建失败(%s)：%s", db_name, e)
             # 辅助索引: 按时间查
             try:
                 coll.create_index(
@@ -476,12 +491,23 @@ def classify_sepsis_alert_with_ai(ctx: dict) -> dict | None:
                 "need_review": risk in {"high", "medium"},
             }
 
-        set_ai_cache(cache_key, cache_task, result, prompt)
+        if result.get("by") == "ai":  # 兜底结果不缓存，下次 AI 恢复后可重新判定
+            set_ai_cache(cache_key, cache_task, result, prompt)
         return result
-    except Exception:
+    except Exception as e:
+        _log.warning("AI 脓毒症预警失败(%s)：%s", hispid, e)
         return _fallback_sepsis_alert(ctx, "AI调用异常，需人工复核预警数据")
     finally:
         _AI_SEMAPHORE.release()
+
+
+def _abx_brief(ctx: dict) -> str:
+    """兜底理由里的疗程摘要；course_hours 可能是 None/字符串，不能直接 :.0f。"""
+    try:
+        hours = f"{float(ctx.get('course_hours')):.0f}"
+    except (TypeError, ValueError):
+        hours = "?"
+    return f"疗程{hours}h/{ctx.get('dose_count', '?')}次/{str(ctx.get('antibiotics') or '')[:30]}"
 
 
 def classify_abx_with_ai(ctx: dict) -> dict | None:
@@ -536,14 +562,11 @@ def classify_abx_with_ai(ctx: dict) -> dict | None:
             llm_result = call_llm_json(retry_prompt)
 
         # Step 4: 判定结果
-        course_hours = ctx.get("course_hours", 0)
-        dose_count = ctx.get("dose_count", 0)
-        antibiotics = ctx.get("antibiotics", "")
 
         if not llm_result:
             result = {
                 "purpose": "未判定", "confidence": 0.0,
-                "reason": f"AI解析失败兜底(疗程{course_hours:.0f}h/{dose_count}次/{antibiotics[:30]})",
+                "reason": f"AI解析失败兜底({_abx_brief(ctx)})",
                 "by": "fallback", "evaluated": False, "need_review": True,
             }
         else:
@@ -569,17 +592,16 @@ def classify_abx_with_ai(ctx: dict) -> dict | None:
                 "need_review": conf < 0.6,
             }
 
-        # Step 5: 写缓存
-        set_ai_cache(hispid, "abx_purpose", result, prompt)
+        # Step 5: 写缓存（兜底结果不缓存，下次 AI 恢复后可重新判定）
+        if result.get("by") == "ai":
+            set_ai_cache(hispid, "abx_purpose", result, prompt)
 
         return result
 
-    except Exception:
-        course_hours = ctx.get("course_hours", 0)
-        dose_count = ctx.get("dose_count", 0)
-        antibiotics = ctx.get("antibiotics", "")
+    except Exception as e:
+        _log.warning("AI 抗菌药目的判定失败(%s)：%s", hispid, e)
         return {"purpose": "未判定", "confidence": 0.0,
-                "reason": f"AI调用异常兜底(疗程{course_hours:.0f}h/{dose_count}次/{antibiotics[:30]})",
+                "reason": f"AI调用异常兜底({_abx_brief(ctx)})",
                 "by": "fallback", "evaluated": False, "need_review": True}
     finally:
         _AI_SEMAPHORE.release()
@@ -1358,13 +1380,18 @@ def classify_septic_shock_with_ai(disease_id, his_pid, data):
             raw = call_llm_json_with_system(
                 SEPTIC_SHOCK_CONFIRM_SYSTEM_PROMPT,
                 _build_septic_shock_prompt(data),
-                max_tokens=1200)
-        res = _normalize_septic_shock_result(parse_llm_json(raw), data)
+                max_tokens=1200,
+                role="reasoning")  # 多指标综合判定 + T0 + SOFA 明细，开启思考
+        # call_llm_json_with_system 已返回 dict；旧代码再 parse 一次会因 dict 无 strip 抛错而永远走兜底
+        res = _normalize_septic_shock_result(raw if isinstance(raw, dict) else parse_llm_json(raw), data)
     except Exception as e:
+        _log.warning("AI 脓毒性休克确认失败(%s/%s)：%s", his_pid, disease_id, e)
         res = _fallback_septic_shock(data)
         res["error"] = str(e)
+        return res  # 兜底不缓存，下次 AI 恢复后可重新判定
 
-    set_ai_cache(his_pid, "septic_shock_confirm", res, "ai", key=disease_id)
+    if res.get("source") != "fallback":
+        set_ai_cache(his_pid, "septic_shock_confirm", res, "ai", key=disease_id)
     return res
 
 

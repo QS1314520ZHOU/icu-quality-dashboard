@@ -22,6 +22,8 @@ from fastapi.staticfiles import StaticFiles
 from starlette.responses import FileResponse, JSONResponse
 from starlette.requests import Request
 
+import llm_client
+
 logger = logging.getLogger("main")
 
 app = FastAPI(title="ICU质控指标API")
@@ -171,6 +173,8 @@ def on_startup():
         logger.info("[startup] Available bed DBs: %s", available_dbs)
     except RuntimeError as e:
         logger.warning("[startup] %s", e)
+    # 打印生效的 AI 配置（不含密钥），便于确认新包、配置已读到
+    logger.info("[startup] %s", llm_client.describe_config())
     summary_module.ensure_summary_collection()
     ensure_detail_cache_collection()
     ensure_exclusion_collection()

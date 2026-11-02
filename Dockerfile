@@ -63,7 +63,7 @@ RUN python3 -m PyInstaller \
     --hidden-import uvicorn.lifespan.off \
     --collect-submodules pymongo \
     --collect-submodules bson \
-    --collect-all openai \
+    --hidden-import llm_client \
     --collect-submodules pydantic \
     --collect-submodules config \
     --collect-submodules scoring \
