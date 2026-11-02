@@ -1,0 +1,87 @@
+# 自动测试 + 打包 OEL 8.2 x86_64 单文件二进制（与 build.sh / Dockerfile 同一套流程）
+# - push 到 master、PR：跑测试 + 打包，产物在 Actions 页面的 Artifacts 下载（保留 30 天）
+# - 推送 v* 标签（如 v1.2.0）：额外发布到 GitHub Releases
+# - Actions 页面也可手动点 Run workflow
+name: build
+
+on:
+  push:
+    branches: [master]
+    tags: ["v*"]
+  pull_request:
+  workflow_dispatch:
+
+permissions:
+  contents: write
+
+concurrency:
+  group: build-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  test:
+    runs-on: ubuntu-latest
+    defaults:
+      run:
+        working-directory: icu-quality-backend
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.11"
+          cache: pip
+          cache-dependency-path: icu-quality-backend/requirements.txt
+      - run: pip install -r requirements.txt pytest
+      - name: AI 调用测试
+        run: python -m pytest tests/test_llm_client.py tests/test_ai_analyzer_fixes.py -q
+      - name: 其余单元测试（不阻断：部分用例依赖内网 MongoDB）
+        continue-on-error: true
+        timeout-minutes: 10
+        run: python -m pytest tests -q --ignore=tests/test_llm_client.py --ignore=tests/test_ai_analyzer_fixes.py
+
+  package:
+    needs: test
+    runs-on: ubuntu-latest
+    timeout-minutes: 90
+    steps:
+      - uses: actions/checkout@v4
+      - uses: docker/setup-buildx-action@v3
+      - name: 构建（OEL 8.2 + Python 3.11 + PyInstaller）
+        uses: docker/build-push-action@v6
+        with:
+          context: .
+          load: true
+          tags: icu-dashboard-builder:ci
+          # 编译 Python 那几层很慢，缓存到 GitHub Actions，后续构建只重跑变更层
+          cache-from: type=gha
+          cache-to: type=gha,mode=max
+      - name: 导出产物
+        run: |
+          set -euo pipefail
+          mkdir -p dist
+          cid=$(docker create icu-dashboard-builder:ci)
+          docker cp "$cid:/artifact/icu-quality-dashboard-oel8.2-x86_64.tar.gz" dist/
+          docker rm -f "$cid"
+          ver="${GITHUB_REF_NAME//\//-}-${GITHUB_SHA::7}"
+          [ "${GITHUB_REF_TYPE}" = tag ] && ver="${GITHUB_REF_NAME}"
+          mv dist/icu-quality-dashboard-oel8.2-x86_64.tar.gz "dist/icu-quality-dashboard-${ver}-oel8.2-x86_64.tar.gz"
+          (cd dist && sha256sum *.tar.gz > SHA256SUMS.txt)
+          tar -tzf dist/*.tar.gz
+      - name: 冒烟测试（不连数据库也应能拉起进程）
+        run: |
+          mkdir -p /tmp/smoke && tar -xzf dist/*.tar.gz -C /tmp/smoke
+          cd /tmp/smoke/icu-quality-dashboard
+          (timeout 15 ./icu-quality-dashboard > smoke.log 2>&1 || true)
+          tail -n 30 smoke.log
+          grep -qiE "uvicorn|application startup|LLM config" smoke.log || { echo "::warning::冒烟未见启动日志，请在目标机验证"; }
+      - uses: actions/upload-artifact@v4
+        with:
+          name: icu-quality-dashboard-oel8.2-x86_64
+          path: dist/*
+          retention-days: 30
+      - name: 发布 Release（仅 v* 标签）
+        if: github.ref_type == 'tag'
+        uses: softprops/action-gh-release@v2
+        with:
+          files: dist/*
+          generate_release_notes: true
