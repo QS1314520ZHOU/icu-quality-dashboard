@@ -66,6 +66,10 @@ def config() -> dict:
         "api_key": _env("LLM_API_KEY"),
         "model": _env("LLM_MODEL", "gpt-4o-mini"),
         "thinking": _env("LLM_THINKING", "off").lower(),
+        # 推理类任务（脓毒性休克确认）单独设置：思考更准但更慢，需要更多 token 和更长超时
+        "thinking_reasoning": _env("LLM_THINKING_REASONING", "on").lower(),
+        "reasoning_max_tokens": _env_int("LLM_REASONING_MAX_TOKENS", 4000),
+        "reasoning_timeout": _env_int("LLM_REASONING_TIMEOUT_S", 120),
         "min_max_tokens": _env_int("LLM_MAX_TOKENS", 0),
         "timeout": _env_int("LLM_TIMEOUT_S", 60),
         "json_mode": _env_bool("LLM_JSON_MODE", True),
@@ -87,7 +91,7 @@ def thinking_flag(value: str | None):
 def describe_config() -> str:
     c = config()
     return (f"LLM config: base={c['base_url']} path={c['chat_path']} model={c['model']} "
-            f"thinking={c['thinking']} json_mode={c['json_mode']} timeout={c['timeout']}s "
+            f"thinking(fast={c['thinking']}, reasoning={c['thinking_reasoning']}) json_mode={c['json_mode']} timeout={c['timeout']}s "
             f"key={'已配置' if c['api_key'] else '未配置'}")
 
 
@@ -280,19 +284,25 @@ def _post(c: dict, body: dict, timeout: float) -> dict:
 # ------------------------------------------------------------------ 对外
 def chat(messages: list, *, max_tokens: int = 400, temperature: float = 0.2,
          json_mode: bool = False, thinking: str | None = None, model: str | None = None,
-         timeout: float | None = None) -> str:
+         timeout: float | None = None, role: str = "fast") -> str:
     """发起一次对话，返回正文（已去掉 <think>）。失败抛 LlmError。
 
-    thinking: on / off / default；不传则用 LLM_THINKING（默认 off）。
+    role: fast（默认，用 LLM_THINKING）/ reasoning（用 LLM_THINKING_REASONING，
+          并把 max_tokens、超时提高到 LLM_REASONING_MAX_TOKENS / LLM_REASONING_TIMEOUT_S）。
+    thinking: on / off / default；显式传入时覆盖 role 的配置。
     """
     c = config()
     model = model or c["model"]
     if not model:
         raise LlmError("config", "未配置 LLM_MODEL")
-    flag = thinking_flag(c["thinking"] if thinking is None else thinking)
+    reasoning = role == "reasoning"
+    default_thinking = c["thinking_reasoning"] if reasoning else c["thinking"]
+    flag = thinking_flag(default_thinking if thinking is None else thinking)
     tokens = max(1, int(max_tokens), c["min_max_tokens"])
+    if reasoning and flag is not False:
+        tokens = max(tokens, c["reasoning_max_tokens"])
     json_mode = json_mode and c["json_mode"]
-    timeout = float(timeout or c["timeout"])
+    timeout = float(timeout or (max(c["timeout"], c["reasoning_timeout"]) if reasoning else c["timeout"]))
 
     def send(flag_, send_kwargs=True):
         body = {"model": model, "messages": messages, "temperature": temperature,

@@ -248,7 +248,8 @@ def parse_llm_json(text: str) -> dict | None:
 AI_MAX_RETRY = 1
 
 
-def call_llm_json_with_system(system_prompt: str, prompt: str, max_tokens: int = 200) -> dict | None:
+def call_llm_json_with_system(system_prompt: str, prompt: str, max_tokens: int = 200,
+                              role: str = "fast") -> dict | None:
     """
     调用 LLM 返回结构化 JSON（response_format=json_object，网关不支持时设 LLM_JSON_MODE=false）。
     返回解析后的 dict，失败返回 None；网关/网络异常照常抛出，由调用方降级。
@@ -263,6 +264,7 @@ def call_llm_json_with_system(system_prompt: str, prompt: str, max_tokens: int =
         temperature=0.1,       # 极低温度，保证判定一致
         max_tokens=max_tokens,
         json_mode=True,
+        role=role,
     )
     return parse_llm_json(raw)
 
@@ -1343,8 +1345,10 @@ def classify_septic_shock_with_ai(disease_id, his_pid, data):
             raw = call_llm_json_with_system(
                 SEPTIC_SHOCK_CONFIRM_SYSTEM_PROMPT,
                 _build_septic_shock_prompt(data),
-                max_tokens=1200)
-        res = _normalize_septic_shock_result(parse_llm_json(raw), data)
+                max_tokens=1200,
+                role="reasoning")  # 多指标综合判定 + T0 + SOFA 明细，开启思考
+        # call_llm_json_with_system 已返回 dict；旧代码再 parse 一次会因 dict 无 strip 抛错而永远走兜底
+        res = _normalize_septic_shock_result(raw if isinstance(raw, dict) else parse_llm_json(raw), data)
     except Exception as e:
         res = _fallback_septic_shock(data)
         res["error"] = str(e)

@@ -150,3 +150,20 @@ def test_unreachable():
         assert e.value.kind == "unreachable"
     finally:
         del os.environ["LLM_BASE_URL"]
+
+
+def test_reasoning_role_thinking_on_and_more_tokens(gateway):
+    gateway.mode = "ok"
+    lc.chat([{"role": "user", "content": "x"}], max_tokens=1200, role="reasoning")
+    b = gateway.bodies[0]["body"]
+    assert b["chat_template_kwargs"] == {"enable_thinking": True}
+    assert b["max_tokens"] == 4000
+
+
+def test_reasoning_role_can_be_turned_off(gateway, monkeypatch):
+    monkeypatch.setenv("LLM_THINKING_REASONING", "off")
+    gateway.mode = "ok"
+    lc.chat([{"role": "user", "content": "x"}], max_tokens=1200, role="reasoning")
+    b = gateway.bodies[0]["body"]
+    assert b["chat_template_kwargs"] == {"enable_thinking": False}
+    assert b["max_tokens"] == 1200
