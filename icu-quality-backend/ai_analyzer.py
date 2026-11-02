@@ -140,6 +140,7 @@ def analyze(period: str, values: dict) -> dict:
         summary = call_llm(prompt)
     except Exception as e:
         # LLM 挂了也不能让看板崩，降级成规则文本
+        logging.getLogger("ai_analyzer").warning("AI 质控报告失败，使用规则兜底：%s", e)
         summary = _fallback_summary(abnormal, good_count)
 
     return {"summary": summary, "abnormal": abnormal, "hints": hints}
@@ -160,11 +161,15 @@ def _fallback_summary(abnormal: list, good_count: int) -> str:
 import json
 import hashlib
 import re
+import logging
+import os
 import threading
 from datetime import datetime as _dt
 
+_log = logging.getLogger("ai_analyzer")
+
 # AI 并发控制
-_AI_SEMAPHORE = threading.Semaphore(5)
+_AI_SEMAPHORE = threading.Semaphore(max(1, int(os.getenv("LLM_MAX_CONCURRENT", "5") or 5)))
 
 # AI 提示词模板 — 强制 JSON 输出
 ABX_PURPOSE_SYSTEM_PROMPT = """你是ICU临床药师，辅助判断住院患者使用抗菌药物的真实目的（治疗性 vs 预防性）。
@@ -222,9 +227,27 @@ def parse_llm_json(text: str) -> dict | None:
     容错 JSON 解析：剥 markdown 代码块、正则提取首个 {...}、归一中文标点。
     返回解析后的 dict，失败返回 None。
     """
+    if isinstance(text, dict):
+        return text
     if not text:
         return None
     text = text.strip()
+
+    # 0. 先按原文解析：中文引号/逗号常出现在 reason 文本里，先归一会把合法 JSON 弄坏
+    try:
+        obj = json.loads(re.sub(r"^```(?:json)?\s*|\s*```$", "", text))
+        if isinstance(obj, dict):
+            return obj
+    except ValueError:
+        pass
+    m0 = re.search(r"\{.*\}", text, re.DOTALL)
+    if m0:
+        try:
+            obj = json.loads(m0.group(0))
+            if isinstance(obj, dict):
+                return obj
+        except ValueError:
+            pass
 
     # 1. 剥除 ```json / ``` 代码块标记
     text = re.sub(r"```(?:json)?\s*", "", text)
@@ -290,15 +313,20 @@ def ensure_ai_cache_collection():
         try:
             db = get_client(db_name)[db_name]
             coll = db[AI_CACHE_COLLECTION]
-            # 唯一索引: 同一患者同一任务只判一次
+            # 唯一索引: 同一患者同一任务同一实体(key)只判一次。
+            # 旧索引 (hisPid, task) 不含 key：同一患者第二次脓毒性休克事件写缓存/人工覆盖会撞唯一键，
+            # 被吞掉后还会落到下一个床位库。这里迁移为 (hisPid, task, key)。
             try:
+                info = coll.index_information().get("idx_hispid_task")
+                if info and [k for k, _ in info.get("key", [])] != ["hisPid", "task", "key"]:
+                    coll.drop_index("idx_hispid_task")
                 coll.create_index(
-                    [("hisPid", 1), ("task", 1)],
+                    [("hisPid", 1), ("task", 1), ("key", 1)],
                     unique=True, background=True,
                     name="idx_hispid_task",
                 )
-            except Exception:
-                pass
+            except Exception as e:
+                _log.warning("ai_decision_cache 索引创建失败(%s)：%s", db_name, e)
             # 辅助索引: 按时间查
             try:
                 coll.create_index(
@@ -463,12 +491,23 @@ def classify_sepsis_alert_with_ai(ctx: dict) -> dict | None:
                 "need_review": risk in {"high", "medium"},
             }
 
-        set_ai_cache(cache_key, cache_task, result, prompt)
+        if result.get("by") == "ai":  # 兜底结果不缓存，下次 AI 恢复后可重新判定
+            set_ai_cache(cache_key, cache_task, result, prompt)
         return result
-    except Exception:
+    except Exception as e:
+        _log.warning("AI 脓毒症预警失败(%s)：%s", hispid, e)
         return _fallback_sepsis_alert(ctx, "AI调用异常，需人工复核预警数据")
     finally:
         _AI_SEMAPHORE.release()
+
+
+def _abx_brief(ctx: dict) -> str:
+    """兜底理由里的疗程摘要；course_hours 可能是 None/字符串，不能直接 :.0f。"""
+    try:
+        hours = f"{float(ctx.get('course_hours')):.0f}"
+    except (TypeError, ValueError):
+        hours = "?"
+    return f"疗程{hours}h/{ctx.get('dose_count', '?')}次/{str(ctx.get('antibiotics') or '')[:30]}"
 
 
 def classify_abx_with_ai(ctx: dict) -> dict | None:
@@ -523,14 +562,11 @@ def classify_abx_with_ai(ctx: dict) -> dict | None:
             llm_result = call_llm_json(retry_prompt)
 
         # Step 4: 判定结果
-        course_hours = ctx.get("course_hours", 0)
-        dose_count = ctx.get("dose_count", 0)
-        antibiotics = ctx.get("antibiotics", "")
 
         if not llm_result:
             result = {
                 "purpose": "未判定", "confidence": 0.0,
-                "reason": f"AI解析失败兜底(疗程{course_hours:.0f}h/{dose_count}次/{antibiotics[:30]})",
+                "reason": f"AI解析失败兜底({_abx_brief(ctx)})",
                 "by": "fallback", "evaluated": False, "need_review": True,
             }
         else:
@@ -556,17 +592,16 @@ def classify_abx_with_ai(ctx: dict) -> dict | None:
                 "need_review": conf < 0.6,
             }
 
-        # Step 5: 写缓存
-        set_ai_cache(hispid, "abx_purpose", result, prompt)
+        # Step 5: 写缓存（兜底结果不缓存，下次 AI 恢复后可重新判定）
+        if result.get("by") == "ai":
+            set_ai_cache(hispid, "abx_purpose", result, prompt)
 
         return result
 
-    except Exception:
-        course_hours = ctx.get("course_hours", 0)
-        dose_count = ctx.get("dose_count", 0)
-        antibiotics = ctx.get("antibiotics", "")
+    except Exception as e:
+        _log.warning("AI 抗菌药目的判定失败(%s)：%s", hispid, e)
         return {"purpose": "未判定", "confidence": 0.0,
-                "reason": f"AI调用异常兜底(疗程{course_hours:.0f}h/{dose_count}次/{antibiotics[:30]})",
+                "reason": f"AI调用异常兜底({_abx_brief(ctx)})",
                 "by": "fallback", "evaluated": False, "need_review": True}
     finally:
         _AI_SEMAPHORE.release()
@@ -1350,10 +1385,13 @@ def classify_septic_shock_with_ai(disease_id, his_pid, data):
         # call_llm_json_with_system 已返回 dict；旧代码再 parse 一次会因 dict 无 strip 抛错而永远走兜底
         res = _normalize_septic_shock_result(raw if isinstance(raw, dict) else parse_llm_json(raw), data)
     except Exception as e:
+        _log.warning("AI 脓毒性休克确认失败(%s/%s)：%s", his_pid, disease_id, e)
         res = _fallback_septic_shock(data)
         res["error"] = str(e)
+        return res  # 兜底不缓存，下次 AI 恢复后可重新判定
 
-    set_ai_cache(his_pid, "septic_shock_confirm", res, "ai", key=disease_id)
+    if res.get("source") != "fallback":
+        set_ai_cache(his_pid, "septic_shock_confirm", res, "ai", key=disease_id)
     return res
 
 
