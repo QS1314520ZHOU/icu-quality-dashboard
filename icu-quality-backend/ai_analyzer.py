@@ -113,25 +113,18 @@ def build_prompt(period: str, abnormal: list, hints: list, all_good_count: int) 
 请输出报告："""
 
 
-# ---- LLM 调用（以 OpenAI 兼容接口为例，可换成你自己的模型）----
+# ---- LLM 调用（OpenAI 兼容网关；解析/思考模式/重试逻辑见 llm_client.py）----
 def call_llm(prompt: str) -> str:
-    import os
-    from openai import OpenAI  # pip install openai
+    import llm_client
 
-    client = OpenAI(
-        api_key=os.getenv("LLM_API_KEY"),
-        base_url=os.getenv("LLM_BASE_URL", "https://api.openai.com/v1"),
-    )
-    resp = client.chat.completions.create(
-        model=os.getenv("LLM_MODEL", "gpt-4o-mini"),
-        messages=[
+    return llm_client.chat(
+        [
             {"role": "system", "content": "你是严谨的医疗质控数据分析助手，绝不提供临床诊疗建议。"},
             {"role": "user", "content": prompt},
         ],
         temperature=0.3,  # 低温度，减少发挥
         max_tokens=400,
     )
-    return resp.choices[0].message.content.strip()
 
 
 def analyze(period: str, values: dict) -> dict:
@@ -257,28 +250,20 @@ AI_MAX_RETRY = 1
 
 def call_llm_json_with_system(system_prompt: str, prompt: str, max_tokens: int = 200) -> dict | None:
     """
-    调用 LLM 返回结构化 JSON。
-    复用现有 OpenAI client 配置，强制 JSON 输出。
-    返回解析后的 dict，失败返回 None。
+    调用 LLM 返回结构化 JSON（response_format=json_object，网关不支持时设 LLM_JSON_MODE=false）。
+    返回解析后的 dict，失败返回 None；网关/网络异常照常抛出，由调用方降级。
     """
-    import os
-    from openai import OpenAI
+    import llm_client
 
-    client = OpenAI(
-        api_key=os.getenv("LLM_API_KEY"),
-        base_url=os.getenv("LLM_BASE_URL", "https://api.openai.com/v1"),
-    )
-    resp = client.chat.completions.create(
-        model=os.getenv("LLM_MODEL", "gpt-4o-mini"),
-        messages=[
+    raw = llm_client.chat(
+        [
             {"role": "system", "content": system_prompt},
             {"role": "user", "content": prompt},
         ],
         temperature=0.1,       # 极低温度，保证判定一致
         max_tokens=max_tokens,
-        response_format={"type": "json_object"},  # 强制 JSON
+        json_mode=True,
     )
-    raw = resp.choices[0].message.content.strip()
     return parse_llm_json(raw)
 
 
