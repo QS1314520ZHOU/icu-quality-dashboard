@@ -1784,7 +1784,7 @@ def get_ards_denominator(dept_codes: list, start_date: str, end_date: str,
                             "eventExe.pid": 1, "mrn": 1, "deptCode": 1,
                             "eventExe.startTime": 1, "bedsides": 1,
                         },
-                    ).sort("eventExe.startTime", 1))
+                    ))  # 不在 Mongo 端排序：整月全科室血气带 bedsides 数组会超 100MB 排序内存上限(code 292)
                     all_bga.extend(bgas)
                 except Exception as _exc:
                     logger.warning("DB %s failed in get_ards_denominator: %s", db_name, _exc)
@@ -1792,6 +1792,8 @@ def get_ards_denominator(dept_codes: list, start_date: str, end_date: str,
 
             if not all_bga:
                 continue
+            # 原先由 Mongo 排序；改为内存排序，结果顺序不变
+            all_bga.sort(key=lambda b: (b.get("eventExe") or {}).get("startTime") or dt.min)
 
             # Step 2: 逐条血气尝试配对（同 pid 取首次满足条件的配对）
             for bga in all_bga:
@@ -2144,7 +2146,7 @@ def get_icu08_data(dept_codes: list, start_date: str, end_date: str,
                             },
                         },
                         {"eventExe.pid": 1, "eventExe.startTime": 1, "bedsides": 1, "mrn": 1},
-                    ).sort("eventExe.startTime", 1)
+                    )  # 不在 Mongo 端排序：整月全科室血气带 bedsides 数组会超 100MB 排序内存上限(code 292)
                     for bga in bgas:
                         pid = bga.get("eventExe", {}).get("pid")
                         t = bga.get("eventExe", {}).get("startTime")
@@ -2162,6 +2164,9 @@ def get_icu08_data(dept_codes: list, start_date: str, end_date: str,
             if not pf_by_pid:
                 # 该库无血气 → 尝试下一个库
                 continue
+            # 两张血气表合并后按时间排序（in_win[0] 取窗口内首条时间）
+            for _samples in pf_by_pid.values():
+                _samples.sort(key=lambda x: x[0])
 
             # Step 2: 按次在科切 24h 窗口，算均值 + 三臂
             for pid_key, stay_list in pid_to_stays.items():
