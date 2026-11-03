@@ -1762,9 +1762,9 @@ def get_ards_denominator(dept_codes: list, start_date: str, end_date: str,
     for db_name, db in iter_bed_dbs():
         try:
 
-            # Step 1: 取统计期内的血气 P/F ratio (bGATemp + bGATemp1)
+            # Step 1: 取统计期内的血气 P/F ratio（只取 bGATemp）
             all_bga = []
-            for coll_name in ["bGATemp", "bGATemp1"]:
+            for coll_name in ["bGATemp"]:  # 只取 bGATemp，不查 bGATemp1
                 try:
                     bgas = list(db[coll_name].find(
                         {
@@ -2132,7 +2132,7 @@ def get_icu08_data(dept_codes: list, start_date: str, end_date: str,
         try:
             # Step 1: 按科室+时间拉血气（与旧查询同路径），再按队列 pid 过滤
             pf_by_pid = defaultdict(list)  # str(pid) -> [(time, value), ...]
-            for coll_name in ["bGATemp", "bGATemp1"]:
+            for coll_name in ["bGATemp"]:  # 只取 bGATemp，不查 bGATemp1
                 try:
                     bgas = db[coll_name].find(
                         {
@@ -2164,7 +2164,7 @@ def get_icu08_data(dept_codes: list, start_date: str, end_date: str,
             if not pf_by_pid:
                 # 该库无血气 → 尝试下一个库
                 continue
-            # 两张血气表合并后按时间排序（in_win[0] 取窗口内首条时间）
+            # 按时间排序（in_win[0] 取窗口内首条时间）
             for _samples in pf_by_pid.values():
                 _samples.sort(key=lambda x: x[0])
 
