@@ -624,6 +624,7 @@ NO_DATA_INDICATORS = set()
 # ============================================================
 
 SUMMARY_COLLECTION = "icu_monthly_summary"
+ICU11_CALC_VERSION = 2
 
 SUMMARY_INDEXES = [
     ({"dept_code": 1, "period": 1, "indicator": 1}, True),   # 唯一索引
@@ -755,6 +756,8 @@ def rebuild_summary(dept_codes: list, periods: list, indicators: list = None,
             "data_available": data_available,
             "override_count": override_count,
         }
+        if indicator == "ICU-11":
+            doc["calc_version"] = ICU11_CALC_VERSION
         if census_data:
             doc["census"] = census_data
         if raw_num is not None:
@@ -862,7 +865,7 @@ def find_missing_periods(dept_codes: list, periods: list) -> list:
             # 获取所有已存在记录的 (period, indicator) 组合
             existing_docs = list(coll.find(
                 {"dept_code": dept_key, "period": {"$in": periods}},
-                {"period": 1, "indicator": 1, "_id": 0},
+                {"period": 1, "indicator": 1, "calc_version": 1, "_id": 0},
             ))
 
             # 按 period 分组，记录每个 period 有哪些 indicator
@@ -873,6 +876,8 @@ def find_missing_periods(dept_codes: list, periods: list) -> list:
                 ind = doc.get("indicator")
                 if p not in existing_indicators:
                     existing_indicators[p] = set()
+                if ind == "ICU-11" and doc.get("calc_version") != ICU11_CALC_VERSION:
+                    continue
                 if ind:
                     existing_indicators[p].add(ind)
                 else:
@@ -980,6 +985,10 @@ def read_summary(dept_codes: list, periods: list, indicators: list = None) -> li
                 query["indicator"] = {"$in": [i for i in indicators if i not in NO_DATA_INDICATORS]}
             else:
                 query["indicator"] = {"$nin": list(NO_DATA_INDICATORS)}
+            query["$or"] = [
+                {"indicator": {"$ne": "ICU-11"}},
+                {"calc_version": ICU11_CALC_VERSION},
+            ]
             return list(coll.find(query, {"_id": 0}).sort([("indicator", 1), ("period", 1)]))
         except Exception: continue
     return []

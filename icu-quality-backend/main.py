@@ -245,7 +245,7 @@ def _cache_clear():
 
 DETAIL_CACHE_COLLECTION = "icu_indicator_detail_cache"
 # 缓存版本号：修改口径时 +1，旧条目自然失效
-CACHE_VERSION = 16  # v11: ICU-07 口径修复(分母队列反查pid/剔假匹配/气压治疗)
+CACHE_VERSION = 17  # ICU-11 统计队列修复
                     # v12: ICU-07 明细统一住院号=mrn + detail_id=在科记录_id(分子分母可逐行对账)
                     # v13: ICU-04/07/09/10 统一**人数口径**(按 mrn 去重，
                     #      与 INDICATORS_CONFIG「患者数」定义一致；明细一人一行)
@@ -2794,6 +2794,19 @@ def indicator_list(period: str, icu_unit: str = "all", end_period: str = "", noc
                     except Exception as e:
                         logger.warning("ICU-05-%s realtime failed for %s: %s", hour, mon, e)
 
+        if month_labels:
+            from calendar import monthrange
+            end_day = monthrange(int(end_y), int(end_m))[1]
+            icu11 = get_icu11_data(
+                dept_codes, f"{period}-01", f"{end_period}-{end_day:02d}",
+            )
+            icu11_row = agg.setdefault("ICU-11", {
+                "unit": UNIT_MAP["ICU-11"],
+                "name": NAME_MAP["ICU-11"],
+                "monthly": {},
+            })
+            icu11_row.update(num=icu11["num_count"], den=icu11["den_count"])
+
         result = []
         for code in UNIT_MAP:
             if code not in agg:
@@ -3161,8 +3174,8 @@ def indicator_detail(code: str, period: str, part: str, icu_unit: str = "all", e
         source_desc = "分子：床旁评估记录或量表评分记录中完成镇静评分（RASS等）的患者，明细展示评分中文名、分值和时间" if part == "numerator" \
             else "分母：同期入住ICU的患者总人数（人数口径 —— 按住院号去重，同一患者当月多次入科只算一人）"
     elif code == "ICU-11":
-        source_desc = "分子：已结案完整病例中在院死亡或非医嘱离院的患者数" if part == "numerator" \
-            else "分母：死亡、出院、非医嘱离院且有入科24小时内首次APACHEⅡ评分病例的预计死亡率之和"
+        source_desc = "分子：同期在科患者中，当期死亡或非医嘱离院的人次" if part == "numerator" \
+            else "分母：同期在科患者中可用的入科24小时内首次APACHEⅡ预计死亡概率之和"
     elif code == "ICU-12":
         source_desc = "分子：气管插管/气插管/气切套管拔管记录中 unPlannedEndTube 为 true 的非计划拔管，已排除换管" if part == "numerator" \
             else "分母：统计期内气管插管/气插管/气切套管拔管记录，已排除 replace=true 换管"

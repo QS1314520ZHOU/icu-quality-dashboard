@@ -4959,21 +4959,22 @@ def get_icu11_data(dept_codes: list, start_date: str, end_date: str) -> dict:
     """
     ICU-11：ICU患者标化病死指数(SMR)。
 
-    分母人群 = 同期出科且 dischargedType 为“死亡/出院/非医嘱离院”，并有入科
-    24h 内首次 APACHE II 评分的完整病例。
-    分母数值 = 每例首次 APACHE II apacheII.calDead.score 之和。
-    分子 = 同一人群中 dischargedType 为“死亡/非医嘱离院”的人数。
-
-    返回 {den_count, num_count, value, den_patients, num_patients}
+    统计期内在科人次包含期初在科和当期新收治。预计死亡数为该队列
+    中可用的首个入科 24 小时内 APACHEⅡ 预计死亡概率之和。
+    实际死亡数为同一队列中当期以死亡或非医嘱离院出科的人次。
+    单独返回收治人次及缺少预计死亡概率的人次。
     """
     from datetime import datetime as dt, timedelta
+    from math import isfinite
 
     start_dt = dt.fromisoformat(start_date)
     end_dt = dt.fromisoformat(end_date)
-    end_dt_wide = dt(end_dt.year, end_dt.month, end_dt.day, 23, 59, 59)
+    end_exclusive = dt(end_dt.year, end_dt.month, end_dt.day) + timedelta(days=1)
 
     result = {
         "den_count": 0.0,
+        "cohort_count": 0,
+        "missing_score_count": 0,
         "num_count": 0,
         "value": 0.0,
         "den_patients": [],
@@ -4981,7 +4982,7 @@ def get_icu11_data(dept_codes: list, start_date: str, end_date: str) -> dict:
     }
 
     death_types = {"死亡", "非医嘱离院"}
-    closed_types = {"出院", *death_types}
+    expected_deaths = 0.0
 
     for db_name, db in iter_bed_dbs():
         try:
@@ -4990,8 +4991,11 @@ def get_icu11_data(dept_codes: list, start_date: str, end_date: str) -> dict:
                 {
                     "deptCode": {"$in": dept_codes},
                     "status": {"$ne": "invalid"},
-                    "icuDischargeTime": {"$gte": start_dt, "$lte": end_dt_wide},
-                    "dischargedType": {"$in": list(closed_types)},
+                    "icuAdmissionTime": {"$type": "date", "$lt": end_exclusive},
+                    "$or": [
+                        {"icuDischargeTime": {"$gte": start_dt}},
+                        {"icuDischargeTime": None},
+                    ],
                 },
                 {
                     "_id": 1, "hisPid": 1, "mrn": 1, "name": 1,
@@ -5034,7 +5038,7 @@ def get_icu11_data(dept_codes: list, start_date: str, end_date: str) -> dict:
                     continue
                 cal_dead = (((doc.get("apacheII") or {}).get("calDead") or {}).get("score"))
                 cal_dead = _as_float_or_none(cal_dead)
-                if cal_dead is None or cal_dead < 0 or cal_dead > 1:
+                if cal_dead is None or not isfinite(cal_dead) or not 0 <= cal_dead <= 1:
                     continue
                 first_score_by_pid[spid] = {
                     "time": score_time,
@@ -5042,17 +5046,20 @@ def get_icu11_data(dept_codes: list, start_date: str, end_date: str) -> dict:
                     "cal_dead": cal_dead,
                 }
 
-            den_patients = []
-            num_patients = []
-            expected_deaths = 0.0
-            actual_deaths = 0
+            result["cohort_count"] += len(patients)
+            result["missing_score_count"] += len(patients) - len(first_score_by_pid)
 
-            for spid, score in first_score_by_pid.items():
-                pat = pat_by_pid[spid]
+            for spid, pat in pat_by_pid.items():
+                score = first_score_by_pid.get(spid)
                 discharged_type = pat.get("dischargedType", "")
-                expected_deaths += score["cal_dead"]
-                if discharged_type in death_types:
-                    actual_deaths += 1
+                discharge_time = pat.get("icuDischargeTime")
+                is_death = (
+                    discharged_type in death_types
+                    and isinstance(discharge_time, dt)
+                    and start_dt <= discharge_time < end_exclusive
+                )
+                if score is None and not is_death:
+                    continue
 
                 item = {
                     "pid": spid,
@@ -5063,20 +5070,15 @@ def get_icu11_data(dept_codes: list, start_date: str, end_date: str) -> dict:
                     "icu_admit": pat.get("icuAdmissionTime"),
                     "icu_discharge": pat.get("icuDischargeTime") or pat.get("dischargeTime"),
                     "dischargedType": discharged_type,
-                    "apache_time": score["time"],
-                    "apache_total": score.get("total"),
-                    "apache_calDead": score["cal_dead"],
+                    "apache_time": score["time"] if score else None,
+                    "apache_total": score.get("total") if score else None,
+                    "apache_calDead": score["cal_dead"] if score else None,
                 }
-                den_patients.append(item)
-                if discharged_type in death_types:
-                    num_patients.append(item)
-
-            result["den_count"] = round(expected_deaths, 4)
-            result["num_count"] = actual_deaths
-            result["value"] = round(actual_deaths / expected_deaths, 2) if expected_deaths > 0 else 0.0
-            result["den_patients"] = den_patients
-            result["num_patients"] = num_patients
-            break
+                if score is not None:
+                    expected_deaths += score["cal_dead"]
+                    result["den_patients"].append(item)
+                if is_death:
+                    result["num_patients"].append(item)
 
         except Exception as e:
             print(f"[ICU-11] Error in db {db_name}: {e}")
@@ -5084,6 +5086,10 @@ def get_icu11_data(dept_codes: list, start_date: str, end_date: str) -> dict:
             traceback.print_exc()
             continue
 
+    result["den_count"] = round(expected_deaths, 4)
+    result["num_count"] = len(result["num_patients"])
+    if result["den_count"] > 0:
+        result["value"] = round(result["num_count"] / result["den_count"], 2)
     return result
 
 
